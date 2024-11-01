@@ -1,0 +1,10 @@
+# Ignore macOS system files
+.DS_Store
+
+# Ignore backup files (ending with ~)
+*~
+
+__pycache__/*
+
+# Optional: Ignore node_modules, if relevant to the project
+node_modules/
