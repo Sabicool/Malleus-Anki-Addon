@@ -1,3 +1,52 @@
 #+TITLE: Malleus Anki Addon
 
-This anki addon allows for users to easily find the cards in the malleus deck as well as easily create new cards.
+An Anki extension that integrates with the Malleus notion database to seamlessly manage Malleus clinical medicine cards. The extension allows you to search the Malleus Notion database, find existing cards with matching tags, and create new cards with proper tagging.
+
+* TODO Showcase
+
+* TODO Features
+
+* Usage
+** Finding Existing Cards
+
+1. Click the "Malleus" button in the browser toolbar or editor
+2. Select your database (Subjects or Pharmacology)
+3. Enter a search term
+4. Select the subtag you want to search for (leave as Tag to ignore subtag)
+5. Choose the relevant pages from the search results
+6. Click "Find Cards" to search for existing cards with matching tags
+
+** Creating New Cards
+1. Follow steps 1-5 above
+2. Click "Create Cards" to open the Add Cards window
+3. The cards will be pre-filled with the appropriate tags
+
+* Installation
+Am yet to put this on the ankiweb addons page.
+
+** Manual Installation
+1. Download the extension files
+2. Place them in your Anki addons folder:
+
+#+begin_quote
+Windows: %APPDATA%\Anki2\addons21\
+Mac: ~/Library/Application Support/Anki2/addons21/
+Linux: ~/.local/share/Anki2/addons21/
+#+end_quote
+
+* Directions for the Future
+- [ ] Add button in editor page
+- [ ] Publish to Ankiweb addons
+- [ ] Add configuration for:
+  - [ ] Keybindings
+  - [ ] Default deck location
+
+* TODO Troubleshooting
+This extension requires access to the internet to use the notion API. Please ensure you are using it while connected to the internet.
+
+* Licence
+This project is licensed under the GNU Affero General Public License v3.0 (AGPL-3.0).
+
+This license grants you the freedom to use, modify, and distribute this software, provided that any derivative work or distribution is also licensed under the AGPL-3.0. Additionally, if you deploy this software on a network, users interacting with it over that network must also be granted access to the source code.
+
+For more details, please refer to the full license text in the [[./LICENSE][LICENSE]] file or visit [[https://www.gnu.org/licenses/agpl-3.0.en.html][GNU AGPL-3.0 License]].
