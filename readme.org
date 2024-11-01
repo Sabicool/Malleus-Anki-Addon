@@ -28,11 +28,11 @@ Am yet to put this on the ankiweb addons page.
 1. Download the extension files
 2. Place them in your Anki addons folder:
 
-#+begin_quote
+#+begin_src 
 Windows: %APPDATA%\Anki2\addons21\
 Mac: ~/Library/Application Support/Anki2/addons21/
 Linux: ~/.local/share/Anki2/addons21/
-#+end_quote
+#+end_src
 
 * Directions for the Future
 - [ ] Add button in editor page
