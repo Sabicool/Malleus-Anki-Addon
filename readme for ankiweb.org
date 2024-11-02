@@ -1,10 +1,6 @@
-#+TITLE: Malleus Anki Addon
+Please read more about the project at the [[https://malleuscm.notion.site][Malleus medicine website]], a collaborative Anki project for Australian Medical School Students
 
 An Anki extension that integrates with the Malleus notion database to seamlessly manage Malleus clinical medicine cards. The extension allows you to search the Malleus Notion database, find existing cards with matching tags, and create new cards with proper tagging.
-
-* TODO Showcase
-
-* TODO Features
 
 * Usage
 ** Finding Existing Cards
@@ -21,38 +17,22 @@ An Anki extension that integrates with the Malleus notion database to seamlessly
 2. Click "Create Cards" to open the Add Cards window
 3. The cards will be pre-filled with the appropriate tags
 
-* Installation
-** Through ankiweb
-To download this add-on, please copy and paste the following code into Anki 2.1:
-
-#+begin_src 
-620451841
-#+end_src
-
-** Manual Installation
-1. Download the extension files
-2. Place them in your Anki addons folder:
-
-#+begin_src 
-Windows: %APPDATA%\Anki2\addons21\
-Mac: ~/Library/Application Support/Anki2/addons21/
-Linux: ~/.local/share/Anki2/addons21/
-#+end_src
-
 * Directions for the Future
 - [ ] Add button in editor page
-- [X] Publish to Ankiweb addons
+- [ ] Publish to Ankiweb addons
 - [ ] Add configuration for:
   - [ ] Keybindings
   - [ ] Default deck location
 - [ ] Add eTG create cards function
 
-* TODO Troubleshooting
+* Troubleshooting
 This extension requires access to the internet to use the notion API. Please ensure you are using it while connected to the internet.
+
+This extension is relatively new, if you do encounter any issues please create a new issue on the [[https://github.com/Sabicool/Malleus-Anki-Addon][github page]].
 
 * Licence
 This project is licensed under the GNU Affero General Public License v3.0 (AGPL-3.0).
 
 This license grants you the freedom to use, modify, and distribute this software, provided that any derivative work or distribution is also licensed under the AGPL-3.0. Additionally, if you deploy this software on a network, users interacting with it over that network must also be granted access to the source code.
 
-For more details, please refer to the full license text in the [[./LICENSE][LICENSE]] file or visit [[https://www.gnu.org/licenses/agpl-3.0.en.html][GNU AGPL-3.0 License]].
+For more details, please refer to the full license text in the [[https://github.com/Sabicool/Malleus-Anki-Addon/blob/main/LICENSE][LICENSE]] file or visit [[https://www.gnu.org/licenses/agpl-3.0.en.html][GNU AGPL-3.0 License]].
