@@ -10,6 +10,7 @@ from aqt.addcards import AddCards
 from anki.hooks import addHook
 import anki.notes
 from typing import List, Dict
+import json
 
 # Load environment variables
 addon_dir = os.path.dirname(os.path.realpath(__file__))
@@ -32,6 +33,47 @@ def open_browser_with_search(search_query):
         else:
             browser.onSearchActivated()
     return
+
+class ConfigManager:
+    """
+    Handles configuration management for the Anki addon
+    """
+    DEFAULT_CONFIG = {
+        "deck_name": "Malleus Medicine"
+    }
+
+    def __init__(self):
+        # Get the addon directory path
+        addon_dir = os.path.dirname(os.path.abspath(__file__))
+        self.config_path = os.path.join(addon_dir, "config.json")
+        self.config = self.load_config()
+
+    def load_config(self):
+        """Load configuration from file or create default if not exists"""
+        try:
+            if os.path.exists(self.config_path):
+                with open(self.config_path, 'r', encoding='utf-8') as f:
+                    config = json.load(f)
+                    # Merge with defaults to ensure all required fields exist
+                    return {**self.DEFAULT_CONFIG, **config}
+            else:
+                self.save_config(self.DEFAULT_CONFIG)
+                return self.DEFAULT_CONFIG
+        except Exception as e:
+            print(f"Error loading config: {e}")
+            return self.DEFAULT_CONFIG
+
+    def save_config(self, config):
+        """Save configuration to file"""
+        try:
+            with open(self.config_path, 'w', encoding='utf-8') as f:
+                json.dump(config, f, indent=4)
+        except Exception as e:
+            print(f"Error saving config: {e}")
+
+    def get_deck_name(self):
+        """Get configured deck name"""
+        return self.config.get("deck_name", self.DEFAULT_CONFIG["deck_name"])
 
 class NotionPageSelector(QDialog):
     def __init__(self, parent=None):
@@ -263,6 +305,7 @@ class NotionPageSelector(QDialog):
         return ""
 
     def create_cards(self):
+        config_manager=ConfigManager()
         selected_pages = []
         for i in range(self.checkbox_layout.count()):
             checkbox = self.checkbox_layout.itemAt(i).widget()
@@ -286,7 +329,7 @@ class NotionPageSelector(QDialog):
 
         # Create note data
         note = {
-            'deckName': 'Default',  # Make this configurable
+            'deckName': config_manager.get_deck_name(),  # Make this configurable
             'modelName': 'MalleusCM - Cloze (Malleus Clinical Medicine / Stapedius)',  # Make this configurable
             # Can consider adding something like this, or have the source field populate
             # 'fields': {
