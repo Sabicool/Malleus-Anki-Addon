@@ -269,10 +269,6 @@ class NotionPageSelector(QDialog):
             if checkbox.isChecked():
                 selected_pages.append(self.pages_data[i])
 
-        if not selected_pages:
-            showInfo("Please select at least one page")
-            return
-
         property_name = self.property_selector.currentText()
 
         # Get tags from pages
@@ -283,6 +279,10 @@ class NotionPageSelector(QDialog):
                 formula_value = tag_prop['formula']
                 if formula_value['type'] == 'string':
                     tags.extend(formula_value['string'].split())
+
+        if not selected_pages:
+            tags = ["#Malleus_CM::#TO_BE_TAGGED"]
+            # return
 
         # Create note data
         note = {
