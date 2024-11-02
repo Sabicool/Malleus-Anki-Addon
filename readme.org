@@ -23,7 +23,7 @@ An Anki extension that integrates with the Malleus notion database to seamlessly
 
 * Installation
 ** Through ankiweb
-To download this add-on, please copy and paste the following code into Anki 2.1:
+Now on ankiweb: https://ankiweb.net/shared/info/620451841. To download this add-on, please copy and paste the following code into Anki 2.1:
 
 #+begin_src 
 620451841
