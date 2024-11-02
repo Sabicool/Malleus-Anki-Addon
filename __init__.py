@@ -39,7 +39,7 @@ class ConfigManager:
     Handles configuration management for the Anki addon
     """
     DEFAULT_CONFIG = {
-        "deck_name": "Malleus Medicine"
+        "deck_name": "Malleus Clinical Medicine (AU/NZ)"
     }
 
     def __init__(self):
@@ -434,7 +434,7 @@ def setup_browser_menu(browser):
     
     # Add action for showing page selector
     page_selector_action = QAction(browser)
-    page_selector_action.setText("Select Notion Pages")
+    page_selector_action.setText("Find/Create Malleus Cards")
     notion_menu.addAction(page_selector_action)
     page_selector_action.triggered.connect(lambda _, b=browser: show_page_selector(b))
     
@@ -445,7 +445,7 @@ def setup_browser_menu(browser):
         if toolbar:
             page_selector_button = QAction(browser)
             page_selector_button.setText("Malleus")
-            page_selector_button.setToolTip("Find & Create Malleus Cards")
+            page_selector_button.setToolTip("Find/Create Malleus Cards")
             page_selector_button.triggered.connect(lambda _, b=browser: show_page_selector(b))
             toolbar.addAction(page_selector_button)
     except:
