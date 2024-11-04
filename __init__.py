@@ -74,7 +74,7 @@ class ConfigManager:
     def get_deck_name(self):
         """Get configured deck name"""
         return self.config.get("deck_name", self.DEFAULT_CONFIG["deck_name"])
-
+    
 class NotionPageSelector(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -306,6 +306,7 @@ class NotionPageSelector(QDialog):
 
     def create_cards(self):
         config_manager=ConfigManager()
+        config = mw.addonManager.getConfig(__name__)
         selected_pages = []
         for i in range(self.checkbox_layout.count()):
             checkbox = self.checkbox_layout.itemAt(i).widget()
@@ -329,7 +330,7 @@ class NotionPageSelector(QDialog):
 
         # Create note data
         note = {
-            'deckName': config_manager.get_deck_name(),  # Make this configurable
+            'deckName': config['deck_name'],  # Make this configurable
             'modelName': 'MalleusCM - Cloze (Malleus Clinical Medicine / Stapedius)',  # Make this configurable
             # Can consider adding something like this, or have the source field populate
             # 'fields': {
