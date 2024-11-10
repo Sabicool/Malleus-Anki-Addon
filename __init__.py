@@ -217,9 +217,11 @@ class NotionPageSelector(QDialog):
                         }
                     },
                     {
-                        "property": "Name",
-                        "title": {
-                            "contains": filter_text
+                        "property": "Search Term",
+                        "formula": {
+                            "string":{
+                                "contains": filter_text
+                            }
                         }
                     }
                 ]
