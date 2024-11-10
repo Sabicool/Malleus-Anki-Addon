@@ -248,8 +248,15 @@ class NotionPageSelector(QDialog):
 
         # Create checkboxes for results
         for page in self.pages_data:
+            # Get the title
             title = page['properties']['Name']['title'][0]['text']['content'] if page['properties']['Name']['title'] else "Untitled"
-            checkbox = QCheckBox(title)
+            search_suffix = page['properties']['Search Suffix']['formula']['string'] if page['properties'].get('Search Suffix', {}).get('formula', {}).get('string') else ""
+
+            # Create the final display text
+            display_text = f"{title} {search_suffix}"
+
+            # Create checkbox with the combined text
+            checkbox = QCheckBox(display_text)
             self.checkbox_layout.addWidget(checkbox)
 
     def select_all_pages(self):
