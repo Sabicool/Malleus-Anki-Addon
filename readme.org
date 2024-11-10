@@ -39,6 +39,9 @@ Mac: ~/Library/Application Support/Anki2/addons21/
 Linux: ~/.local/share/Anki2/addons21/
 #+end_src
 
+* Configuration
+If you have renamed or moved the Malleus deck it is worthwhile to change =deck_name= in the add on configuration manager to the correct name. This way the create card button will open to the correct deck.
+
 * Directions for the Future
 - [ ] Add button in editor page
 - [X] Publish to Ankiweb addons
