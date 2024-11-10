@@ -207,13 +207,24 @@ class NotionPageSelector(QDialog):
 
         filter_payload = {
             "filter": {
-                "property": "Name",
-                "title": {
-                    "contains": filter_text
-                }
+                "and": [
+                    {
+                        "property": "For Search",
+                        "formula": {
+                            "checkbox":{
+                                "equals": True
+                            }
+                        }
+                    },
+                    {
+                        "property": "Name",
+                        "title": {
+                            "contains": filter_text
+                        }
+                    }
+                ]
             }
         }
-
         try:
             response = requests.post(database_url, headers=headers, json=filter_payload)
             response.raise_for_status()
