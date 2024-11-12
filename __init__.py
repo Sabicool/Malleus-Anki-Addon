@@ -486,10 +486,10 @@ class NotionPageSelector(QDialog):
         for page in self.pages_data:
             try:
                 title = page['properties']['Name']['title'][0]['text']['content'] if page['properties']['Name']['title'] else "Untitled"
-                # search_suffix = page['properties']['Search Suffix']['formula']['string'] if page['properties'].get('Search Suffix', {}).get('formula', {}).get('string') else ""
+                search_suffix = page['properties']['Search Suffix']['formula']['string'] if page['properties'].get('Search Suffix', {}).get('formula', {}).get('string') else ""
                 # print(f"Adding result: {title} {search_suffix}")
 
-                display_text = f"{title}"
+                display_text = f"{title} {search_suffix}"
                 checkbox = QCheckBox(display_text)
                 self.checkbox_layout.addWidget(checkbox)
             except Exception as e:

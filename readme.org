@@ -45,6 +45,7 @@ If you have renamed or moved the Malleus deck it is worthwhile to change =deck_n
 * Directions for the Future
 - [ ] Add button in editor page
 - [X] Publish to Ankiweb addons
+- [-] Keep local cache and update only newly updated
 - [ ] Add configuration for:
   - [ ] Keybindings
   - [ ] Default deck location
