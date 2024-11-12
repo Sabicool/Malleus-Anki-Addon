@@ -27,51 +27,53 @@ NOTION_TOKEN = os.getenv('NOTION_TOKEN')
 SUBJECT_DATABASE_ID = os.getenv('DATABASE_ID')  
 PHARMACOLOGY_DATABASE_ID = os.getenv('PHARMACOLOGY_DATABASE_ID') 
 
-class ConfigManager:
-    """
-    Handles configuration management for the Anki addon
-    """
-    DEFAULT_CONFIG = {
-        "deck_name": "Malleus Clinical Medicine (AU/NZ)",
-        "cache_expiry": 1
-    }
+config = mw.addonManager.getConfig(__name__)
 
-    def __init__(self):
-        # Get the addon directory path
-        addon_dir = os.path.dirname(os.path.abspath(__file__))
-        self.config_path = os.path.join(addon_dir, "config.json")
-        self.config = self.load_config()
-
-    def load_config(self):
-        """Load configuration from file or create default if not exists"""
-        try:
-            if os.path.exists(self.config_path):
-                with open(self.config_path, 'r', encoding='utf-8') as f:
-                    config = json.load(f)
-                    # Merge with defaults to ensure all required fields exist
-                    return {**self.DEFAULT_CONFIG, **config}
-            else:
-                self.save_config(self.DEFAULT_CONFIG)
-                return self.DEFAULT_CONFIG
-        except Exception as e:
-            showInfo(f"Error loading config: {e}")
-            return self.DEFAULT_CONFIG
-
-    def save_config(self, config):
-        """Save configuration to file"""
-        try:
-            with open(self.config_path, 'w', encoding='utf-8') as f:
-                json.dump(config, f, indent=4)
-        except Exception as e:
-            showInfo(f"Error saving config: {e}")
-
-    def get_cache_expiry(self):
-        """Get configured cache expiry"""
-        return self.config.get("cache_expiry", self.DEFAULT_CONFIG["cache_expiry"]) * 24 * 60 * 60
-
-    def get_deck_name(self):
-        """Get configured deck name"""
-        return self.config.get("deck_name", self.DEFAULT_CONFIG["deck_name"])
+# class ConfigManager:
+#     """
+#     Handles configuration management for the Anki addon
+#     """
+#     DEFAULT_CONFIG = {
+#         "deck_name": "Malleus Clinical Medicine (AU/NZ)",
+#         "cache_expiry": 1
+#     }
+#
+#     def __init__(self):
+#         # Get the addon directory path
+#         addon_dir = os.path.dirname(os.path.abspath(__file__))
+#         self.config_path = os.path.join(addon_dir, "config.json")
+#         self.config = self.load_config()
+#
+#     def load_config(self):
+#         """Load configuration from file or create default if not exists"""
+#         try:
+#             if os.path.exists(self.config_path):
+#                 with open(self.config_path, 'r', encoding='utf-8') as f:
+#                     config = json.load(f)
+#                     # Merge with defaults to ensure all required fields exist
+#                     return {**self.DEFAULT_CONFIG, **config}
+#             else:
+#                 self.save_config(self.DEFAULT_CONFIG)
+#                 return self.DEFAULT_CONFIG
+#         except Exception as e:
+#             showInfo(f"Error loading config: {e}")
+#             return self.DEFAULT_CONFIG
+#
+#     def save_config(self, config):
+#         """Save configuration to file"""
+#         try:
+#             with open(self.config_path, 'w', encoding='utf-8') as f:
+#                 json.dump(config, f, indent=4)
+#         except Exception as e:
+#             showInfo(f"Error saving config: {e}")
+#
+#     def get_cache_expiry(self):
+#         """Get configured cache expiry"""
+#         return self.config.get("cache_expiry", self.DEFAULT_CONFIG["cache_expiry"]) * 24 * 60 * 60
+#
+#     def get_deck_name(self):
+#         """Get configured deck name"""
+#         return self.config.get("deck_name", self.DEFAULT_CONFIG["deck_name"])
 
 
 class NotionSyncProgress(QDialog):
@@ -109,8 +111,8 @@ class NotionCache:
             "Notion-Version": "2022-06-28",
             "Content-Type": "application/json"
         }
-        self.config_manager = ConfigManager()
-        self.CACHE_EXPIRY = self.config_manager.get_cache_expiry()
+        #self.config_manager = ConfigManager()
+        self.CACHE_EXPIRY = config['cache_expiry'] * 24 * 60 * 60
 
     def confirm_sync(self) -> bool:
         """Ask user for confirmation before syncing"""
@@ -738,4 +740,4 @@ def init_notion_cache():
         showInfo(f"Error initializing cache: {e}")
 
 # Add to addon initialization
-mw.addonManager.setConfigAction(__name__, init_notion_cache)
+# mw.addonManager.setConfigAction(__name__, init_notion_cache)
