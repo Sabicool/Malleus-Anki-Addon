@@ -1,6 +1,6 @@
 from aqt import mw
 from aqt.qt import *
-from aqt.utils import showInfo
+from aqt.utils import showInfo, tooltip
 import os
 import requests
 from dotenv import load_dotenv
@@ -9,8 +9,11 @@ from aqt.browser import Browser
 from aqt.addcards import AddCards
 from anki.hooks import addHook
 import anki.notes
-from typing import List, Dict
+from typing import List, Dict, Optional
 import json
+import time
+from pathlib import Path
+import threading
 
 # Load environment variables
 addon_dir = os.path.dirname(os.path.realpath(__file__))
@@ -20,6 +23,132 @@ load_dotenv(env_path)
 NOTION_TOKEN = os.getenv('NOTION_TOKEN')
 SUBJECT_DATABASE_ID = os.getenv('DATABASE_ID')  
 PHARMACOLOGY_DATABASE_ID = os.getenv('PHARMACOLOGY_DATABASE_ID') 
+
+class NotionCache:
+    """Handles caching of Notion database content"""
+    CACHE_VERSION = 1
+    CACHE_EXPIRY = 24 * 60 * 60  # 24 hours in seconds
+
+    def __init__(self, addon_dir: str):
+        self.cache_dir = Path(addon_dir) / "cache"
+        self.cache_dir.mkdir(exist_ok=True)
+        self.cache_lock = threading.Lock()
+        self.headers = {
+            "Authorization": f"Bearer {NOTION_TOKEN}",
+            "Notion-Version": "2022-06-28",
+            "Content-Type": "application/json"
+        }
+
+    def get_cache_path(self, database_id: str) -> Path:
+        """Get the path for a specific database's cache file"""
+        return self.cache_dir / f"{database_id}.json"
+
+    def save_to_cache(self, database_id: str, pages: List[Dict]):
+        """Save pages to cache file"""
+        cache_path = self.get_cache_path(database_id)
+        cache_data = {
+            'version': self.CACHE_VERSION,
+            'timestamp': time.time(),
+            'pages': pages
+        }
+
+        with self.cache_lock:
+            with cache_path.open('w', encoding='utf-8') as f:
+                json.dump(cache_data, f)
+
+    def load_from_cache(self, database_id: str) -> Optional[Dict]:
+        """Load cached data if it exists and is not expired"""
+        cache_path = self.get_cache_path(database_id)
+        if not cache_path.exists():
+            return None
+
+        try:
+            with cache_path.open('r', encoding='utf-8') as f:
+                cache_data = json.load(f)
+
+            # Check cache version and expiry
+            if (cache_data.get('version') != self.CACHE_VERSION or
+                time.time() - cache_data.get('timestamp', 0) > self.CACHE_EXPIRY):
+                return None
+
+            return cache_data.get('pages', [])
+        except Exception as e:
+            showInfo(f"Error loading cache: {e}")
+            return None
+
+    def fetch_all_pages(self, database_id: str) -> List[Dict]:
+        """Fetch all pages from a Notion database"""
+        pages = []
+        has_more = True
+        start_cursor = None
+
+        while has_more:
+            payload = {
+                "filter": {
+                    "property": "For Search",
+                    "formula": {
+                        "checkbox": {
+                            "equals": True
+                        }
+                    }
+                },
+                "page_size": 100
+            }
+
+            if start_cursor:
+                payload["start_cursor"] = start_cursor
+
+            try:
+                response = requests.post(
+                    f"https://api.notion.com/v1/databases/{database_id}/query",
+                    headers=self.headers,
+                    json=payload
+                )
+                response.raise_for_status()
+                data = response.json()
+
+                pages.extend(data['results'])
+                has_more = data.get('has_more', False)
+                start_cursor = data.get('next_cursor')
+
+            except Exception as e:
+                showInfo(f"Error fetching from Notion: {e}")
+                break
+
+        return pages
+
+    def update_cache_async(self, database_id: str):
+        """Update cache in a background thread"""
+        def update():
+            pages = self.fetch_all_pages(database_id)
+            if pages:
+                self.save_to_cache(database_id, pages)
+
+        thread = threading.Thread(target=update)
+        thread.start()
+
+    def filter_pages(self, pages: List[Dict], search_term: str) -> List[Dict]:
+        """Filter pages based on search term"""
+        search_term = search_term.lower()
+        filtered_pages = []
+
+        for page in pages:
+            # Check if page has properties
+            if not page.get('properties'):
+                continue
+
+            # Get the search term from the page
+            search_term_prop = page['properties'].get('Search Term', {})
+            if not search_term_prop or search_term_prop.get('type') != 'formula':
+                continue
+
+            page_search_term = search_term_prop.get('formula', {}).get('string', '').lower()
+
+            # Check if the search term matches
+            if search_term in page_search_term or page_search_term in search_term:
+                filtered_pages.append(page)
+
+        return filtered_pages
 
 def open_browser_with_search(search_query):
     """Open the browser with a search query"""
@@ -60,7 +189,7 @@ class ConfigManager:
                 self.save_config(self.DEFAULT_CONFIG)
                 return self.DEFAULT_CONFIG
         except Exception as e:
-            print(f"Error loading config: {e}")
+            showInfo(f"Error loading config: {e}")
             return self.DEFAULT_CONFIG
 
     def save_config(self, config):
@@ -69,7 +198,7 @@ class ConfigManager:
             with open(self.config_path, 'w', encoding='utf-8') as f:
                 json.dump(config, f, indent=4)
         except Exception as e:
-            print(f"Error saving config: {e}")
+            showInfo(f"Error saving config: {e}")
 
     def get_deck_name(self):
         """Get configured deck name"""
@@ -78,6 +207,12 @@ class ConfigManager:
 class NotionPageSelector(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
+        self.notion_cache = NotionCache(addon_dir)
+        # Initialize cache on startup
+        if SUBJECT_DATABASE_ID:
+            self.notion_cache.update_cache_async(SUBJECT_DATABASE_ID)
+        if PHARMACOLOGY_DATABASE_ID:
+            self.notion_cache.update_cache_async(PHARMACOLOGY_DATABASE_ID)
         self.database_properties = {
             "Subjects": [
                 "Tag",
@@ -192,47 +327,30 @@ class NotionPageSelector(QDialog):
             return PHARMACOLOGY_DATABASE_ID
 
     def query_notion_pages(self, filter_text: str, database_id: str) -> List[Dict]:
-        """Query Notion database and return page titles and properties"""
-        if not NOTION_TOKEN or not database_id:
-            showInfo("Environment variables not loaded correctly")
-            return []
-
-        database_url = f"https://api.notion.com/v1/databases/{database_id}/query"
-
-        headers = {
-            "Authorization": f"Bearer {NOTION_TOKEN}",
-            "Notion-Version": "2022-06-28",
-            "Content-Type": "application/json"
-        }
-
-        filter_payload = {
-            "filter": {
-                "and": [
-                    {
-                        "property": "For Search",
-                        "formula": {
-                            "checkbox":{
-                                "equals": True
-                            }
-                        }
-                    },
-                    {
-                        "property": "Search Term",
-                        "formula": {
-                            "string":{
-                                "contains": filter_text
-                            }
-                        }
-                    }
-                ]
-            }
-        }
+        """Query pages from cache and filter them"""
         try:
-            response = requests.post(database_url, headers=headers, json=filter_payload)
-            response.raise_for_status()
-            return response.json()['results']
+            # Try to get from cache first
+            all_pages = self.notion_cache.load_from_cache(database_id)
+
+            # If cache is empty or failed, try direct fetch
+            if not all_pages:
+                tooltip("Cache empty, fetching from notion...")
+                all_pages = self.notion_cache.fetch_all_pages(database_id)
+                if all_pages:
+                    self.notion_cache.save_to_cache(database_id, all_pages)
+
+            # Debug output
+            # print(f"Total pages loaded: {len(all_pages)}")
+
+            # Filter the pages
+            filtered_pages = self.notion_cache.filter_pages(all_pages, filter_text)
+            # print(f"Filtered pages found: {len(filtered_pages)}")
+
+            return filtered_pages
+
         except Exception as e:
-            showInfo(f"Error accessing Notion: {str(e)}")
+            # showInfo(f"Error in query_notion_pages: {str(e)}")
+            showInfo(f"Error accessing data: {str(e)}")
             return []
 
     def perform_search(self):
@@ -241,25 +359,30 @@ class NotionPageSelector(QDialog):
             showInfo("Please enter a search term")
             return
 
+        # print(f"Performing search with term: {search_term}")
+
         # Clear existing checkboxes
         for i in reversed(range(self.checkbox_layout.count())):
             self.checkbox_layout.itemAt(i).widget().setParent(None)
 
         database_id = self.get_selected_database_id()
+        # print(f"Using database ID: {database_id}")
+
         self.pages_data = self.query_notion_pages(search_term, database_id)
+        # print(f"Found {len(self.pages_data)} matching pages")
 
         # Create checkboxes for results
         for page in self.pages_data:
-            # Get the title
-            title = page['properties']['Name']['title'][0]['text']['content'] if page['properties']['Name']['title'] else "Untitled"
-            search_suffix = page['properties']['Search Suffix']['formula']['string'] if page['properties'].get('Search Suffix', {}).get('formula', {}).get('string') else ""
+            try:
+                title = page['properties']['Name']['title'][0]['text']['content'] if page['properties']['Name']['title'] else "Untitled"
+                search_suffix = page['properties']['Search Suffix']['formula']['string'] if page['properties'].get('Search Suffix', {}).get('formula', {}).get('string') else ""
+                # print(f"Adding result: {title} {search_suffix}")
 
-            # Create the final display text
-            display_text = f"{title} {search_suffix}"
-
-            # Create checkbox with the combined text
-            checkbox = QCheckBox(display_text)
-            self.checkbox_layout.addWidget(checkbox)
+                display_text = f"{title} {search_suffix}"
+                checkbox = QCheckBox(display_text)
+                self.checkbox_layout.addWidget(checkbox)
+            except Exception as e:
+                showInfo(f"Error processing page: {e}")
 
     def select_all_pages(self):
         for i in range(self.checkbox_layout.count()):
@@ -475,3 +598,19 @@ def setup_browser_menu(browser):
 # Add hook for browser setup
 from aqt.gui_hooks import browser_menus_did_init
 browser_menus_did_init.append(setup_browser_menu)
+
+# Initialize cache on addon load
+def init_notion_cache():
+    """Initialize the cache on startup"""
+    try:
+        cache = NotionCache(addon_dir)
+        if SUBJECT_DATABASE_ID:
+            cache.update_cache_async(SUBJECT_DATABASE_ID)
+        if PHARMACOLOGY_DATABASE_ID:
+            cache.update_cache_async(PHARMACOLOGY_DATABASE_ID)
+        showInfo("Cache initialization started")
+    except Exception as e:
+        showInfo(f"Error initializing cache: {e}")
+
+# Add to addon initialization
+mw.addonManager.setConfigAction(__name__, init_notion_cache)

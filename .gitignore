@@ -7,6 +7,7 @@
 __pycache__/*
 meta.json
 readme for ankiweb.md
+cache/*
 
 # Optional: Ignore node_modules, if relevant to the project
 node_modules/
