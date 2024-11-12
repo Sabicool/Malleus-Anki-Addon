@@ -24,6 +24,24 @@ NOTION_TOKEN = os.getenv('NOTION_TOKEN')
 SUBJECT_DATABASE_ID = os.getenv('DATABASE_ID')  
 PHARMACOLOGY_DATABASE_ID = os.getenv('PHARMACOLOGY_DATABASE_ID') 
 
+class NotionSyncProgress(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Syncing Notion Database")
+        self.setWindowModality(Qt.WindowModal)
+        self.setup_ui()
+
+    def setup_ui(self):
+        layout = QVBoxLayout()
+        self.status_label = QLabel("Downloading database contents...")
+        self.progress_label = QLabel("This may take a few minutes")
+
+        layout.addWidget(self.status_label)
+        layout.addWidget(self.progress_label)
+
+        self.setLayout(layout)
+        self.resize(300, 100)
+
 class NotionCache:
     """Handles caching of Notion database content"""
     CACHE_VERSION = 1
@@ -33,11 +51,25 @@ class NotionCache:
         self.cache_dir = Path(addon_dir) / "cache"
         self.cache_dir.mkdir(exist_ok=True)
         self.cache_lock = threading.Lock()
+        self.sync_progress = None
+        self.sync_timer = None
+        self._sync_thread = None
         self.headers = {
             "Authorization": f"Bearer {NOTION_TOKEN}",
             "Notion-Version": "2022-06-28",
             "Content-Type": "application/json"
         }
+
+    def confirm_sync(self) -> bool:
+        """Ask user for confirmation before syncing"""
+        # Use QMessageBox directly for confirmation
+        msg = QMessageBox(mw)
+        msg.setWindowTitle("Sync Confirmation")
+        msg.setText("Would you like to sync the Notion database?")
+        msg.setInformativeText("This may take a few minutes.")
+        msg.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+        msg.setDefaultButton(QMessageBox.Yes)
+        return msg.exec_() == QMessageBox.Yes
 
     def get_cache_path(self, database_id: str) -> Path:
         """Get the path for a specific database's cache file"""
@@ -56,7 +88,7 @@ class NotionCache:
             with cache_path.open('w', encoding='utf-8') as f:
                 json.dump(cache_data, f)
 
-    def load_from_cache(self, database_id: str) -> Optional[Dict]:
+    def load_from_cache(self, database_id: str) -> Optional[List[Dict]]:
         """Load cached data if it exists and is not expired"""
         cache_path = self.get_cache_path(database_id)
         if not cache_path.exists():
@@ -73,8 +105,72 @@ class NotionCache:
 
             return cache_data.get('pages', [])
         except Exception as e:
-            showInfo(f"Error loading cache: {e}")
+            mw.taskman.run_on_main(lambda: showInfo(f"Error loading cache: {e}"))
             return None
+
+    def show_sync_progress(self):
+        """Show sync progress dialog"""
+        # Create and show progress dialog in the main thread
+        def create_dialog():
+            self.sync_progress = NotionSyncProgress(mw)
+            self.sync_progress.show()
+
+            # Create timer to check sync status
+            self.sync_timer = QTimer()
+            self.sync_timer.timeout.connect(self.check_sync_status)
+            self.sync_timer.start(500)  # Check every 500ms
+
+        mw.taskman.run_on_main(create_dialog)
+
+    def check_sync_status(self):
+        """Check if sync thread is still running"""
+        if not self._sync_thread or not self._sync_thread.is_alive():
+            if self.sync_progress:
+                self.sync_progress.close()
+            if self.sync_timer:
+                self.sync_timer.stop()
+            self.sync_progress = None
+            self.sync_timer = None
+            mw.taskman.run_on_main(lambda: tooltip("Sync completed"))
+
+    def update_cache_async(self, database_id: str, force: bool = False):
+        """Update cache in background with progress indicator"""
+        # Check if sync is already running
+        if self._sync_thread and self._sync_thread.is_alive():
+            mw.taskman.run_on_main(lambda: tooltip("Sync already in progress"))
+            return
+
+        # Check if cache exists and is not expired
+        cache_path = self.get_cache_path(database_id)
+        if not force and cache_path.exists():
+            try:
+                with cache_path.open('r', encoding='utf-8') as f:
+                    cache_data = json.load(f)
+                if time.time() - cache_data.get('timestamp', 0) <= self.CACHE_EXPIRY:
+                    return  # Cache is still valid
+            except Exception:
+                pass  # If there's any error reading cache, proceed with sync
+
+        # Get user confirmation in the main thread
+        if not force:
+            confirmed = [False]  # Use list to modify in inner function
+            def ask_confirmation():
+                confirmed[0] = self.confirm_sync()
+            mw.taskman.run_on_main(ask_confirmation)
+            if not confirmed[0]:
+                return
+
+        def sync_task():
+            try:
+                pages = self.fetch_all_pages(database_id)
+                if pages:
+                    self.save_to_cache(database_id, pages)
+            except Exception as e:
+                mw.taskman.run_on_main(lambda: showInfo(f"Error during sync: {e}"))
+
+        self._sync_thread = threading.Thread(target=sync_task)
+        self._sync_thread.start()
+        self.show_sync_progress()
 
     def fetch_all_pages(self, database_id: str) -> List[Dict]:
         """Fetch all pages from a Notion database"""
@@ -117,16 +213,6 @@ class NotionCache:
 
         return pages
 
-    def update_cache_async(self, database_id: str):
-        """Update cache in a background thread"""
-        def update():
-            pages = self.fetch_all_pages(database_id)
-            if pages:
-                self.save_to_cache(database_id, pages)
-
-        thread = threading.Thread(target=update)
-        thread.start()
-
     def filter_pages(self, pages: List[Dict], search_term: str) -> List[Dict]:
         """Filter pages based on search term"""
         search_term = search_term.lower()
@@ -145,7 +231,7 @@ class NotionCache:
             page_search_term = search_term_prop.get('formula', {}).get('string', '').lower()
 
             # Check if the search term matches
-            if search_term in page_search_term or page_search_term in search_term:
+            if search_term in page_search_term: #or page_search_term in search_term:
                 filtered_pages.append(page)
 
         return filtered_pages
@@ -208,11 +294,11 @@ class NotionPageSelector(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.notion_cache = NotionCache(addon_dir)
-        # Initialize cache on startup
+        # Initialize cache on startup without forcing
         if SUBJECT_DATABASE_ID:
-            self.notion_cache.update_cache_async(SUBJECT_DATABASE_ID)
+            self.notion_cache.update_cache_async(SUBJECT_DATABASE_ID, force=False)
         if PHARMACOLOGY_DATABASE_ID:
-            self.notion_cache.update_cache_async(PHARMACOLOGY_DATABASE_ID)
+            self.notion_cache.update_cache_async(PHARMACOLOGY_DATABASE_ID, force=False)
         self.database_properties = {
             "Subjects": [
                 "Tag",
@@ -359,14 +445,17 @@ class NotionPageSelector(QDialog):
             showInfo("Please enter a search term")
             return
 
-        # print(f"Performing search with term: {search_term}")
+        database_id = self.get_selected_database_id()
+
+        # Force sync if cache is empty
+        if not self.notion_cache.load_from_cache(database_id):
+            self.notion_cache.update_cache_async(database_id, force=True)
+            tooltip("Cache is being updated. Please try your search again in a moment.")
+            return
 
         # Clear existing checkboxes
         for i in reversed(range(self.checkbox_layout.count())):
             self.checkbox_layout.itemAt(i).widget().setParent(None)
-
-        database_id = self.get_selected_database_id()
-        # print(f"Using database ID: {database_id}")
 
         self.pages_data = self.query_notion_pages(search_term, database_id)
         # print(f"Found {len(self.pages_data)} matching pages")
@@ -566,7 +655,7 @@ mw.form.menuTools.addAction(malleus_add_card_action)
 # addHook("setupEditorButtons", setup_editor_buttons)  # noqa
 
 def setup_browser_menu(browser):
-    # Get or create Malleus Search menu
+    # Get or create Malleus menu
     def getMenu(parent, menu_name):
         menubar = parent.form.menubar
         for action in menubar.actions():
@@ -574,14 +663,20 @@ def setup_browser_menu(browser):
                 return action.menu()
         return menubar.addMenu(menu_name)
 
-    notion_menu = getMenu(browser, "&Malleus Search")
-    
+    notion_menu = getMenu(browser, "&Malleus")
+
     # Add action for showing page selector
     page_selector_action = QAction(browser)
     page_selector_action.setText("Find/Create Malleus Cards")
     notion_menu.addAction(page_selector_action)
     page_selector_action.triggered.connect(lambda _, b=browser: show_page_selector(b))
-    
+
+    # Add action for updating Notion cache
+    update_cache_action = QAction(browser)
+    update_cache_action.setText("Update Malleus Database Cache")
+    notion_menu.addAction(update_cache_action)
+    update_cache_action.triggered.connect(lambda _, b=browser: update_notion_cache(b))
+
     # Add to browser toolbar
     try:
         from aqt.qt import QToolBar
@@ -595,20 +690,32 @@ def setup_browser_menu(browser):
     except:
         pass
 
+def update_notion_cache(browser=None):
+    """Update the Notion database cache"""
+    notion_cache = NotionCache(addon_dir)
+    if SUBJECT_DATABASE_ID:
+        notion_cache.update_cache_async(SUBJECT_DATABASE_ID, force=True)
+    if PHARMACOLOGY_DATABASE_ID:
+        notion_cache.update_cache_async(PHARMACOLOGY_DATABASE_ID, force=True)
+
 # Add hook for browser setup
 from aqt.gui_hooks import browser_menus_did_init
 browser_menus_did_init.append(setup_browser_menu)
+
+malleus_add_card_action = QAction("Update Malleus Database Cache", mw)
+malleus_add_card_action.triggered.connect(update_notion_cache)
+mw.form.menuTools.addAction(malleus_add_card_action)
 
 # Initialize cache on addon load
 def init_notion_cache():
     """Initialize the cache on startup"""
     try:
         cache = NotionCache(addon_dir)
+        # Initialize without forcing sync
         if SUBJECT_DATABASE_ID:
-            cache.update_cache_async(SUBJECT_DATABASE_ID)
+            cache.update_cache_async(SUBJECT_DATABASE_ID, force=False)
         if PHARMACOLOGY_DATABASE_ID:
-            cache.update_cache_async(PHARMACOLOGY_DATABASE_ID)
-        showInfo("Cache initialization started")
+            cache.update_cache_async(PHARMACOLOGY_DATABASE_ID, force=False)
     except Exception as e:
         showInfo(f"Error initializing cache: {e}")
 
