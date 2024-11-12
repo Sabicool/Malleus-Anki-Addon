@@ -9,11 +9,14 @@ from aqt.browser import Browser
 from aqt.addcards import AddCards
 from anki.hooks import addHook
 import anki.notes
-from typing import List, Dict, Optional
+from typing import Tuple, List, Dict, Optional
 import json
 import time
 from pathlib import Path
 import threading
+from datetime import datetime
+import asyncio
+from functools import partial
 
 # Load environment variables
 addon_dir = os.path.dirname(os.path.realpath(__file__))
@@ -23,6 +26,53 @@ load_dotenv(env_path)
 NOTION_TOKEN = os.getenv('NOTION_TOKEN')
 SUBJECT_DATABASE_ID = os.getenv('DATABASE_ID')  
 PHARMACOLOGY_DATABASE_ID = os.getenv('PHARMACOLOGY_DATABASE_ID') 
+
+class ConfigManager:
+    """
+    Handles configuration management for the Anki addon
+    """
+    DEFAULT_CONFIG = {
+        "deck_name": "Malleus Clinical Medicine (AU/NZ)",
+        "cache_expiry": 1
+    }
+
+    def __init__(self):
+        # Get the addon directory path
+        addon_dir = os.path.dirname(os.path.abspath(__file__))
+        self.config_path = os.path.join(addon_dir, "config.json")
+        self.config = self.load_config()
+
+    def load_config(self):
+        """Load configuration from file or create default if not exists"""
+        try:
+            if os.path.exists(self.config_path):
+                with open(self.config_path, 'r', encoding='utf-8') as f:
+                    config = json.load(f)
+                    # Merge with defaults to ensure all required fields exist
+                    return {**self.DEFAULT_CONFIG, **config}
+            else:
+                self.save_config(self.DEFAULT_CONFIG)
+                return self.DEFAULT_CONFIG
+        except Exception as e:
+            showInfo(f"Error loading config: {e}")
+            return self.DEFAULT_CONFIG
+
+    def save_config(self, config):
+        """Save configuration to file"""
+        try:
+            with open(self.config_path, 'w', encoding='utf-8') as f:
+                json.dump(config, f, indent=4)
+        except Exception as e:
+            showInfo(f"Error saving config: {e}")
+
+    def get_cache_expiry(self):
+        """Get configured cache expiry"""
+        return self.config.get("cache_expiry", self.DEFAULT_CONFIG["cache_expiry"]) * 24 * 60 * 60
+
+    def get_deck_name(self):
+        """Get configured deck name"""
+        return self.config.get("deck_name", self.DEFAULT_CONFIG["deck_name"])
+
 
 class NotionSyncProgress(QDialog):
     def __init__(self, parent=None):
@@ -45,7 +95,7 @@ class NotionSyncProgress(QDialog):
 class NotionCache:
     """Handles caching of Notion database content"""
     CACHE_VERSION = 1
-    CACHE_EXPIRY = 24 * 60 * 60  # 24 hours in seconds
+    # CACHE_EXPIRY = config['cache_expiry'] * 24 * 60 * 60  # 24 hours in seconds
 
     def __init__(self, addon_dir: str):
         self.cache_dir = Path(addon_dir) / "cache"
@@ -59,6 +109,8 @@ class NotionCache:
             "Notion-Version": "2022-06-28",
             "Content-Type": "application/json"
         }
+        self.config_manager = ConfigManager()
+        self.CACHE_EXPIRY = self.config_manager.get_cache_expiry()
 
     def confirm_sync(self) -> bool:
         """Ask user for confirmation before syncing"""
@@ -75,24 +127,11 @@ class NotionCache:
         """Get the path for a specific database's cache file"""
         return self.cache_dir / f"{database_id}.json"
 
-    def save_to_cache(self, database_id: str, pages: List[Dict]):
-        """Save pages to cache file"""
-        cache_path = self.get_cache_path(database_id)
-        cache_data = {
-            'version': self.CACHE_VERSION,
-            'timestamp': time.time(),
-            'pages': pages
-        }
-
-        with self.cache_lock:
-            with cache_path.open('w', encoding='utf-8') as f:
-                json.dump(cache_data, f)
-
-    def load_from_cache(self, database_id: str) -> Optional[List[Dict]]:
+    def load_from_cache(self, database_id: str) -> Tuple[List[Dict], float]:
         """Load cached data if it exists and is not expired"""
         cache_path = self.get_cache_path(database_id)
         if not cache_path.exists():
-            return None
+            return [], 0.0
 
         try:
             with cache_path.open('r', encoding='utf-8') as f:
@@ -101,12 +140,36 @@ class NotionCache:
             # Check cache version and expiry
             if (cache_data.get('version') != self.CACHE_VERSION or
                 time.time() - cache_data.get('timestamp', 0) > self.CACHE_EXPIRY):
-                return None
+                return [], 0.0
 
-            return cache_data.get('pages', [])
+            return cache_data.get('pages', []), cache_data.get('timestamp', 0.0)
         except Exception as e:
             mw.taskman.run_on_main(lambda: showInfo(f"Error loading cache: {e}"))
-            return None
+            return [], 0.0
+
+    def save_to_cache(self, database_id: str, pages: List[Dict]):
+        """Save pages to cache file"""
+        cache_path = self.get_cache_path(database_id)
+
+        try:
+            with cache_path.open('r', encoding='utf-8') as f:
+                cache_data = json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError):
+            cache_data = {
+                'version': self.CACHE_VERSION,
+                'timestamp': time.time(),
+                'pages': []
+            }
+
+        # Merge the new pages with the existing ones
+        cached_pages = cache_data.get('pages', [])
+        updated_pages = {page['id']: page for page in pages}
+        merged_pages = {**{page['id']: page for page in cached_pages}, **updated_pages}
+        cache_data['pages'] = list(merged_pages.values())
+
+        with self.cache_lock:
+            with cache_path.open('w', encoding='utf-8') as f:
+                json.dump(cache_data, f)
 
     def show_sync_progress(self):
         """Show sync progress dialog"""
@@ -134,59 +197,55 @@ class NotionCache:
             mw.taskman.run_on_main(lambda: tooltip("Sync completed"))
 
     def update_cache_async(self, database_id: str, force: bool = False):
-        """Update cache in background with progress indicator"""
-        # Check if sync is already running
-        if self._sync_thread and self._sync_thread.is_alive():
-            mw.taskman.run_on_main(lambda: tooltip("Sync already in progress"))
-            return
-
         # Check if cache exists and is not expired
-        cache_path = self.get_cache_path(database_id)
-        if not force and cache_path.exists():
-            try:
-                with cache_path.open('r', encoding='utf-8') as f:
-                    cache_data = json.load(f)
-                if time.time() - cache_data.get('timestamp', 0) <= self.CACHE_EXPIRY:
-                    return  # Cache is still valid
-            except Exception:
-                pass  # If there's any error reading cache, proceed with sync
+        cached_pages, last_sync_timestamp = self.load_from_cache(database_id)
+        if not force and cached_pages is not None:
+            if time.time() - last_sync_timestamp <= self.CACHE_EXPIRY:
+                return  # Cache is still valid
 
         # Get user confirmation in the main thread
         if not force:
-            confirmed = [False]  # Use list to modify in inner function
+            confirmed = [False]
             def ask_confirmation():
                 confirmed[0] = self.confirm_sync()
             mw.taskman.run_on_main(ask_confirmation)
             if not confirmed[0]:
                 return
 
-        def sync_task():
-            try:
-                pages = self.fetch_all_pages(database_id)
-                if pages:
-                    self.save_to_cache(database_id, pages)
-            except Exception as e:
-                mw.taskman.run_on_main(lambda: showInfo(f"Error during sync: {e}"))
+        try:
+            pages = self.fetch_updated_pages(database_id, last_sync_timestamp)
+            if pages:
+                self.save_to_cache(database_id, pages)
+        except Exception as e:
+            showInfo(f"Error during sync: {e}")
 
-        self._sync_thread = threading.Thread(target=sync_task)
-        self._sync_thread.start()
-        self.show_sync_progress()
-
-    def fetch_all_pages(self, database_id: str) -> List[Dict]:
-        """Fetch all pages from a Notion database"""
+    def fetch_updated_pages(self, database_id: str, last_sync_timestamp: float) -> List[Dict]:
+        """Fetch all pages from a Notion database that have been updated since the last sync"""
         pages = []
         has_more = True
         start_cursor = None
 
+        last_sync_date = datetime.fromtimestamp(last_sync_timestamp).strftime('%Y-%m-%d')
+
         while has_more:
             payload = {
                 "filter": {
-                    "property": "For Search",
-                    "formula": {
-                        "checkbox": {
-                            "equals": True
+                    "and": [
+                        {
+                            "property": "For Search",
+                            "formula": {
+                                "checkbox": {
+                                    "equals": True
+                                }
+                            }
+                        },
+                        {
+                            "timestamp": "last_edited_time",
+                            "last_edited_time": {
+                                "on_or_after": last_sync_date
+                            }
                         }
-                    }
+                    ]
                 },
                 "page_size": 100
             }
@@ -195,11 +254,15 @@ class NotionCache:
                 payload["start_cursor"] = start_cursor
 
             try:
+                print(f"Fetching pages updated since: {datetime.fromtimestamp(last_sync_timestamp).isoformat()}")
+                print(f"Payload: {payload}")
                 response = requests.post(
                     f"https://api.notion.com/v1/databases/{database_id}/query",
                     headers=self.headers,
                     json=payload
                 )
+                print(f"Response status code: {response.status_code}")
+                print(f"Response data: {response.json()}")
                 response.raise_for_status()
                 data = response.json()
 
@@ -211,6 +274,7 @@ class NotionCache:
                 showInfo(f"Error fetching from Notion: {e}")
                 break
 
+        print(f"Found {len(pages)} updated pages")
         return pages
 
     def filter_pages(self, pages: List[Dict], search_term: str) -> List[Dict]:
@@ -249,47 +313,6 @@ def open_browser_with_search(search_query):
             browser.onSearchActivated()
     return
 
-class ConfigManager:
-    """
-    Handles configuration management for the Anki addon
-    """
-    DEFAULT_CONFIG = {
-        "deck_name": "Malleus Clinical Medicine (AU/NZ)"
-    }
-
-    def __init__(self):
-        # Get the addon directory path
-        addon_dir = os.path.dirname(os.path.abspath(__file__))
-        self.config_path = os.path.join(addon_dir, "config.json")
-        self.config = self.load_config()
-
-    def load_config(self):
-        """Load configuration from file or create default if not exists"""
-        try:
-            if os.path.exists(self.config_path):
-                with open(self.config_path, 'r', encoding='utf-8') as f:
-                    config = json.load(f)
-                    # Merge with defaults to ensure all required fields exist
-                    return {**self.DEFAULT_CONFIG, **config}
-            else:
-                self.save_config(self.DEFAULT_CONFIG)
-                return self.DEFAULT_CONFIG
-        except Exception as e:
-            showInfo(f"Error loading config: {e}")
-            return self.DEFAULT_CONFIG
-
-    def save_config(self, config):
-        """Save configuration to file"""
-        try:
-            with open(self.config_path, 'w', encoding='utf-8') as f:
-                json.dump(config, f, indent=4)
-        except Exception as e:
-            showInfo(f"Error saving config: {e}")
-
-    def get_deck_name(self):
-        """Get configured deck name"""
-        return self.config.get("deck_name", self.DEFAULT_CONFIG["deck_name"])
-    
 class NotionPageSelector(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -392,9 +415,13 @@ class NotionPageSelector(QDialog):
         create_cards_button = QPushButton("Create Cards")
         create_cards_button.clicked.connect(self.create_cards)
 
+        update_database_button = QPushButton("Update database")
+        update_database_button.clicked.connect(update_notion_cache)
+
         button_layout.addWidget(select_all_button)
         button_layout.addWidget(find_cards_button)
         button_layout.addWidget(create_cards_button)
+        button_layout.addWidget(update_database_button)
 
         layout.addLayout(button_layout)
 
@@ -416,26 +443,21 @@ class NotionPageSelector(QDialog):
         """Query pages from cache and filter them"""
         try:
             # Try to get from cache first
-            all_pages = self.notion_cache.load_from_cache(database_id)
-
-            # If cache is empty or failed, try direct fetch
-            if not all_pages:
+            cached_pages, last_sync_timestamp = self.notion_cache.load_from_cache(database_id)
+            if cached_pages:
+                # Filter the cached pages
+                filtered_pages = self.notion_cache.filter_pages(cached_pages, filter_text)
+                return filtered_pages
+            else:
+                # If cache is empty or failed, try direct fetch
                 tooltip("Cache empty, fetching from notion...")
                 all_pages = self.notion_cache.fetch_all_pages(database_id)
                 if all_pages:
                     self.notion_cache.save_to_cache(database_id, all_pages)
-
-            # Debug output
-            # print(f"Total pages loaded: {len(all_pages)}")
-
-            # Filter the pages
-            filtered_pages = self.notion_cache.filter_pages(all_pages, filter_text)
-            # print(f"Filtered pages found: {len(filtered_pages)}")
-
-            return filtered_pages
-
+                    # Filter the fetched pages
+                    filtered_pages = self.notion_cache.filter_pages(all_pages, filter_text)
+                    return filtered_pages
         except Exception as e:
-            # showInfo(f"Error in query_notion_pages: {str(e)}")
             showInfo(f"Error accessing data: {str(e)}")
             return []
 
@@ -464,10 +486,10 @@ class NotionPageSelector(QDialog):
         for page in self.pages_data:
             try:
                 title = page['properties']['Name']['title'][0]['text']['content'] if page['properties']['Name']['title'] else "Untitled"
-                search_suffix = page['properties']['Search Suffix']['formula']['string'] if page['properties'].get('Search Suffix', {}).get('formula', {}).get('string') else ""
+                # search_suffix = page['properties']['Search Suffix']['formula']['string'] if page['properties'].get('Search Suffix', {}).get('formula', {}).get('string') else ""
                 # print(f"Adding result: {title} {search_suffix}")
 
-                display_text = f"{title} {search_suffix}"
+                display_text = f"{title}"
                 checkbox = QCheckBox(display_text)
                 self.checkbox_layout.addWidget(checkbox)
             except Exception as e:
@@ -701,10 +723,6 @@ def update_notion_cache(browser=None):
 # Add hook for browser setup
 from aqt.gui_hooks import browser_menus_did_init
 browser_menus_did_init.append(setup_browser_menu)
-
-malleus_add_card_action = QAction("Update Malleus Database Cache", mw)
-malleus_add_card_action.triggered.connect(update_notion_cache)
-mw.form.menuTools.addAction(malleus_add_card_action)
 
 # Initialize cache on addon load
 def init_notion_cache():
