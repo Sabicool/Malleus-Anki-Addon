@@ -29,53 +29,6 @@ PHARMACOLOGY_DATABASE_ID = os.getenv('PHARMACOLOGY_DATABASE_ID')
 
 config = mw.addonManager.getConfig(__name__)
 
-# class ConfigManager:
-#     """
-#     Handles configuration management for the Anki addon
-#     """
-#     DEFAULT_CONFIG = {
-#         "deck_name": "Malleus Clinical Medicine (AU/NZ)",
-#         "cache_expiry": 1
-#     }
-#
-#     def __init__(self):
-#         # Get the addon directory path
-#         addon_dir = os.path.dirname(os.path.abspath(__file__))
-#         self.config_path = os.path.join(addon_dir, "config.json")
-#         self.config = self.load_config()
-#
-#     def load_config(self):
-#         """Load configuration from file or create default if not exists"""
-#         try:
-#             if os.path.exists(self.config_path):
-#                 with open(self.config_path, 'r', encoding='utf-8') as f:
-#                     config = json.load(f)
-#                     # Merge with defaults to ensure all required fields exist
-#                     return {**self.DEFAULT_CONFIG, **config}
-#             else:
-#                 self.save_config(self.DEFAULT_CONFIG)
-#                 return self.DEFAULT_CONFIG
-#         except Exception as e:
-#             showInfo(f"Error loading config: {e}")
-#             return self.DEFAULT_CONFIG
-#
-#     def save_config(self, config):
-#         """Save configuration to file"""
-#         try:
-#             with open(self.config_path, 'w', encoding='utf-8') as f:
-#                 json.dump(config, f, indent=4)
-#         except Exception as e:
-#             showInfo(f"Error saving config: {e}")
-#
-#     def get_cache_expiry(self):
-#         """Get configured cache expiry"""
-#         return self.config.get("cache_expiry", self.DEFAULT_CONFIG["cache_expiry"]) * 24 * 60 * 60
-#
-#     def get_deck_name(self):
-#         """Get configured deck name"""
-#         return self.config.get("deck_name", self.DEFAULT_CONFIG["deck_name"])
-
-
 class NotionSyncProgress(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -317,6 +270,8 @@ def open_browser_with_search(search_query):
 
 class NotionPageSelector(QDialog):
     def __init__(self, parent=None):
+        if parent is not None and not isinstance(parent, QWidget):
+            parent = mw
         super().__init__(parent)
         self.notion_cache = NotionCache(addon_dir)
         # Initialize cache on startup without forcing
@@ -561,8 +516,8 @@ class NotionPageSelector(QDialog):
         return ""
 
     def create_cards(self):
-        config_manager=ConfigManager()
-        config = mw.addonManager.getConfig(__name__)
+        # config_manager=ConfigManager()
+        # config = mw.addonManager.getConfig(__name__)
         selected_pages = []
         for i in range(self.checkbox_layout.count()):
             checkbox = self.checkbox_layout.itemAt(i).widget()
@@ -604,6 +559,33 @@ class NotionPageSelector(QDialog):
     def guiAddCards(self, note):
         collection = mw.col
 
+        # If we're in the add cards dialog, update the existing note
+        if isinstance(self.parent(), AddCards):
+            addCards = self.parent()
+            current_note = addCards.editor.note
+
+            # Update tags
+            if 'tags' in note:
+                current_tags = current_note.tags
+                current_tags.extend(note['tags'])
+                current_note.tags = list(set(current_tags))  # Remove duplicates
+
+            # Refresh the editor to show the new tags
+            try:
+                # Try new version method first
+                addCards.editor.loadNote()
+            except TypeError:
+                try:
+                    # Try old version method
+                    addCards.editor.loadNote(full=True)
+                except:
+                    # Fallback to basic loadNote if both fail
+                    addCards.editor.loadNote(current_note)
+
+            self.accept()
+            return
+
+        # Otherwise, proceed with creating a new note as before
         deck = collection.decks.by_name(note['deckName'])
         if deck is None:
             raise Exception('deck was not found: {}'.format(note['deckName']))
@@ -632,51 +614,54 @@ class NotionPageSelector(QDialog):
 
         def openNewWindow():
             nonlocal ankiNote
-
             addCards = dialogs.open('AddCards', mw)
-
             if savedMid:
                 deck['mid'] = savedMid
-
             addCards.editor.set_note(ankiNote)
             addCards.activateWindow()
 
-            dialogs.open('AddCards', mw)
-            addCards.setAndFocusNote(addCards.editor.note)
-
         currentWindow = dialogs._dialogs['AddCards'][1]
-
         if currentWindow is not None:
-            current
+            currentWindow.setAndFocusNote(ankiNote)
         else:
             openNewWindow()
 
 def show_page_selector(browser=None):
-    dialog = NotionPageSelector(browser if browser else mw)
+    """Show the page selector dialog with the appropriate parent window"""
+    # Ensure we have a proper QWidget parent
+    if browser is None or not isinstance(browser, QWidget):
+        parent = mw
+    else:
+        parent = browser
+    dialog = NotionPageSelector(parent)
     dialog.exec_()
 
 malleus_add_card_action = QAction("Malleus Find/Add Cards", mw)
 malleus_add_card_action.triggered.connect(show_page_selector)
 mw.form.menuTools.addAction(malleus_add_card_action)
 
-# def setup_editor_buttons(buttons, editor):
-#     b = editor.addButton(
-#         "",
-#         "Add Malleus Tags",
-#         show_page_selector,
-#         tip="Find Malleus tags for an your card"
-#         #os.path.join(addon_path, "icons", "hyperlink.png"),
-#         #"hyperlinkbutton",
-#         #toggle_hyperlink,
-#         #tip="Insert Hyperlink ({})".format(
-#         #    keystr(gc("shortcut_insert_link", ""))),
-#         #keys=gc('shortcut_insert_link')
-#     )
-#     buttons.append(b)
-# 
-#     return buttons
-# 
-# addHook("setupEditorButtons", setup_editor_buttons)  # noqa
+def setup_editor_buttons(buttons, editor):
+    """Add Malleus button to the editor toolbar"""
+    button = editor.addButton(
+        icon=None,  # You can add an icon file path here if you have one
+        cmd="malleus",
+        func=lambda e: show_page_selector(editor.parentWindow),
+        tip="Find/Add Malleus Tags",
+        label="Add Malleus Tags"
+    )
+    buttons.append(button)
+    return buttons
+
+def show_page_selector_from_editor(editor):
+    """Show the page selector dialog from the editor context"""
+    # Get the AddCards window that contains this editor
+    addCards = editor.parentWindow
+    if isinstance(addCards, QWidget):  # Ensure parent is a QWidget
+        dialog = NotionPageSelector(addCards)
+        dialog.exec_()
+
+# Add the hook for editor buttons
+addHook("setupEditorButtons", setup_editor_buttons)
 
 def setup_browser_menu(browser):
     # Get or create Malleus menu
