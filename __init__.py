@@ -67,12 +67,19 @@ class NotionCache:
         #self.config_manager = ConfigManager()
         self.CACHE_EXPIRY = config['cache_expiry'] * 24 * 60 * 60
 
-    def confirm_sync(self) -> bool:
+    def confirm_sync(self, database_id: str) -> bool:
         """Ask user for confirmation before syncing"""
         # Use QMessageBox directly for confirmation
         msg = QMessageBox(mw)
         msg.setWindowTitle("Sync Confirmation")
-        msg.setText("Would you like to sync the Notion database?")
+
+        if database_id == SUBJECT_DATABASE_ID:
+            msg.setText("Would you like to sync the Subjects database?")
+        elif database_id == PHARMACOLOGY_DATABASE_ID:
+            msg.setText("Would you like to sync the Pharmacology database?")
+        else:
+            msg.setText("Would you like to sync the Notion database?")
+
         msg.setInformativeText("This may take a few minutes.")
         msg.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
         msg.setDefaultButton(QMessageBox.Yes)
@@ -93,11 +100,14 @@ class NotionCache:
                 cache_data = json.load(f)
 
             # Check cache version and expiry
-            if (cache_data.get('version') != self.CACHE_VERSION or
-                time.time() - cache_data.get('timestamp', 0) > self.CACHE_EXPIRY):
+            if cache_data.get('version') != self.CACHE_VERSION:
                 return [], 0.0
 
-            return cache_data.get('pages', []), cache_data.get('timestamp', 0.0)
+            last_sync_timestamp = cache_data.get('timestamp', 0)
+            if time.time() - last_sync_timestamp > self.CACHE_EXPIRY:
+                return [], 0.0
+
+            return cache_data.get('pages', []), last_sync_timestamp
         except Exception as e:
             mw.taskman.run_on_main(lambda: showInfo(f"Error loading cache: {e}"))
             return [], 0.0
@@ -106,25 +116,35 @@ class NotionCache:
         """Save pages to cache file"""
         cache_path = self.get_cache_path(database_id)
 
-        try:
-            with cache_path.open('r', encoding='utf-8') as f:
-                cache_data = json.load(f)
-        except (FileNotFoundError, json.JSONDecodeError):
-            cache_data = {
-                'version': self.CACHE_VERSION,
-                'timestamp': time.time(),
-                'pages': []
-            }
-
-        # Merge the new pages with the existing ones
-        cached_pages = cache_data.get('pages', [])
-        updated_pages = {page['id']: page for page in pages}
-        merged_pages = {**{page['id']: page for page in cached_pages}, **updated_pages}
-        cache_data['pages'] = list(merged_pages.values())
+        cache_data = {
+            'version': self.CACHE_VERSION,
+            'timestamp': time.time(),
+            'pages': pages
+        }
 
         with self.cache_lock:
             with cache_path.open('w', encoding='utf-8') as f:
                 json.dump(cache_data, f)
+
+    def update_cache_async(self, database_id: str, force: bool = False):
+        # Check if cache exists and is not expired
+        cached_pages, last_sync_timestamp = self.load_from_cache(database_id)
+        if not force and cached_pages is not None:
+            if time.time() - last_sync_timestamp <= self.CACHE_EXPIRY:
+                return  # Cache is still valid
+
+        # Get user confirmation in the main thread
+        if not force:
+            confirmed = self.confirm_sync(database_id)
+            if not confirmed:
+                return
+
+        try:
+            pages = self.fetch_updated_pages(database_id, last_sync_timestamp)
+            if pages:
+                self.save_to_cache(database_id, pages)
+        except Exception as e:
+            showInfo(f"Error during sync: {e}")
 
     def show_sync_progress(self):
         """Show sync progress dialog"""
@@ -150,29 +170,6 @@ class NotionCache:
             self.sync_progress = None
             self.sync_timer = None
             mw.taskman.run_on_main(lambda: tooltip("Sync completed"))
-
-    def update_cache_async(self, database_id: str, force: bool = False):
-        # Check if cache exists and is not expired
-        cached_pages, last_sync_timestamp = self.load_from_cache(database_id)
-        if not force and cached_pages is not None:
-            if time.time() - last_sync_timestamp <= self.CACHE_EXPIRY:
-                return  # Cache is still valid
-
-        # Get user confirmation in the main thread
-        if not force:
-            confirmed = [False]
-            def ask_confirmation():
-                confirmed[0] = self.confirm_sync()
-            mw.taskman.run_on_main(ask_confirmation)
-            if not confirmed[0]:
-                return
-
-        try:
-            pages = self.fetch_updated_pages(database_id, last_sync_timestamp)
-            if pages:
-                self.save_to_cache(database_id, pages)
-        except Exception as e:
-            showInfo(f"Error during sync: {e}")
 
     def fetch_updated_pages(self, database_id: str, last_sync_timestamp: float) -> List[Dict]:
         """Fetch all pages from a Notion database that have been updated since the last sync"""
@@ -408,12 +405,14 @@ class NotionPageSelector(QDialog):
             else:
                 # If cache is empty or failed, try direct fetch
                 tooltip("Cache empty, fetching from notion...")
-                all_pages = self.notion_cache.fetch_all_pages(database_id)
-                if all_pages:
-                    self.notion_cache.save_to_cache(database_id, all_pages)
-                    # Filter the fetched pages
-                    filtered_pages = self.notion_cache.filter_pages(all_pages, filter_text)
+                self.notion_cache.update_cache_async(database_id, force=True)
+                cached_pages, _ = self.notion_cache.load_from_cache(database_id)
+                if cached_pages:
+                    filtered_pages = self.notion_cache.filter_pages(cached_pages, filter_text)
                     return filtered_pages
+                else:
+                    showInfo("Failed to fetch pages from Notion.")
+                    return []
         except Exception as e:
             showInfo(f"Error accessing data: {str(e)}")
             return []
