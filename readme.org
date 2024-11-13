@@ -8,7 +8,6 @@ An Anki extension that integrates with the Malleus notion database to seamlessly
 
 * Usage
 ** Finding Existing Cards
-
 1. Click the "Malleus" button in the browser toolbar or editor
 2. Select your database (Subjects or Pharmacology)
 3. Enter a search term
@@ -21,6 +20,7 @@ An Anki extension that integrates with the Malleus notion database to seamlessly
 2. Click "Create Cards" to open the Add Cards window
 3. The cards will be pre-filled with the appropriate tags
 
+Note that you want to select a subject tag for the cards you are creating on. If you are unsure of what particular subtag to use, you can select Main Tag. Additionally you can access the menu from the add card dialogue.
 * Installation
 ** Through ankiweb
 Now on ankiweb: https://ankiweb.net/shared/info/620451841. To download this add-on, please copy and paste the following code into Anki 2.1:
@@ -42,6 +42,8 @@ Linux: ~/.local/share/Anki2/addons21/
 * Configuration
 If you have renamed or moved the Malleus deck it is worthwhile to change =deck_name= in the add on configuration manager to the correct name. This way the create card button will open to the correct deck.
 
+The =cache_expiry= is the number of days after which the local database copy of the notion database will expire and any pages updated since the local database copy will be updated.
+
 * Directions for the Future
 - [X] Add button in editor page
 - [X] Publish to Ankiweb addons
@@ -50,10 +52,13 @@ If you have renamed or moved the Malleus deck it is worthwhile to change =deck_n
   - [ ] Keybindings
   - [X] Default deck location
   - [X] Cache expiry duration
-- [ ] Add eTG create cards function
+- [ ] Add eTG database
 
 * TODO Troubleshooting
 This extension requires access to the internet to use the notion API. Please ensure you are using it while connected to the internet.
+
+* Limitations
+I have not yet implemented full database syncs into the add on. Full database syncs can take a bit of time unfortunately and I will update the cache and re-upload the Anki addon when this occurs. I could consider writing a script in python to do this on a publicly hosted github repository and then the cache can be downloaded the cache from there.
 
 * Licence
 This project is licensed under the GNU Affero General Public License v3.0 (AGPL-3.0).
