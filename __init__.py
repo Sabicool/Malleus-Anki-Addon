@@ -24,28 +24,10 @@ env_path = os.path.join(addon_dir, '.env')
 load_dotenv(env_path)
 
 NOTION_TOKEN = os.getenv('NOTION_TOKEN')
-SUBJECT_DATABASE_ID = os.getenv('DATABASE_ID')  
-PHARMACOLOGY_DATABASE_ID = os.getenv('PHARMACOLOGY_DATABASE_ID') 
+SUBJECT_DATABASE_ID = os.getenv('DATABASE_ID')
+PHARMACOLOGY_DATABASE_ID = os.getenv('PHARMACOLOGY_DATABASE_ID')
 
 config = mw.addonManager.getConfig(__name__)
-
-class NotionSyncProgress(QDialog):
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("Syncing Notion Database")
-        self.setWindowModality(Qt.WindowModal)
-        self.setup_ui()
-
-    def setup_ui(self):
-        layout = QVBoxLayout()
-        self.status_label = QLabel("Downloading database contents...")
-        self.progress_label = QLabel("This may take a few minutes")
-
-        layout.addWidget(self.status_label)
-        layout.addWidget(self.progress_label)
-
-        self.setLayout(layout)
-        self.resize(300, 100)
 
 class NotionCache:
     """Handles caching of Notion database content"""
@@ -56,8 +38,8 @@ class NotionCache:
         self.cache_dir = Path(addon_dir) / "cache"
         self.cache_dir.mkdir(exist_ok=True)
         self.cache_lock = threading.Lock()
-        self.sync_progress = None
-        self.sync_timer = None
+        #self.sync_progress = None
+        #self.sync_timer = None
         self._sync_thread = None
         self.headers = {
             "Authorization": f"Bearer {NOTION_TOKEN}",
@@ -67,19 +49,12 @@ class NotionCache:
         #self.config_manager = ConfigManager()
         self.CACHE_EXPIRY = config['cache_expiry'] * 24 * 60 * 60
 
-    def confirm_sync(self, database_id: str) -> bool:
+    def confirm_sync(self) -> bool:
         """Ask user for confirmation before syncing"""
         # Use QMessageBox directly for confirmation
         msg = QMessageBox(mw)
         msg.setWindowTitle("Sync Confirmation")
-
-        if database_id == SUBJECT_DATABASE_ID:
-            msg.setText("Would you like to sync the Subjects database?")
-        elif database_id == PHARMACOLOGY_DATABASE_ID:
-            msg.setText("Would you like to sync the Pharmacology database?")
-        else:
-            msg.setText("Would you like to sync the Notion database?")
-
+        msg.setText("Would you like to sync the Notion database?")
         msg.setInformativeText("This may take a few minutes.")
         msg.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
         msg.setDefaultButton(QMessageBox.Yes)
@@ -93,89 +68,122 @@ class NotionCache:
         """Load cached data if it exists and is not expired"""
         cache_path = self.get_cache_path(database_id)
         if not cache_path.exists():
-            return [], 0.0
+            return [], time.time()  # Return current time instead of 0
 
         try:
             with cache_path.open('r', encoding='utf-8') as f:
                 cache_data = json.load(f)
 
             # Check cache version and expiry
-            if cache_data.get('version') != self.CACHE_VERSION:
-                return [], 0.0
+            current_time = time.time()
+            cache_timestamp = float(cache_data.get('timestamp', current_time))
 
-            last_sync_timestamp = cache_data.get('timestamp', 0)
-            if time.time() - last_sync_timestamp > self.CACHE_EXPIRY:
-                return [], 0.0
+            if (cache_data.get('version') != self.CACHE_VERSION or
+                current_time - cache_timestamp > self.CACHE_EXPIRY):
+                return [], current_time  # Return current time instead of 0
 
-            return cache_data.get('pages', []), last_sync_timestamp
+            return cache_data.get('pages', []), cache_timestamp
+
         except Exception as e:
             mw.taskman.run_on_main(lambda: showInfo(f"Error loading cache: {e}"))
-            return [], 0.0
+            return [], time.time()
 
     def save_to_cache(self, database_id: str, pages: List[Dict]):
-        """Save pages to cache file"""
+        """Save pages to cache file and update timestamp"""
         cache_path = self.get_cache_path(database_id)
+        current_time = time.time()
 
-        cache_data = {
-            'version': self.CACHE_VERSION,
-            'timestamp': time.time(),
-            'pages': pages
-        }
+        try:
+            # Try to load existing cache data
+            with cache_path.open('r', encoding='utf-8') as f:
+                cache_data = json.load(f)
+                existing_pages = cache_data.get('pages', [])
+        except (FileNotFoundError, json.JSONDecodeError):
+            # If no existing cache, create new cache data
+            cache_data = {
+                'version': self.CACHE_VERSION,
+                'pages': []
+            }
+            existing_pages = []
 
+        # Always update the timestamp, regardless of whether there are new pages
+        cache_data['timestamp'] = current_time
+
+        # Only merge pages if there are new ones
+        if pages:
+            # Create dictionaries for easy lookup
+            existing_dict = {page['id']: page for page in existing_pages}
+            new_dict = {page['id']: page for page in pages}
+
+            # Merge existing and new pages
+            merged_dict = {**existing_dict, **new_dict}
+            cache_data['pages'] = list(merged_dict.values())
+
+        # Save the updated cache data
         with self.cache_lock:
             with cache_path.open('w', encoding='utf-8') as f:
                 json.dump(cache_data, f)
 
-    def update_cache_async(self, database_id: str, force: bool = False):
-        # Check if cache exists and is not expired
-        cached_pages, last_sync_timestamp = self.load_from_cache(database_id)
-        if not force and cached_pages is not None:
-            if time.time() - last_sync_timestamp <= self.CACHE_EXPIRY:
-                return  # Cache is still valid
-
-        # Get user confirmation in the main thread
-        if not force:
-            confirmed = self.confirm_sync(database_id)
-            if not confirmed:
-                return
+    def is_cache_expired(self, database_id: str) -> bool:
+        """Check if cache is expired"""
+        cache_path = self.get_cache_path(database_id)
+        if not cache_path.exists():
+            return True
 
         try:
-            pages = self.fetch_updated_pages(database_id, last_sync_timestamp)
-            if pages:
+            with cache_path.open('r', encoding='utf-8') as f:
+                cache_data = json.load(f)
+
+            cache_timestamp = float(cache_data.get('timestamp', 0))
+            return (time.time() - cache_timestamp) > self.CACHE_EXPIRY
+        except Exception:
+            return True
+
+    def update_cache_async(self, database_id: str, force: bool = False, callback: callable = None):
+        """Update cache asynchronously with optional callback"""
+        if not force and not self.is_cache_expired(database_id):
+            if callback:
+                callback()
+            return
+
+        # Get user confirmation in the main thread if not forced
+        if not force:
+            confirmed = [False]
+            def ask_confirmation():
+                confirmed[0] = self.confirm_sync()
+            mw.taskman.run_on_main(ask_confirmation)
+            if not confirmed[0]:
+                if callback:
+                    callback()
+                return
+
+        def sync_thread():
+            try:
+                mw.taskman.run_on_main(lambda: tooltip("Updating database...", period=1000))
+                cached_pages, last_sync_timestamp = self.load_from_cache(database_id)
+                pages = self.fetch_updated_pages(database_id, last_sync_timestamp)
                 self.save_to_cache(database_id, pages)
-        except Exception as e:
-            showInfo(f"Error during sync: {e}")
+                mw.taskman.run_on_main(lambda: tooltip("Update complete"))
 
-    def show_sync_progress(self):
-        """Show sync progress dialog"""
-        # Create and show progress dialog in the main thread
-        def create_dialog():
-            self.sync_progress = NotionSyncProgress(mw)
-            self.sync_progress.show()
+                if callback:
+                    mw.taskman.run_on_main(callback)
+            except Exception as e:
+                mw.taskman.run_on_main(lambda: showInfo(f"Error during sync: {e}"))
+                if callback:
+                    mw.taskman.run_on_main(callback)
 
-            # Create timer to check sync status
-            self.sync_timer = QTimer()
-            self.sync_timer.timeout.connect(self.check_sync_status)
-            self.sync_timer.start(500)  # Check every 500ms
-
-        mw.taskman.run_on_main(create_dialog)
-
-    def check_sync_status(self):
-        """Check if sync thread is still running"""
-        if not self._sync_thread or not self._sync_thread.is_alive():
-            if self.sync_progress:
-                self.sync_progress.close()
-            if self.sync_timer:
-                self.sync_timer.stop()
-            self.sync_progress = None
-            self.sync_timer = None
-            mw.taskman.run_on_main(lambda: tooltip("Sync completed"))
+        self._sync_thread = threading.Thread(target=sync_thread)
+        self._sync_thread.start()
 
     def fetch_updated_pages(self, database_id: str, last_sync_timestamp: float) -> List[Dict]:
         """Fetch all pages from a Notion database that have been updated since the last sync"""
         pages = []
         has_more = True
         start_cursor = None
+
+        # Ensure we have a valid timestamp
+        if last_sync_timestamp <= 0:
+            last_sync_timestamp = time.time() - self.CACHE_EXPIRY
 
         last_sync_date = datetime.fromtimestamp(last_sync_timestamp).strftime('%Y-%m-%d')
 
@@ -331,7 +339,7 @@ class NotionPageSelector(QDialog):
         # Property selector
         self.property_selector = QComboBox()
         search_layout.addWidget(self.property_selector)
-        
+
         # TODO Somehow make this dynamic depending on the database
         self.update_property_selector(self.database_selector.currentText())
 
@@ -380,7 +388,7 @@ class NotionPageSelector(QDialog):
         layout.addLayout(button_layout)
 
         self.setLayout(layout)
-        
+
     def update_property_selector(self, database_name):
         """Update property selector items based on selected database"""
         self.property_selector.clear()
@@ -396,23 +404,11 @@ class NotionPageSelector(QDialog):
     def query_notion_pages(self, filter_text: str, database_id: str) -> List[Dict]:
         """Query pages from cache and filter them"""
         try:
-            # Try to get from cache first
             cached_pages, last_sync_timestamp = self.notion_cache.load_from_cache(database_id)
             if cached_pages:
-                # Filter the cached pages
                 filtered_pages = self.notion_cache.filter_pages(cached_pages, filter_text)
-                return filtered_pages
-            else:
-                # If cache is empty or failed, try direct fetch
-                tooltip("Cache empty, fetching from notion...")
-                self.notion_cache.update_cache_async(database_id, force=True)
-                cached_pages, _ = self.notion_cache.load_from_cache(database_id)
-                if cached_pages:
-                    filtered_pages = self.notion_cache.filter_pages(cached_pages, filter_text)
-                    return filtered_pages
-                else:
-                    showInfo("Failed to fetch pages from Notion.")
-                    return []
+                return filtered_pages or []
+            return []
         except Exception as e:
             showInfo(f"Error accessing data: {str(e)}")
             return []
@@ -424,32 +420,33 @@ class NotionPageSelector(QDialog):
             return
 
         database_id = self.get_selected_database_id()
+        print(f"Using database ID: {database_id}")
 
         # Force sync if cache is empty
-        if not self.notion_cache.load_from_cache(database_id):
-            self.notion_cache.update_cache_async(database_id, force=True)
-            tooltip("Cache is being updated. Please try your search again in a moment.")
-            return
+        def search_callback():
+            # Clear existing checkboxes
+            for i in reversed(range(self.checkbox_layout.count())):
+                self.checkbox_layout.itemAt(i).widget().setParent(None)
 
-        # Clear existing checkboxes
-        for i in reversed(range(self.checkbox_layout.count())):
-            self.checkbox_layout.itemAt(i).widget().setParent(None)
+            self.pages_data = self.query_notion_pages(search_term, database_id)
 
-        self.pages_data = self.query_notion_pages(search_term, database_id)
-        # print(f"Found {len(self.pages_data)} matching pages")
+            # Create checkboxes for results
+            for page in self.pages_data:
+                try:
+                    title = page['properties']['Name']['title'][0]['text']['content'] if page['properties']['Name']['title'] else "Untitled"
+                    search_suffix = page['properties']['Search Suffix']['formula']['string'] if page['properties'].get('Search Suffix', {}).get('formula', {}).get('string') else ""
 
-        # Create checkboxes for results
-        for page in self.pages_data:
-            try:
-                title = page['properties']['Name']['title'][0]['text']['content'] if page['properties']['Name']['title'] else "Untitled"
-                search_suffix = page['properties']['Search Suffix']['formula']['string'] if page['properties'].get('Search Suffix', {}).get('formula', {}).get('string') else ""
-                # print(f"Adding result: {title} {search_suffix}")
+                    display_text = f"{title} {search_suffix}"
+                    checkbox = QCheckBox(display_text)
+                    self.checkbox_layout.addWidget(checkbox)
+                except Exception as e:
+                    showInfo(f"Error processing page: {e}")
 
-                display_text = f"{title} {search_suffix}"
-                checkbox = QCheckBox(display_text)
-                self.checkbox_layout.addWidget(checkbox)
-            except Exception as e:
-                showInfo(f"Error processing page: {e}")
+        # Check if cache needs updating
+        if self.notion_cache.is_cache_expired(database_id):
+            self.notion_cache.update_cache_async(database_id, force=True, callback=search_callback)
+        else:
+            search_callback()
 
     def select_all_pages(self):
         for i in range(self.checkbox_layout.count()):
@@ -489,7 +486,7 @@ class NotionPageSelector(QDialog):
             subtag = ""
         else:
             subtag = f"::*{property_name}".replace(' ', '_')
-        
+
         # Format tags for Anki search
         search_query = " or ".join(f"tag:{tag}{subtag}" for tag in individual_tags)
 
