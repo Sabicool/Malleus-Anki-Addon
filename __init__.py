@@ -26,6 +26,7 @@ load_dotenv(env_path)
 NOTION_TOKEN = os.getenv('NOTION_TOKEN')
 SUBJECT_DATABASE_ID = os.getenv('DATABASE_ID')
 PHARMACOLOGY_DATABASE_ID = os.getenv('PHARMACOLOGY_DATABASE_ID')
+ETG_DATABASE_ID = os.getenv('ETG_DATABASE_ID')
 
 config = mw.addonManager.getConfig(__name__)
 
@@ -284,6 +285,8 @@ class NotionPageSelector(QDialog):
             self.notion_cache.update_cache_async(SUBJECT_DATABASE_ID, force=False)
         if PHARMACOLOGY_DATABASE_ID:
             self.notion_cache.update_cache_async(PHARMACOLOGY_DATABASE_ID, force=False)
+        if ETG_DATABASE_ID:
+            self.notion_cache.update_cache_async(ETG_DATABASE_ID, force=False)
         self.database_properties = {
             "Subjects": [
                 "Tag",
@@ -311,6 +314,29 @@ class NotionPageSelector(QDialog):
                 "Toxicity & Reversal",
                 "Advantages/Disadvantages",
                 "Monitoring"
+            ],
+            "eTG": [
+                "Tag",
+                "Epidemiology",
+                "Aetiology",
+                "Risk Factors",
+                "Physiology/Anatomy",
+                "Pathophysiology",
+                "Clinical Features",
+                "Pathology",
+                "Diagnosis/Investigations",
+                "Scoring Criteria",
+                "Management",
+                "Complications/Prognosis",
+                "Screening/Prevention",
+                "Generic Names",
+                "Indications",
+                "Contraindications/Precautions",
+                "Route/Frequency",
+                "Adverse Effects",
+                "Toxicity & Reversal",
+                "Advantages/Disadvantages",
+                "Monitoring"
             ]
         }
         self.setup_ui()
@@ -327,7 +353,7 @@ class NotionPageSelector(QDialog):
 
         # Database selector
         self.database_selector = QComboBox()
-        self.database_selector.addItems(["Subjects", "Pharmacology"])
+        self.database_selector.addItems(["Subjects", "Pharmacology", "eTG"])
         self.database_selector.currentTextChanged.connect(self.update_property_selector)
         search_layout.addWidget(self.database_selector)
 
@@ -398,8 +424,10 @@ class NotionPageSelector(QDialog):
     def get_selected_database_id(self):
         if self.database_selector.currentText() == "Subjects":
             return SUBJECT_DATABASE_ID
-        else:
+        elif self.database_selector.currentText() == "Pharmacology":
             return PHARMACOLOGY_DATABASE_ID
+        else:  # eTG
+            return ETG_DATABASE_ID
 
     def query_notion_pages(self, filter_text: str, database_id: str) -> List[Dict]:
         """Query pages from cache and filter them"""
@@ -505,15 +533,48 @@ class NotionPageSelector(QDialog):
         self.accept()
 
     def get_property_content(self, page, property_name):
-        """Extract property content from page data"""
+        """Extract property content from page data with enhanced formatting"""
         prop = page['properties'].get(property_name)
+
+        # Handle formula type properties (like Source)
+        if prop and prop['type'] == 'formula':
+            formula_value = prop['formula']
+
+            # Handle different formula result types
+            if formula_value['type'] == 'string':
+                source_text = formula_value.get('string', '')
+
+                # Parse and format URLs in the source text
+                def format_urls(text):
+                    import re
+
+                    # Regex to find URLs
+                    url_pattern = re.compile(r'(https?://\S+)')
+
+                    # Replace URLs with HTML hyperlinks
+                    def replace_url(match):
+                        url = match.group(1)
+                        # Try to get a clean display text
+                        display_text = url.split('//')[1].split('/')[0]  # Get domain
+                        return f'<a href="{url}" target="_blank">{display_text}</a>'
+
+                    return url_pattern.sub(replace_url, text)
+
+                # Format the source text with clickable links
+                formatted_source = format_urls(source_text)
+
+                return formatted_source
+
+            # Add handling for other formula types if needed
+            return ""
+
+        # Fallback for other property types
         if prop and prop['type'] == 'rich_text' and prop['rich_text']:
             return prop['rich_text'][0]['text']['content']
+
         return ""
 
     def create_cards(self):
-        # config_manager=ConfigManager()
-        # config = mw.addonManager.getConfig(__name__)
         selected_pages = []
         for i in range(self.checkbox_layout.count()):
             checkbox = self.checkbox_layout.itemAt(i).widget()
@@ -522,7 +583,6 @@ class NotionPageSelector(QDialog):
 
         property_name = self.property_selector.currentText()
 
-        # Get tags from pages
         tags = []
         for page in selected_pages:
             tag_prop = page['properties'].get(property_name)
@@ -533,20 +593,29 @@ class NotionPageSelector(QDialog):
 
         if not selected_pages:
             tags = ["#Malleus_CM::#TO_BE_TAGGED"]
-            # return
 
-        # Create note data
+        # Prepare note data
         note = {
-            'deckName': config['deck_name'],  # Make this configurable
-            'modelName': 'MalleusCM - Cloze (Malleus Clinical Medicine / Stapedius)',  # Make this configurable
-            # Can consider adding something like this, or have the source field populate
-            # 'fields': {
-            #     'Front': property_name,
-            #     'Back': '\n\n'.join(self.get_property_content(page, property_name)
-            #                       for page in selected_pages)
-            # },
+            'deckName': config['deck_name'],
+            'modelName': 'MalleusCM - Cloze (Malleus Clinical Medicine / Stapedius)',
+            'fields': {},
             'tags': tags
         }
+
+        # Add source field for eTG database
+        if self.database_selector.currentText() == "eTG":
+            sources = []
+            for page in selected_pages:
+                source = self.get_property_content(page, 'Source')
+                if source:
+                    sources.append(source)
+
+            # Combine sources, remove duplicates
+            unique_sources = list(dict.fromkeys(sources))
+
+            # Join sources with line breaks and add to fields
+            if unique_sources:
+                note['fields']['Source'] = '<br>'.join(unique_sources)
 
         # Open add cards dialog
         self.guiAddCards(note)
@@ -702,6 +771,8 @@ def update_notion_cache(browser=None):
         notion_cache.update_cache_async(SUBJECT_DATABASE_ID, force=True)
     if PHARMACOLOGY_DATABASE_ID:
         notion_cache.update_cache_async(PHARMACOLOGY_DATABASE_ID, force=True)
+    if ETG_DATABASE_ID:
+        notion_cache.update_cache_async(ETG_DATABASE_ID, force=True)
 
 # Add hook for browser setup
 from aqt.gui_hooks import browser_menus_did_init
@@ -717,6 +788,8 @@ def init_notion_cache():
             cache.update_cache_async(SUBJECT_DATABASE_ID, force=False)
         if PHARMACOLOGY_DATABASE_ID:
             cache.update_cache_async(PHARMACOLOGY_DATABASE_ID, force=False)
+        if ETG_DATABASE_ID:
+            cache.update_cache_async(ETG_DATABASE_ID, force=False)
     except Exception as e:
         showInfo(f"Error initializing cache: {e}")
 
