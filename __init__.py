@@ -50,12 +50,12 @@ class NotionCache:
         #self.config_manager = ConfigManager()
         self.CACHE_EXPIRY = config['cache_expiry'] * 24 * 60 * 60
 
-    def confirm_sync(self) -> bool:
-        """Ask user for confirmation before syncing"""
+    def confirm_sync(self, database_name: str) -> bool:
+        """Ask user for confirmation before syncing a specific database"""
         # Use QMessageBox directly for confirmation
         msg = QMessageBox(mw)
         msg.setWindowTitle("Sync Confirmation")
-        msg.setText("Would you like to sync the Notion database?")
+        msg.setText(f"Would you like to sync the {database_name} database?")
         msg.setInformativeText("This may take a few minutes.")
         msg.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
         msg.setDefaultButton(QMessageBox.Yes)
@@ -151,7 +151,16 @@ class NotionCache:
         if not force:
             confirmed = [False]
             def ask_confirmation():
-                confirmed[0] = self.confirm_sync()
+                # Determine database name based on database_id
+                database_name = "Unknown Database"
+                if database_id == SUBJECT_DATABASE_ID:
+                    database_name = "Subjects"
+                elif database_id == PHARMACOLOGY_DATABASE_ID:
+                    database_name = "Pharmacology"
+                elif database_id == ETG_DATABASE_ID:
+                    database_name = "eTG"
+
+                confirmed[0] = self.confirm_sync(database_name)
             mw.taskman.run_on_main(ask_confirmation)
             if not confirmed[0]:
                 if callback:
@@ -583,9 +592,47 @@ class NotionPageSelector(QDialog):
 
         property_name = self.property_selector.currentText()
 
+        # Special handling for Subjects database when Tag is selected
+        if self.database_selector.currentText() == "Subjects" and property_name == "Tag":
+            # Use Main Tag instead of Tag
+            property_name = "Main Tag"
+
+        # Special handling for eTG database when subtag is empty
+        if self.database_selector.currentText() == "eTG" and property_name != "Tag" and property_name != "Main Tag":
+            # Check if the selected subtag property is empty
+            subtag_pages = []
+            for page in selected_pages:
+                subtag_prop = page['properties'].get(property_name)
+
+                # If subtag is empty, use 'Tag' property instead
+                if (not subtag_prop or
+                    (subtag_prop['type'] == 'formula' and
+                     (not subtag_prop['formula'].get('string') or subtag_prop['formula'].get('string').strip() == ''))):
+
+                    # Fallback to 'Tag' property
+                    tag_prop = page['properties'].get('Tag')
+                    if tag_prop and tag_prop['type'] == 'formula' and tag_prop['formula'].get('string'):
+                        subtag_pages.append(page)
+                else:
+                    subtag_pages.append(page)
+
+            selected_pages = subtag_pages
+
         tags = []
         for page in selected_pages:
-            tag_prop = page['properties'].get(property_name)
+            # Determine which property to use for tags
+            if property_name == "Tag" or property_name == "Main Tag":
+                tag_prop = page['properties'].get(property_name)
+            else:
+                # Try to use the selected subtag property
+                tag_prop = page['properties'].get(property_name)
+
+                # If subtag is empty, fall back to 'Tag'
+                if (not tag_prop or
+                    (tag_prop['type'] == 'formula' and
+                     (not tag_prop['formula'].get('string') or tag_prop['formula'].get('string').strip() == ''))):
+                    tag_prop = page['properties'].get('Tag')
+
             if tag_prop and tag_prop['type'] == 'formula':
                 formula_value = tag_prop['formula']
                 if formula_value['type'] == 'string':
@@ -593,6 +640,13 @@ class NotionPageSelector(QDialog):
 
         if not selected_pages:
             tags = ["#Malleus_CM::#TO_BE_TAGGED"]
+
+        # Rest of the method remains the same...
+
+        if not selected_pages:
+            tags = ["#Malleus_CM::#TO_BE_TAGGED"]
+
+        # Rest of the method remains the same...
 
         # Prepare note data
         note = {
