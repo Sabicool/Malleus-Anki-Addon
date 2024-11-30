@@ -524,8 +524,11 @@ class NotionPageSelector(QDialog):
         else:
             subtag = f"::*{property_name}".replace(' ', '_')
 
+        def escape_underscores(tag):
+            return tag.replace('_', '\\_')
+
         # Format tags for Anki search
-        search_query = " or ".join(f"tag:{tag}{subtag}" for tag in individual_tags)
+        search_query = " or ".join(f"\"tag:{escape_underscores(tag)}{subtag}\"" for tag in individual_tags)
 
         if isinstance(self.parent(), Browser):
             # If called from browser, update the current browser
