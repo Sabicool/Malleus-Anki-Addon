@@ -310,8 +310,7 @@ class NotionPageSelector(QDialog):
                 "Scoring Criteria",
                 "Management",
                 "Complications/Prognosis",
-                "Screening/Prevention",
-                "Main Tag"
+                "Screening/Prevention"
             ],
             "Pharmacology": [
                 "Tag",
