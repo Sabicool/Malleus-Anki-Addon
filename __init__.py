@@ -3,7 +3,6 @@ from aqt.qt import *
 from aqt.utils import showInfo, tooltip
 import os
 import requests
-from dotenv import load_dotenv
 from aqt import dialogs
 from aqt.browser import Browser
 from aqt.addcards import AddCards
@@ -20,13 +19,12 @@ from functools import partial
 
 # Load environment variables
 addon_dir = os.path.dirname(os.path.realpath(__file__))
-env_path = os.path.join(addon_dir, '.env')
-load_dotenv(env_path)
 
-NOTION_TOKEN = os.getenv('NOTION_TOKEN')
-SUBJECT_DATABASE_ID = os.getenv('DATABASE_ID')
-PHARMACOLOGY_DATABASE_ID = os.getenv('PHARMACOLOGY_DATABASE_ID')
-ETG_DATABASE_ID = os.getenv('ETG_DATABASE_ID')
+# Hard coded environment variables because was causing issues
+NOTION_TOKEN = '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'
+SUBJECT_DATABASE_ID = '2674b67cbdf84a11a057a29cc24c524f'
+PHARMACOLOGY_DATABASE_ID = '9ff96451736d43909d49e3b9d60971f8'
+ETG_DATABASE_ID = '22282971487f4f559dce199476709b03'
 
 config = mw.addonManager.getConfig(__name__)
 
