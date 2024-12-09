@@ -31,7 +31,8 @@ Now on ankiweb: https://ankiweb.net/shared/info/620451841. To download this add-
 
 ** Manual Installation
 1. Download the extension files
-2. Place them in your Anki addons folder:
+2. Run the =update_notion_cache.py= python script (takes a little bit of time)
+3. Place them in your Anki addons folder:
 
 #+begin_src 
 Windows: %APPDATA%\Anki2\addons21\
