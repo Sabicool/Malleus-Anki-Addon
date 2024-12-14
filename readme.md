@@ -112,7 +112,7 @@ python3 ./update_notion_cache.py
 </details>
 <a id="orgb485ee1"></a>
 
-# Configuration
+## Configuration
 
 If you have renamed or moved the Malleus deck it is worthwhile to change `deck_name` in the add on configuration manager to the correct name. This way the create card button will open to the correct deck.
 
@@ -121,7 +121,7 @@ The `cache_expiry` is the number of days after which the local database copy of 
 
 <a id="org3262658"></a>
 
-# Directions for the Future
+## Directions for the Future
 
 -   [X] Add button in editor page
 -   [X] Publish to Ankiweb addons
