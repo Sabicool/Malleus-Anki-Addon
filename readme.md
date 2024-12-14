@@ -11,6 +11,7 @@
     </div>
 </a>
 
+<br>
 An Anki addon that integrates with the Malleus notion database to seamlessly manage Malleus clinical medicine cards. The addon allows you to search the Malleus Notion database, *find existing cards with matching tags, and create new cards with proper tagging*.
 
 [Malleus Clinical Medicine Website](https://malleuscm.notion.site) •
@@ -73,15 +74,39 @@ Now on ankiweb: <https://ankiweb.net/shared/info/620451841>. To download this ad
 
 1.  Download the extension files
 2.  Run the `update_notion_cache.py` python script (takes a little bit of time)
+
+``` sh
+python3 ./update_notion_cache.py
+```
+
 3.  Place them in your Anki addons folder:
 
-```
-    Windows: %APPDATA%\Anki2\addons21\
-    Mac: ~/Library/Application Support/Anki2/addons21/
-    Linux: ~/.local/share/Anki2/addons21/
-```
+<details>
+<summary>Windows</summary>
 
+> ```
+> Windows: %APPDATA%\Anki2\addons21\
+> ```
 
+</details>
+
+<details>
+<summary>macOS</summary>
+
+> ```
+> Mac: ~/Library/Application Support/Anki2/addons21/
+> ```
+
+</details>
+
+<details>
+<summary>Linux</summary>
+
+> ```
+> Linux: ~/.local/share/Anki2/addons21/
+> ```
+
+</details>
 <a id="orgb485ee1"></a>
 
 # Configuration
