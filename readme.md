@@ -11,8 +11,11 @@
     </div>
 </a>
 
-<br>
+<br />
+
 An Anki addon that integrates with the Malleus notion database to seamlessly manage Malleus clinical medicine cards. The addon allows you to search the Malleus Notion database, *find existing cards with matching tags, and create new cards with proper tagging*.
+
+<br />
 
 [Malleus Clinical Medicine Website](https://malleuscm.notion.site) •
 [Ankiweb Link](https://ankiweb.net/shared/info/620451841) •
