@@ -15,7 +15,7 @@
 8.  [Limitations](#org389a9f6)
 9.  [Licence](#orgd2879ee)
 
-<div align=&ldquo;center&rdquo;>
+<div align="Center">
 
 [Malleus Clinical Medicine Website](https://malleuscm.notion.site) ⋅
 [Ankiweb Link](https://ankiweb.net/shared/info/620451841)
