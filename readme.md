@@ -11,7 +11,7 @@
     </div>
 </a>
 
-An Anki addon that integrates with the Malleus notion database to seamlessly manage Malleus clinical medicine cards. The addon allows you to search the Malleus Notion database, **find existing cards with matching tags, and create new cards with proper tagging**.
+An Anki addon that integrates with the Malleus notion database to seamlessly manage Malleus clinical medicine cards. The addon allows you to search the Malleus Notion database, *find existing cards with matching tags, and create new cards with proper tagging*.
 
 [Malleus Clinical Medicine Website](https://malleuscm.notion.site) •
 [Ankiweb Link](https://ankiweb.net/shared/info/620451841) •
@@ -23,14 +23,9 @@ An Anki addon that integrates with the Malleus notion database to seamlessly man
 
 <a id="org724359b"></a>
 ## Showcase
-
+- [ ] I'm scripting a youtube video for the Malleus youtube channel
 
 <a id="org48ca793"></a>
-
-## Features
-
-
-<a id="orga940f3c"></a>
 
 ## Usage
 
@@ -80,9 +75,11 @@ Now on ankiweb: <https://ankiweb.net/shared/info/620451841>. To download this ad
 2.  Run the `update_notion_cache.py` python script (takes a little bit of time)
 3.  Place them in your Anki addons folder:
 
+```
     Windows: %APPDATA%\Anki2\addons21\
     Mac: ~/Library/Application Support/Anki2/addons21/
     Linux: ~/.local/share/Anki2/addons21/
+```
 
 
 <a id="orgb485ee1"></a>
@@ -101,11 +98,14 @@ The `cache_expiry` is the number of days after which the local database copy of 
 -   [X] Add button in editor page
 -   [X] Publish to Ankiweb addons
 -   [X] Keep local cache and update only newly updated
--   [-] Add configuration for:
+-   [ ] Add configuration for:
     -   [ ] Keybindings
     -   [X] Default deck location
     -   [X] Cache expiry duration
--   [ ] Add eTG database
+-   [X] Add eTG database
+-   [ ] Add rotation database
+-   [ ] Integrate full database syncs using python script
+-   [ ] Integrate with local LLM or neural network to suggest tags
 
 
 <a id="org164e890"></a>
