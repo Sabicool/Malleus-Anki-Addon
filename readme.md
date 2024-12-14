@@ -1,24 +1,11 @@
-
-# Table of Contents
-
-1.  [Showcase](#org724359b)
-2.  [Features](#org48ca793)
-3.  [Usage](#orga940f3c)
-    1.  [Finding Existing Cards](#org4bd0b74)
-    2.  [Creating New Cards](#org3f69585)
-4.  [Installation](#org335319f)
-    1.  [Through ankiweb](#orgc3dfd8f)
-    2.  [Manual Installation](#org4e7a286)
-5.  [Configuration](#orgb485ee1)
-6.  [Directions for the Future](#org3262658)
-7.  [Troubleshooting](#org164e890)
-8.  [Limitations](#org389a9f6)
-9.  [Licence](#orgd2879ee)
-
 <div align="Center">
 
-[Malleus Clinical Medicine Website](https://malleuscm.notion.site) ⋅
-[Ankiweb Link](https://ankiweb.net/shared/info/620451841)
+# Malleus Anki Helper Addon
+
+[Malleus Clinical Medicine Website](https://malleuscm.notion.site) •
+[Ankiweb Link](https://ankiweb.net/shared/info/620451841) •
+[Showcase](#Showcase) •
+[Usage](#Usage)
 
 </div>
 
@@ -27,22 +14,22 @@ An Anki extension that integrates with the Malleus notion database to seamlessly
 
 <a id="org724359b"></a>
 
-# TODO Showcase
+## Showcase
 
 
 <a id="org48ca793"></a>
 
-# TODO Features
+## Features
 
 
 <a id="orga940f3c"></a>
 
-# Usage
+## Usage
 
 
 <a id="org4bd0b74"></a>
 
-## Finding Existing Cards
+### Finding Existing Cards
 
 1.  Click the &ldquo;Malleus&rdquo; button in the browser toolbar or editor
 2.  Select your database (Subjects or Pharmacology)
@@ -54,7 +41,7 @@ An Anki extension that integrates with the Malleus notion database to seamlessly
 
 <a id="org3f69585"></a>
 
-## Creating New Cards
+### Creating New Cards
 
 1.  Follow steps 1-5 above
 2.  Click &ldquo;Create Cards&rdquo; to open the Add Cards window
@@ -65,12 +52,12 @@ Note that you want to select a subject tag for the cards you are creating on. If
 
 <a id="org335319f"></a>
 
-# Installation
+## Installation
 
 
 <a id="orgc3dfd8f"></a>
 
-## Through ankiweb
+### Through ankiweb
 
 Now on ankiweb: <https://ankiweb.net/shared/info/620451841>. To download this add-on, please copy and paste the following code into Anki 2.1:
 
@@ -79,7 +66,7 @@ Now on ankiweb: <https://ankiweb.net/shared/info/620451841>. To download this ad
 
 <a id="org4e7a286"></a>
 
-## Manual Installation
+### Manual Installation
 
 1.  Download the extension files
 2.  Run the `update_notion_cache.py` python script (takes a little bit of time)
@@ -115,21 +102,22 @@ The `cache_expiry` is the number of days after which the local database copy of 
 
 <a id="org164e890"></a>
 
-# TODO Troubleshooting
+## Troubleshooting
 
 This extension requires access to the internet to use the notion API. Please ensure you are using it while connected to the internet.
 
+There are some issues when trying to use the add-on while the database is being updated. Try re-installing the addon if issues occur.
 
 <a id="org389a9f6"></a>
 
-# Limitations
+## Limitations
 
 I have not yet implemented full database syncs into the add on. Full database syncs can take a bit of time unfortunately and I will update the cache and re-upload the Anki addon when this occurs. I could consider writing a script in python to do this on a publicly hosted github repository and then the cache can be downloaded the cache from there.
 
 
 <a id="orgd2879ee"></a>
 
-# Licence
+## Licence
 
 This project is licensed under the GNU Affero General Public License v3.0 (AGPL-3.0).
 
