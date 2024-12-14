@@ -4,7 +4,7 @@
 
 <a href="https://malleuscm.notion.site">
     <b>
-        This is an Anki addon designed to integrate with the Malleus Clinical Medicine Anki deck, the best clinical medicine anki deck for Australian and New Zealand medical students.
+        The Malleus Clinical Medicine Anki deck is the best continually updated clinical medicine anki deck for Australian and New Zealand medical students.
     </b>
     <div>
         <sup>Vist <u>malleuscm.notion.site</u> to learn more</sup>
@@ -13,14 +13,14 @@
 
 <br />
 
-An Anki addon that integrates with the Malleus notion database to seamlessly manage Malleus clinical medicine cards. The addon allows you to *search the Malleus Notion database, find existing cards with matching tags, and create new cards with proper tagging*.
+This is an Anki addon that integrates with the Malleus notion database to seamlessly manage Malleus clinical medicine cards. The addon allows you to *search the Malleus Notion database, find existing cards with matching tags, and create new cards with proper tagging*.
 
 <br />
 
-[Malleus Clinical Medicine Website](https://malleuscm.notion.site) •
+• [Malleus Clinical Medicine Website](https://malleuscm.notion.site) •
 [Ankiweb Link](https://ankiweb.net/shared/info/620451841) •
 [Showcase](#Showcase) •
-[Usage](#Usage)
+[Usage](#Usage) •
 
 </div>
 
