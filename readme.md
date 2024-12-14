@@ -2,14 +2,14 @@
 
 # Malleus Anki Helper Addon
 
+An Anki extension that integrates with the Malleus notion database to seamlessly manage Malleus clinical medicine cards. The extension allows you to search the Malleus Notion database, find existing cards with matching tags, and create new cards with proper tagging.
+
 [Malleus Clinical Medicine Website](https://malleuscm.notion.site) •
 [Ankiweb Link](https://ankiweb.net/shared/info/620451841) •
 [Showcase](#Showcase) •
 [Usage](#Usage)
 
 </div>
-
-An Anki extension that integrates with the Malleus notion database to seamlessly manage Malleus clinical medicine cards. The extension allows you to search the Malleus Notion database, find existing cards with matching tags, and create new cards with proper tagging.
 
 
 <a id="org724359b"></a>
