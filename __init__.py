@@ -752,8 +752,11 @@ def show_page_selector(browser=None):
         parent = mw
     else:
         parent = browser
-    dialog = NotionPageSelector(parent)
-    dialog.exec_()
+
+    dialogue = NotionPageSelector(parent)
+    dialogue.show()
+    # dialog = NotionPageSelector(parent)
+    # dialog.exec_()
 
 malleus_add_card_action = QAction("Malleus Find/Add Cards", mw)
 malleus_add_card_action.triggered.connect(show_page_selector)
