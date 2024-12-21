@@ -6,6 +6,8 @@ import requests
 from aqt import dialogs
 from aqt.browser import Browser
 from aqt.addcards import AddCards
+from aqt.editcurrent import EditCurrent
+from aqt.editor import Editor
 from anki.hooks import addHook
 import anki.notes
 from typing import Tuple, List, Dict, Optional
@@ -322,6 +324,14 @@ class NotionPageSelector(QDialog):
         if parent is not None and not isinstance(parent, QWidget):
             parent = mw
         super().__init__(parent)
+
+        # Initialize current_note first
+        self.current_note = None
+        if isinstance(parent, Browser):
+            self.current_note = parent.editor.note
+        elif isinstance(parent, EditCurrent):
+            self.current_note = parent.editor.note
+
         self.notion_cache = NotionCache(addon_dir)
         # Initialize cache on startup without forcing
         if SUBJECT_DATABASE_ID:
@@ -330,6 +340,7 @@ class NotionPageSelector(QDialog):
             self.notion_cache.update_cache_async(PHARMACOLOGY_DATABASE_ID, force=False)
         if ETG_DATABASE_ID:
             self.notion_cache.update_cache_async(ETG_DATABASE_ID, force=False)
+
         self.database_properties = {
             "Subjects": [
                 "Tag",
@@ -381,8 +392,8 @@ class NotionPageSelector(QDialog):
                 "Monitoring"
             ]
         }
-        self.setup_ui()
         self.pages_data = []  # Store full page data
+        self.setup_ui()
 
     def setup_ui(self):
         self.setWindowTitle("Malleus Page Selector")
@@ -408,7 +419,6 @@ class NotionPageSelector(QDialog):
         self.property_selector = QComboBox()
         search_layout.addWidget(self.property_selector)
 
-        # TODO Somehow make this dynamic depending on the database
         self.update_property_selector(self.database_selector.currentText())
 
         # Search button
@@ -438,23 +448,34 @@ class NotionPageSelector(QDialog):
         button_layout = QHBoxLayout()
         select_all_button = QPushButton("Select All")
         select_all_button.clicked.connect(self.select_all_pages)
+        button_layout.addWidget(select_all_button)
 
         find_cards_button = QPushButton("Find Cards")
         find_cards_button.clicked.connect(self.search_cards)
+        button_layout.addWidget(find_cards_button)
+
+        # Only show these buttons when editing an existing note
 
         create_cards_button = QPushButton("Create Cards")
         create_cards_button.clicked.connect(self.create_cards)
+        button_layout.addWidget(create_cards_button)
+
+        if self.current_note is not None:
+            replace_tags_button = QPushButton("Replace Tags")
+            replace_tags_button.clicked.connect(self.replace_tags)
+
+            add_tags_button = QPushButton("Add Tags")
+            add_tags_button.clicked.connect(self.add_tags)
+
+            button_layout.addWidget(replace_tags_button)
+            button_layout.addWidget(add_tags_button)
 
         update_database_button = QPushButton("Update database")
         update_database_button.clicked.connect(update_notion_cache)
 
-        button_layout.addWidget(select_all_button)
-        button_layout.addWidget(find_cards_button)
-        button_layout.addWidget(create_cards_button)
         button_layout.addWidget(update_database_button)
 
         layout.addLayout(button_layout)
-
         self.setLayout(layout)
 
     def update_property_selector(self, database_name):
@@ -714,6 +735,7 @@ class NotionPageSelector(QDialog):
     def guiAddCards(self, note):
         collection = mw.col
 
+        print(self.parent()) #debugging
         # If we're in the add cards dialog, update the existing note
         if isinstance(self.parent(), AddCards):
             addCards = self.parent()
@@ -780,6 +802,90 @@ class NotionPageSelector(QDialog):
             currentWindow.setAndFocusNote(ankiNote)
         else:
             openNewWindow()
+
+    def get_tags_from_selected_pages(self):
+        """Extract tags from selected pages"""
+        selected_pages = []
+        for i in range(self.checkbox_layout.count()):
+            checkbox = self.checkbox_layout.itemAt(i).widget()
+            if checkbox.isChecked():
+                selected_pages.append(self.pages_data[i])
+
+        property_name = self.property_selector.currentText()
+
+        # Special handling for Subjects database when Tag is selected
+        if self.database_selector.currentText() == "Subjects" and property_name == "Tag":
+            property_name = "Main Tag"
+
+        tags = []
+        for page in selected_pages:
+            if property_name == "Tag" or property_name == "Main Tag":
+                tag_prop = page['properties'].get(property_name)
+            else:
+                tag_prop = page['properties'].get(property_name)
+                if (not tag_prop or
+                    (tag_prop['type'] == 'formula' and
+                     (not tag_prop['formula'].get('string') or tag_prop['formula'].get('string').strip() == ''))):
+                    tag_prop = page['properties'].get('Tag')
+
+            if tag_prop and tag_prop['type'] == 'formula':
+                formula_value = tag_prop['formula']
+                if formula_value['type'] == 'string':
+                    tags.extend(formula_value['string'].split())
+
+        if not selected_pages:
+            tags = ["#Malleus_CM::#TO_BE_TAGGED"]
+
+        return tags
+
+    def replace_tags(self):
+        """Replace existing tags with new ones"""
+        if not self.current_note:
+            return
+
+        tags = self.get_tags_from_selected_pages()
+
+        # Update the note's tags
+        self.current_note.tags = tags
+
+        # Save the note
+        self.current_note.flush()
+
+        # Refresh the editor
+        if isinstance(self.parent(), Browser):
+            self.parent().model.reset()
+        elif isinstance(self.parent(), EditCurrent):
+            self.parent().editor.loadNote()
+
+        self.accept()
+
+    def add_tags(self):
+        """Add new tags to existing ones"""
+        if not self.current_note:
+            return
+
+        # Get current tags
+        current_tags = set(self.current_note.tags)
+
+        # Get new tags
+        new_tags = set(self.get_tags_from_selected_pages())
+
+        # Combine tags
+        combined_tags = list(current_tags | new_tags)
+
+        # Update the note's tags
+        self.current_note.tags = combined_tags
+
+        # Save the note
+        self.current_note.flush()
+
+        # Refresh the editor
+        if isinstance(self.parent(), Browser):
+            self.parent().model.reset()
+        elif isinstance(self.parent(), EditCurrent):
+            self.parent().editor.loadNote()
+
+        self.accept()
 
 def show_page_selector(browser=None):
     """Show the page selector dialog with the appropriate parent window"""
