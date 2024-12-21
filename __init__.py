@@ -140,38 +140,74 @@ class NotionCache:
 
     def update_cache_async(self, database_id: str, force: bool = False, callback: callable = None):
         """Update cache asynchronously with optional callback"""
+        # Determine database name upfront
+        database_name = self.get_database_name(database_id)
+
         if not force and not self.is_cache_expired(database_id):
             if callback:
                 callback()
+            return
+
+        # If not forced, check if we've already received global confirmation
+        if not force and hasattr(self, '_global_sync_confirmed'):
+            self._update_cache_thread(database_id, database_name, callback)
             return
 
         # Get user confirmation in the main thread if not forced
         if not force:
             confirmed = [False]
             def ask_confirmation():
-                # Determine database name based on database_id
-                database_name = "Unknown Database"
-                if database_id == SUBJECT_DATABASE_ID:
-                    database_name = "Subjects"
-                elif database_id == PHARMACOLOGY_DATABASE_ID:
-                    database_name = "Pharmacology"
-                elif database_id == ETG_DATABASE_ID:
-                    database_name = "eTG"
+                # Use a message box with a "Sync All" option
+                msg = QMessageBox(mw)
+                msg.setWindowTitle("Sync Confirmation")
+                msg.setText(f"Would you like to sync the {database_name} database?")
+                msg.setInformativeText("This will update the selected database. Click 'Yes' to sync this database, 'All' to sync all databases, or 'No' to cancel.")
 
-                confirmed[0] = self.confirm_sync(database_name)
+                # Add custom buttons using StandardButton
+                yes_button = msg.addButton(QMessageBox.StandardButton.Yes)
+                all_button = msg.addButton("All", QMessageBox.ButtonRole.ActionRole)
+                no_button = msg.addButton(QMessageBox.StandardButton.No)
+
+                msg.setDefaultButton(QMessageBox.StandardButton.Yes)
+                msg.exec()
+
+                clicked_button = msg.clickedButton()
+
+                if clicked_button == yes_button:
+                    confirmed[0] = True
+                elif clicked_button == all_button:
+                    confirmed[0] = True
+                    self._global_sync_confirmed = True
+                # If no_button clicked, confirmed[0] remains False
+
             mw.taskman.run_on_main(ask_confirmation)
+
             if not confirmed[0]:
                 if callback:
                     callback()
                 return
 
+        # If we reach here, we're either forced or confirmed
+        self._update_cache_thread(database_id, database_name, callback)
+
+    def get_database_name(self, database_id: str) -> str:
+        """Helper method to get database name based on ID"""
+        if database_id == SUBJECT_DATABASE_ID:
+            return "Subjects"
+        elif database_id == PHARMACOLOGY_DATABASE_ID:
+            return "Pharmacology"
+        elif database_id == ETG_DATABASE_ID:
+            return "eTG"
+        return "Unknown Database"
+
+    def _update_cache_thread(self, database_id: str, database_name: str, callback: callable = None):
+        """Internal method to update cache in a thread"""
         def sync_thread():
             try:
-                mw.taskman.run_on_main(lambda: tooltip("Updating database...", period=1000))
+                mw.taskman.run_on_main(lambda: tooltip(f"{database_name} database updated"))
                 cached_pages, last_sync_timestamp = self.load_from_cache(database_id)
                 pages = self.fetch_updated_pages(database_id, last_sync_timestamp)
                 self.save_to_cache(database_id, pages)
-                mw.taskman.run_on_main(lambda: tooltip("Update complete"))
 
                 if callback:
                     mw.taskman.run_on_main(callback)
