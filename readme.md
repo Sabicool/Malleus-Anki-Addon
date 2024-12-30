@@ -131,7 +131,8 @@ The `cache_expiry` is the number of days after which the local database copy of 
     -   [X] Default deck location
     -   [X] Cache expiry duration
 -   [X] Add eTG database
--   [ ] Add rotation database
+-   [X] Add rotation database
+-   [ ] Add guidelines database
 -   [ ] Integrate full database syncs using python script
 -   [ ] Integrate with local LLM or neural network to suggest tags
 
