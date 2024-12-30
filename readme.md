@@ -7,7 +7,7 @@
         The Malleus Clinical Medicine Anki deck is the best continually updated clinical medicine anki deck for Australian and New Zealand medical students.
     </b>
     <div>
-        <sup>👉 Vist <u>malleuscm.notion.site</u> to learn more</sup 👈>
+        <sup>👉 Vist <u>malleuscm.notion.site</u> to learn more 👈</sup>
     </div>
 </a>
 
