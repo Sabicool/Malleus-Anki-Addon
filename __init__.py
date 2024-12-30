@@ -50,6 +50,8 @@ class NotionCache:
         }
         #self.config_manager = ConfigManager()
         self.CACHE_EXPIRY = config['cache_expiry'] * 24 * 60 * 60
+        self.github_repo = "Sabicool/Malleus-Anki-Addon"  # Replace with your GitHub repo
+        self.github_branch = "main"  # Or whatever branch you use
 
     def confirm_sync(self, database_name: str) -> bool:
         """Ask user for confirmation before syncing a specific database"""
@@ -308,6 +310,47 @@ class NotionCache:
                 filtered_pages.append(page)
 
         return filtered_pages
+
+    def download_cache_from_github(self, database_id: str) -> bool:
+        """Download cache file from GitHub"""
+        cache_filename = f"{database_id}.json"
+        url = f"https://raw.githubusercontent.com/{self.github_repo}/{self.github_branch}/cache/{cache_filename}"
+
+        try:
+            response = requests.get(url)
+            response.raise_for_status()
+
+            # Parse the JSON to validate it
+            cache_data = response.json()
+
+            # Save to cache with lock to prevent conflicts
+            with self.cache_lock:
+                cache_path = self.get_cache_path(database_id)
+                with cache_path.open('w', encoding='utf-8') as f:
+                    json.dump(cache_data, f)
+
+            return True
+        except Exception as e:
+            print(f"Error downloading cache from GitHub: {e}")
+            return False
+
+    def download_all_caches_from_github(self) -> bool:
+        """Download all cache files from GitHub"""
+        success = True
+        for database_id in [
+            '2674b67cbdf84a11a057a29cc24c524f',  # SUBJECT_DATABASE_ID
+            '9ff96451736d43909d49e3b9d60971f8',  # PHARMACOLOGY_DATABASE_ID
+            '22282971487f4f559dce199476709b03',  # ETG_DATABASE_ID
+            '69b3e7fdce1548438b26849466d7c18e'   # ROTATION_DATABASE_ID
+        ]:
+            if not self.download_cache_from_github(database_id):
+                success = False
+
+        return success
+
+    def get_cache_path(self, database_id: str) -> Path:
+        """Get the path for a specific database's cache file"""
+        return self.cache_dir / f"{database_id}.json"
 
 def open_browser_with_search(search_query):
     """Open the browser with a search query"""
@@ -913,6 +956,34 @@ def show_page_selector(browser=None):
 malleus_add_card_action = QAction("Malleus Find/Add Cards", mw)
 malleus_add_card_action.triggered.connect(show_page_selector)
 mw.form.menuTools.addAction(malleus_add_card_action)
+
+def download_github_cache(browser=None):
+    """Download cache from GitHub repository"""
+    notion_cache = NotionCache(addon_dir)
+
+    progress = QProgressDialog("Downloading cache from GitHub...", None, 0, 0, mw)
+    progress.setWindowTitle("Downloading Cache")
+    progress.setWindowModality(Qt.WindowModal)
+    progress.show()
+
+    def on_complete():
+        progress.close()
+        showInfo("Cache successfully downloaded from GitHub")
+
+    def on_error():
+        progress.close()
+        showInfo("Error downloading cache from GitHub. Check the console for details.")
+
+    def download_thread():
+        success = notion_cache.download_all_caches_from_github()
+        mw.taskman.run_on_main(on_complete if success else on_error)
+
+    thread = threading.Thread(target=download_thread)
+    thread.start()
+
+download_cache_action = QAction("Malleus Full Database Sync", mw)
+download_cache_action.triggered.connect(download_github_cache)
+mw.form.menuTools.addAction(download_cache_action)
 
 def setup_editor_buttons(buttons, editor):
     """Add Malleus button to the editor toolbar"""
