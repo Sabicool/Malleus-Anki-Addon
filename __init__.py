@@ -27,6 +27,7 @@ NOTION_TOKEN = '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'
 SUBJECT_DATABASE_ID = '2674b67cbdf84a11a057a29cc24c524f'
 PHARMACOLOGY_DATABASE_ID = '9ff96451736d43909d49e3b9d60971f8'
 ETG_DATABASE_ID = '22282971487f4f559dce199476709b03'
+ROTATION_DATABASE_ID = '69b3e7fdce1548438b26849466d7c18e'
 
 config = mw.addonManager.getConfig(__name__)
 
@@ -200,6 +201,8 @@ class NotionCache:
             return "Pharmacology"
         elif database_id == ETG_DATABASE_ID:
             return "eTG"
+        elif database_id == ROTATION_DATABASE_ID:
+            return "Rotation"
         return "Unknown Database"
 
     def _update_cache_thread(self, database_id: str, database_name: str, callback: callable = None):
@@ -340,6 +343,8 @@ class NotionPageSelector(QDialog):
             self.notion_cache.update_cache_async(PHARMACOLOGY_DATABASE_ID, force=False)
         if ETG_DATABASE_ID:
             self.notion_cache.update_cache_async(ETG_DATABASE_ID, force=False)
+        if ROTATION_DATABASE_ID:
+            self.notion_cache.update_cache_async(ROTATION_DATABASE_ID, force=False)
 
         self.database_properties = {
             "Subjects": [
@@ -390,6 +395,9 @@ class NotionPageSelector(QDialog):
                 "Toxicity & Reversal",
                 "Advantages/Disadvantages",
                 "Monitoring"
+            ],
+            "Rotation": [
+                "Tag"
             ]
         }
         self.pages_data = []  # Store full page data
@@ -406,7 +414,7 @@ class NotionPageSelector(QDialog):
 
         # Database selector
         self.database_selector = QComboBox()
-        self.database_selector.addItems(["Subjects", "Pharmacology", "eTG"])
+        self.database_selector.addItems(["Subjects", "Pharmacology", "eTG", "Rotation"])
         self.database_selector.currentTextChanged.connect(self.update_property_selector)
         search_layout.addWidget(self.database_selector)
 
@@ -489,8 +497,10 @@ class NotionPageSelector(QDialog):
             return SUBJECT_DATABASE_ID
         elif self.database_selector.currentText() == "Pharmacology":
             return PHARMACOLOGY_DATABASE_ID
-        else:  # eTG
+        elif self.database_selector.currentText() == "eTG":
             return ETG_DATABASE_ID
+        else:  # eTG
+            return ROTATION_DATABASE_ID
 
     def query_notion_pages(self, filter_text: str, database_id: str) -> List[Dict]:
         """Query pages from cache and filter them"""
@@ -972,6 +982,8 @@ def update_notion_cache(browser=None):
         notion_cache.update_cache_async(PHARMACOLOGY_DATABASE_ID, force=True)
     if ETG_DATABASE_ID:
         notion_cache.update_cache_async(ETG_DATABASE_ID, force=True)
+    if ROTATION_DATABASE_ID:
+        notion_cache.update_cache_async(ROTATION_DATABASE_ID, force=True)
 
 # Add hook for browser setup
 from aqt.gui_hooks import browser_menus_did_init
@@ -989,6 +1001,8 @@ def init_notion_cache():
             cache.update_cache_async(PHARMACOLOGY_DATABASE_ID, force=False)
         if ETG_DATABASE_ID:
             cache.update_cache_async(ETG_DATABASE_ID, force=False)
+        if ROTATION_DATABASE_ID:
+            cache.update_cache_async(ROTATION_DATABASE_ID, force=False)
     except Exception as e:
         showInfo(f"Error initializing cache: {e}")
 
