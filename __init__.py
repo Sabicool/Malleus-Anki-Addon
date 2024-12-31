@@ -145,7 +145,6 @@ class NotionCache:
 
     def update_cache_async(self, database_id: str, force: bool = False, callback: callable = None):
         """Update cache asynchronously with optional callback"""
-        # Determine database name upfront
         database_name = self.get_database_name(database_id)
 
         if not force and not self.is_cache_expired(database_id):
@@ -153,47 +152,26 @@ class NotionCache:
                 callback()
             return
 
-        # If not forced, check if we've already received global confirmation
-        if not force and hasattr(self, '_global_sync_confirmed'):
+        if force:
+            # If force=True, directly update the cache without downloading from GitHub
             self._update_cache_thread(database_id, database_name, callback)
-            return
+        else:
+            # If cache is expired but not forced, download from GitHub
+            def download_thread():
+                try:
+                    success = self.download_all_caches_from_github()
+                    if not success:
+                        # If GitHub download fails, log error but don't proceed with update
+                        print(f"Error downloading cache from GitHub")
+                    if callback:
+                        mw.taskman.run_on_main(callback)
+                except Exception as e:
+                    print(f"Error during GitHub cache download: {e}")
+                    if callback:
+                        mw.taskman.run_on_main(callback)
 
-        # Get user confirmation in the main thread if not forced
-        if not force:
-            confirmed = [False]
-            def ask_confirmation():
-                # Use a message box with a "Sync All" option
-                msg = QMessageBox(mw)
-                msg.setWindowTitle("Sync Confirmation")
-                msg.setText(f"Would you like to sync the {database_name} database?")
-                msg.setInformativeText("This will update the selected database. Click 'Yes' to sync this database, 'All' to sync all databases, or 'No' to cancel.")
-
-                # Add custom buttons using StandardButton
-                yes_button = msg.addButton(QMessageBox.StandardButton.Yes)
-                all_button = msg.addButton("All", QMessageBox.ButtonRole.ActionRole)
-                no_button = msg.addButton(QMessageBox.StandardButton.No)
-
-                msg.setDefaultButton(QMessageBox.StandardButton.Yes)
-                msg.exec()
-
-                clicked_button = msg.clickedButton()
-
-                if clicked_button == yes_button:
-                    confirmed[0] = True
-                elif clicked_button == all_button:
-                    confirmed[0] = True
-                    self._global_sync_confirmed = True
-                # If no_button clicked, confirmed[0] remains False
-
-            mw.taskman.run_on_main(ask_confirmation)
-
-            if not confirmed[0]:
-                if callback:
-                    callback()
-                return
-
-        # If we reach here, we're either forced or confirmed
-        self._update_cache_thread(database_id, database_name, callback)
+            self._sync_thread = threading.Thread(target=download_thread)
+            self._sync_thread.start()
 
     def get_database_name(self, database_id: str) -> str:
         """Helper method to get database name based on ID"""
@@ -963,16 +941,16 @@ def download_github_cache(browser=None):
 
     progress = QProgressDialog("Downloading cache from GitHub...", None, 0, 0, mw)
     progress.setWindowTitle("Downloading Cache")
-    progress.setWindowModality(Qt.WindowModal)
+    #progress.setWindowModality(Qt.WindowModal)
     progress.show()
 
     def on_complete():
         progress.close()
-        showInfo("Cache successfully downloaded from GitHub")
+        tooltip("Cache successfully downloaded from GitHub")
 
     def on_error():
         progress.close()
-        showInfo("Error downloading cache from GitHub. Check the console for details.")
+        tooltip("Error downloading cache from GitHub. Check the console for details.")
 
     def download_thread():
         success = notion_cache.download_all_caches_from_github()
