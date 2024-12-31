@@ -104,6 +104,15 @@ Now on ankiweb: <https://ankiweb.net/shared/info/620451841>. To download this ad
 > ```
 
 </details>
+
+3. Restart Anki
+
+If need be, you can also manually update the cache yourself using the python script `update_notion_cache.py` (takes a little bit of time)
+
+``` sh
+python3 ./update_notion_cache.py
+```
+
 <a id="orgb485ee1"></a>
 
 ## Configuration
@@ -127,7 +136,7 @@ The `cache_expiry` is the number of days after which the local database copy of 
 -   [X] Add eTG database
 -   [X] Add rotation database
 -   [ ] Add guidelines database
--   [ ] Integrate full database syncs using python script
+-   [X] Integrate full database syncs using python script
 -   [ ] Integrate with local LLM or neural network to suggest tags
 
 
