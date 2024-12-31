@@ -76,13 +76,7 @@ Now on ankiweb: <https://ankiweb.net/shared/info/620451841>. To download this ad
 ### Manual Installation
 
 1.  Download the extension files
-2.  Run the `update_notion_cache.py` python script (takes a little bit of time)
-
-``` sh
-python3 ./update_notion_cache.py
-```
-
-3.  Place them in your Anki addons folder:
+2.  Place the extensions files in your Anki addons folder:
 
 <details>
 <summary>Windows</summary>
