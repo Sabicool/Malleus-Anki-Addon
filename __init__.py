@@ -189,7 +189,7 @@ class NotionCache:
         """Internal method to update cache in a thread"""
         def sync_thread():
             try:
-                mw.taskman.run_on_main(lambda: tooltip(f"{database_name} database updated"))
+                #mw.taskman.run_on_main(lambda: tooltip(f"{database_name} database updated"))
                 cached_pages, last_sync_timestamp = self.load_from_cache(database_id)
                 pages = self.fetch_updated_pages(database_id, last_sync_timestamp)
                 self.save_to_cache(database_id, pages)
@@ -500,7 +500,7 @@ class NotionPageSelector(QDialog):
             button_layout.addWidget(add_tags_button)
 
         update_database_button = QPushButton("Update database")
-        update_database_button.clicked.connect(update_notion_cache)
+        update_database_button.clicked.connect(download_github_cache)
 
         button_layout.addWidget(update_database_button)
 
@@ -936,32 +936,98 @@ malleus_add_card_action.triggered.connect(show_page_selector)
 mw.form.menuTools.addAction(malleus_add_card_action)
 
 def download_github_cache(browser=None):
-    """Download cache from GitHub repository"""
+    """Download cache from GitHub repository and update cache from Notion"""
     notion_cache = NotionCache(addon_dir)
+    current_notion_update = 0
 
-    progress = QProgressDialog("Downloading cache from GitHub...", None, 0, 0, mw)
-    progress.setWindowTitle("Downloading Cache")
-    #progress.setWindowModality(Qt.WindowModal)
-    progress.show()
+    # Create progress dialog on main thread
+    def create_progress():
+        nonlocal progress
+        progress = QProgressDialog("Initializing...", None, 0, 8, mw)
+        progress.setWindowTitle("Cache Update")
+        progress.show()
 
-    def on_complete():
-        progress.close()
-        tooltip("Cache successfully downloaded from GitHub")
+    progress = None
+    mw.taskman.run_on_main(create_progress)
+
+    def update_progress(step, message):
+        """Update progress dialog with step number and message"""
+        def update():
+            if progress is None:
+                return
+            progress.setValue(step)
+            progress.setLabelText(message)
+        mw.taskman.run_on_main(update)
+
+    def process_next_notion_update():
+        """Process the next Notion database update"""
+        nonlocal current_notion_update
+
+        databases = [
+            (SUBJECT_DATABASE_ID, "Subjects database"),
+            (PHARMACOLOGY_DATABASE_ID, "Pharmacology database"),
+            (ETG_DATABASE_ID, "eTG database"),
+            (ROTATION_DATABASE_ID, "Rotation database")
+        ]
+
+        if current_notion_update < len(databases):
+            db_id, name = databases[current_notion_update]
+            if db_id:
+                update_progress(current_notion_update + 4, f"Updating new {name} pages from Notion...")
+                notion_cache.update_cache_async(db_id, force=True, callback=on_notion_update_complete)
+            else:
+                on_notion_update_complete()
+        else:
+            def complete():
+                if progress is None:
+                    return
+                progress.setValue(8)
+                progress.close()
+                tooltip("Cache successfully downloaded and updated")
+            mw.taskman.run_on_main(complete)
+
+    def on_notion_update_complete():
+        """Handle completion of a Notion update"""
+        nonlocal current_notion_update
+        current_notion_update += 1
+        process_next_notion_update()
+
+    def update_all_databases():
+        """Start the chain of Notion database updates"""
+        process_next_notion_update()
 
     def on_error():
-        progress.close()
-        tooltip("Error downloading cache from GitHub. Check the console for details.")
+        def error():
+            if progress is None:
+                return
+            progress.close()
+            tooltip("Error downloading cache from GitHub. Check the console for details.")
+        mw.taskman.run_on_main(error)
 
     def download_thread():
-        success = notion_cache.download_all_caches_from_github()
-        mw.taskman.run_on_main(on_complete if success else on_error)
+        # GitHub downloads (steps 0-3)
+        for idx, (name, database_id) in enumerate([
+            ("Subjects", SUBJECT_DATABASE_ID),
+            ("Pharmacology", PHARMACOLOGY_DATABASE_ID),
+            ("eTG", ETG_DATABASE_ID),
+            ("Rotation", ROTATION_DATABASE_ID)
+        ]):
+            update_progress(idx, f"Downloading {name} database from GitHub...")
+            success = notion_cache.download_cache_from_github(database_id)
+            if not success:
+                on_error()
+                return
+            time.sleep(0.5)  # Small delay to make progress visible
+
+        # Start Notion updates (steps 4-7)
+        update_all_databases()
 
     thread = threading.Thread(target=download_thread)
     thread.start()
 
-download_cache_action = QAction("Malleus Full Database Sync", mw)
-download_cache_action.triggered.connect(download_github_cache)
-mw.form.menuTools.addAction(download_cache_action)
+# download_cache_action = QAction("Malleus Full Database Sync", mw)
+# download_cache_action.triggered.connect(download_github_cache)
+# mw.form.menuTools.addAction(download_cache_action)
 
 def setup_editor_buttons(buttons, editor):
     """Add Malleus button to the editor toolbar"""
@@ -1007,7 +1073,7 @@ def setup_browser_menu(browser):
     update_cache_action = QAction(browser)
     update_cache_action.setText("Update Malleus Database Cache")
     notion_menu.addAction(update_cache_action)
-    update_cache_action.triggered.connect(lambda _, b=browser: update_notion_cache(b))
+    update_cache_action.triggered.connect(lambda _, b=browser: download_github_cache(b))
 
     # Add to browser toolbar
     try:
@@ -1022,17 +1088,17 @@ def setup_browser_menu(browser):
     except:
         pass
 
-def update_notion_cache(browser=None):
-    """Update the Notion database cache"""
-    notion_cache = NotionCache(addon_dir)
-    if SUBJECT_DATABASE_ID:
-        notion_cache.update_cache_async(SUBJECT_DATABASE_ID, force=True)
-    if PHARMACOLOGY_DATABASE_ID:
-        notion_cache.update_cache_async(PHARMACOLOGY_DATABASE_ID, force=True)
-    if ETG_DATABASE_ID:
-        notion_cache.update_cache_async(ETG_DATABASE_ID, force=True)
-    if ROTATION_DATABASE_ID:
-        notion_cache.update_cache_async(ROTATION_DATABASE_ID, force=True)
+# def update_notion_cache(browser=None):
+#     """Update the Notion database cache"""
+#     notion_cache = NotionCache(addon_dir)
+#     if SUBJECT_DATABASE_ID:
+#         notion_cache.update_cache_async(SUBJECT_DATABASE_ID, force=True)
+#     if PHARMACOLOGY_DATABASE_ID:
+#         notion_cache.update_cache_async(PHARMACOLOGY_DATABASE_ID, force=True)
+#     if ETG_DATABASE_ID:
+#         notion_cache.update_cache_async(ETG_DATABASE_ID, force=True)
+#     if ROTATION_DATABASE_ID:
+#         notion_cache.update_cache_async(ROTATION_DATABASE_ID, force=True)
 
 # Add hook for browser setup
 from aqt.gui_hooks import browser_menus_did_init
