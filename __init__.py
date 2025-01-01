@@ -358,14 +358,14 @@ class NotionPageSelector(QDialog):
 
         self.notion_cache = NotionCache(addon_dir)
         # Initialize cache on startup without forcing
-        if SUBJECT_DATABASE_ID:
-            self.notion_cache.update_cache_async(SUBJECT_DATABASE_ID, force=False)
-        if PHARMACOLOGY_DATABASE_ID:
-            self.notion_cache.update_cache_async(PHARMACOLOGY_DATABASE_ID, force=False)
-        if ETG_DATABASE_ID:
-            self.notion_cache.update_cache_async(ETG_DATABASE_ID, force=False)
-        if ROTATION_DATABASE_ID:
-            self.notion_cache.update_cache_async(ROTATION_DATABASE_ID, force=False)
+        # if SUBJECT_DATABASE_ID:
+        #     self.notion_cache.update_cache_async(SUBJECT_DATABASE_ID, force=False)
+        # if PHARMACOLOGY_DATABASE_ID:
+        #     self.notion_cache.update_cache_async(PHARMACOLOGY_DATABASE_ID, force=False)
+        # if ETG_DATABASE_ID:
+        #     self.notion_cache.update_cache_async(ETG_DATABASE_ID, force=False)
+        # if ROTATION_DATABASE_ID:
+        #     self.notion_cache.update_cache_async(ROTATION_DATABASE_ID, force=False)
 
         self.database_properties = {
             "Subjects": [
@@ -544,31 +544,24 @@ class NotionPageSelector(QDialog):
         database_id = self.get_selected_database_id()
         print(f"Using database ID: {database_id}")
 
-        # Force sync if cache is empty
-        def search_callback():
-            # Clear existing checkboxes
-            for i in reversed(range(self.checkbox_layout.count())):
-                self.checkbox_layout.itemAt(i).widget().setParent(None)
+        # Since cache is checked on startup, directly perform search
+        self.pages_data = self.query_notion_pages(search_term, database_id)
 
-            self.pages_data = self.query_notion_pages(search_term, database_id)
+        # Clear existing checkboxes
+        for i in reversed(range(self.checkbox_layout.count())):
+            self.checkbox_layout.itemAt(i).widget().setParent(None)
 
-            # Create checkboxes for results
-            for page in self.pages_data:
-                try:
-                    title = page['properties']['Name']['title'][0]['text']['content'] if page['properties']['Name']['title'] else "Untitled"
-                    search_suffix = page['properties']['Search Suffix']['formula']['string'] if page['properties'].get('Search Suffix', {}).get('formula', {}).get('string') else ""
+        # Create checkboxes for results
+        for page in self.pages_data:
+            try:
+                title = page['properties']['Name']['title'][0]['text']['content'] if page['properties']['Name']['title'] else "Untitled"
+                search_suffix = page['properties']['Search Suffix']['formula']['string'] if page['properties'].get('Search Suffix', {}).get('formula', {}).get('string') else ""
 
-                    display_text = f"{title} {search_suffix}"
-                    checkbox = QCheckBox(display_text)
-                    self.checkbox_layout.addWidget(checkbox)
-                except Exception as e:
-                    showInfo(f"Error processing page: {e}")
-
-        # Check if cache needs updating
-        if self.notion_cache.is_cache_expired(database_id):
-            self.notion_cache.update_cache_async(database_id, force=True, callback=search_callback)
-        else:
-            search_callback()
+                display_text = f"{title} {search_suffix}"
+                checkbox = QCheckBox(display_text)
+                self.checkbox_layout.addWidget(checkbox)
+            except Exception as e:
+                showInfo(f"Error processing page: {e}")
 
     def select_all_pages(self):
         for i in range(self.checkbox_layout.count()):
@@ -1106,20 +1099,44 @@ browser_menus_did_init.append(setup_browser_menu)
 
 # Initialize cache on addon load
 def init_notion_cache():
-    """Initialize the cache on startup"""
-    try:
-        cache = NotionCache(addon_dir)
-        # Initialize without forcing sync
-        if SUBJECT_DATABASE_ID:
-            cache.update_cache_async(SUBJECT_DATABASE_ID, force=False)
-        if PHARMACOLOGY_DATABASE_ID:
-            cache.update_cache_async(PHARMACOLOGY_DATABASE_ID, force=False)
-        if ETG_DATABASE_ID:
-            cache.update_cache_async(ETG_DATABASE_ID, force=False)
-        if ROTATION_DATABASE_ID:
-            cache.update_cache_async(ROTATION_DATABASE_ID, force=False)
-    except Exception as e:
-        showInfo(f"Error initializing cache: {e}")
+    """Initialize the cache check asynchronously on startup"""
+    def check_caches():
+        try:
+            print("Starting background cache check...")
+            cache = NotionCache(addon_dir)
+            databases = [
+                (SUBJECT_DATABASE_ID, "Subjects"),
+                (PHARMACOLOGY_DATABASE_ID, "Pharmacology"),
+                (ETG_DATABASE_ID, "eTG"),
+                (ROTATION_DATABASE_ID, "Rotation")
+            ]
 
-# Add to addon initialization
+            for db_id, name in databases:
+                if not db_id:
+                    print(f"Skipping {name} - no database ID")
+                    continue
+
+                print(f"Checking {name} cache status...")
+                if cache.is_cache_expired(db_id):
+                    print(f"{name} cache is expired, attempting GitHub download...")
+                    if cache.download_cache_from_github(db_id):
+                        print(f"Successfully updated {name} cache from GitHub")
+                        continue
+                    print(f"GitHub download failed for {name}, falling back to Notion update...")
+                    cache.update_cache_async(db_id, force=True)
+                else:
+                    print(f"{name} cache is up to date")
+
+            print("Background cache check completed")
+
+        except Exception as e:
+            print(f"Error in background cache check: {e}")
+
+    thread = threading.Thread(target=check_caches, daemon=True)
+    thread.start()
+
+# Initialize cache when addon is loaded
+init_notion_cache()
+
+
 # mw.addonManager.setConfigAction(__name__, init_notion_cache)
