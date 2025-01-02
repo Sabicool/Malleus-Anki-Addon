@@ -765,7 +765,7 @@ class NotionPageSelector(QDialog):
             if unique_sources:
                 note['fields']['Source'] = '<br>'.join(unique_sources)
 
-        if self.database_selector.currentText() == "Rotation":
+        if self.database_selector.currentText() == "Textbooks":
             sources = []
             for page in selected_pages:
                 source = self.get_property_content(page, 'Source')
