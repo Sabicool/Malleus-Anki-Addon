@@ -184,7 +184,7 @@ class NotionCache:
             return "eTG"
         elif database_id == ROTATION_DATABASE_ID:
             return "Rotation"
-        elif database_id = TEXTBOOKS_DATABASE_ID
+        elif database_id == TEXTBOOKS_DATABASE_ID:
             return "Textbooks"
         return "Unknown Database"
 
@@ -527,7 +527,7 @@ class NotionPageSelector(QDialog):
             return PHARMACOLOGY_DATABASE_ID
         elif self.database_selector.currentText() == "eTG":
             return ETG_DATABASE_ID
-        elif self.database.selector.currentText() == "Rotation":
+        elif self.database_selector.currentText() == "Rotation":
             return ROTATION_DATABASE_ID
         else:
             return TEXTBOOKS_DATABASE_ID
@@ -561,9 +561,13 @@ class NotionPageSelector(QDialog):
             self.checkbox_layout.itemAt(i).widget().setParent(None)
 
         # Create checkboxes for results
+
         for page in self.pages_data:
             try:
-                title = page['properties']['Name']['title'][0]['text']['content'] if page['properties']['Name']['title'] else "Untitled"
+                if self.database_selector.currentText() == "Textbooks":
+                    title = page['properties']['Search Term']['formula']['string'] if page['properties'].get('Search Term', {}).get('formula', {}).get('string') else "Untitled"
+                else:
+                    title = page['properties']['Name']['title'][0]['text']['content'] if page['properties']['Name']['title'] else "Untitled"
                 search_suffix = page['properties']['Search Suffix']['formula']['string'] if page['properties'].get('Search Suffix', {}).get('formula', {}).get('string') else ""
 
                 display_text = f"{title} {search_suffix}"
@@ -959,7 +963,7 @@ def download_github_cache(browser=None):
     # Create progress dialog on main thread
     def create_progress():
         nonlocal progress
-        progress = QProgressDialog("Initializing...", None, 0, 8, mw)
+        progress = QProgressDialog("Initializing...", None, 0, 10, mw)
         progress.setWindowTitle("Cache Update")
         progress.show()
 
@@ -983,7 +987,7 @@ def download_github_cache(browser=None):
             (SUBJECT_DATABASE_ID, "Subjects database"),
             (PHARMACOLOGY_DATABASE_ID, "Pharmacology database"),
             (ETG_DATABASE_ID, "eTG database"),
-            (ROTATION_DATABASE_ID, "Rotation database")
+            (ROTATION_DATABASE_ID, "Rotation database"),
             (TEXTBOOKS_DATABASE_ID, "Textbooks database")
         ]
 
@@ -1027,7 +1031,7 @@ def download_github_cache(browser=None):
             ("Subjects", SUBJECT_DATABASE_ID),
             ("Pharmacology", PHARMACOLOGY_DATABASE_ID),
             ("eTG", ETG_DATABASE_ID),
-            ("Rotation", ROTATION_DATABASE_ID)
+            ("Rotation", ROTATION_DATABASE_ID),
             ("Textbooks", TEXTBOOKS_DATABASE_ID)
         ]):
             update_progress(idx, f"Downloading {name} database from GitHub...")
