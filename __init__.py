@@ -28,6 +28,7 @@ SUBJECT_DATABASE_ID = '2674b67cbdf84a11a057a29cc24c524f'
 PHARMACOLOGY_DATABASE_ID = '9ff96451736d43909d49e3b9d60971f8'
 ETG_DATABASE_ID = '22282971487f4f559dce199476709b03'
 ROTATION_DATABASE_ID = '69b3e7fdce1548438b26849466d7c18e'
+TEXTBOOKS_DATABASE_ID = '13d5964e68a480bfb07cf7e2f1786075'
 
 config = mw.addonManager.getConfig(__name__)
 
@@ -183,6 +184,8 @@ class NotionCache:
             return "eTG"
         elif database_id == ROTATION_DATABASE_ID:
             return "Rotation"
+        elif database_id = TEXTBOOKS_DATABASE_ID
+            return "Textbooks"
         return "Unknown Database"
 
     def _update_cache_thread(self, database_id: str, database_name: str, callback: callable = None):
@@ -319,7 +322,8 @@ class NotionCache:
             '2674b67cbdf84a11a057a29cc24c524f',  # SUBJECT_DATABASE_ID
             '9ff96451736d43909d49e3b9d60971f8',  # PHARMACOLOGY_DATABASE_ID
             '22282971487f4f559dce199476709b03',  # ETG_DATABASE_ID
-            '69b3e7fdce1548438b26849466d7c18e'   # ROTATION_DATABASE_ID
+            '69b3e7fdce1548438b26849466d7c18e',  # ROTATION_DATABASE_ID
+            '13d5964e68a480bfb07cf7e2f1786075'
         ]:
             if not self.download_cache_from_github(database_id):
                 success = False
@@ -419,6 +423,9 @@ class NotionPageSelector(QDialog):
             ],
             "Rotation": [
                 "Tag"
+            ],
+            "Textbooks": [
+                "Tag"
             ]
         }
         self.pages_data = []  # Store full page data
@@ -435,7 +442,7 @@ class NotionPageSelector(QDialog):
 
         # Database selector
         self.database_selector = QComboBox()
-        self.database_selector.addItems(["Subjects", "Pharmacology", "eTG", "Rotation"])
+        self.database_selector.addItems(["Subjects", "Pharmacology", "eTG", "Rotation", "Textbooks"])
         self.database_selector.currentTextChanged.connect(self.update_property_selector)
         search_layout.addWidget(self.database_selector)
 
@@ -520,8 +527,10 @@ class NotionPageSelector(QDialog):
             return PHARMACOLOGY_DATABASE_ID
         elif self.database_selector.currentText() == "eTG":
             return ETG_DATABASE_ID
-        else:  # eTG
+        elif self.database.selector.currentText() == "Rotation":
             return ROTATION_DATABASE_ID
+        else:
+            return TEXTBOOKS_DATABASE_ID
 
     def query_notion_pages(self, filter_text: str, database_id: str) -> List[Dict]:
         """Query pages from cache and filter them"""
@@ -752,6 +761,20 @@ class NotionPageSelector(QDialog):
             if unique_sources:
                 note['fields']['Source'] = '<br>'.join(unique_sources)
 
+        if self.database_selector.currentText() == "Rotation":
+            sources = []
+            for page in selected_pages:
+                source = self.get_property_content(page, 'Source')
+                if source:
+                    sources.append(source)
+
+            # Combine sources, remove duplicates
+            unique_sources = list(dict.fromkeys(sources))
+
+            # Join sources with line breaks and add to fields
+            if unique_sources:
+                note['fields']['Source'] = '<br>'.join(unique_sources)
+
         # Open add cards dialog
         self.guiAddCards(note)
         self.accept()
@@ -961,12 +984,13 @@ def download_github_cache(browser=None):
             (PHARMACOLOGY_DATABASE_ID, "Pharmacology database"),
             (ETG_DATABASE_ID, "eTG database"),
             (ROTATION_DATABASE_ID, "Rotation database")
+            (TEXTBOOKS_DATABASE_ID, "Textbooks database")
         ]
 
         if current_notion_update < len(databases):
             db_id, name = databases[current_notion_update]
             if db_id:
-                update_progress(current_notion_update + 4, f"Updating new {name} pages from Notion...")
+                update_progress(current_notion_update + 5, f"Updating new {name} pages from Notion...")
                 notion_cache.update_cache_async(db_id, force=True, callback=on_notion_update_complete)
             else:
                 on_notion_update_complete()
@@ -974,7 +998,7 @@ def download_github_cache(browser=None):
             def complete():
                 if progress is None:
                     return
-                progress.setValue(8)
+                progress.setValue(10)
                 progress.close()
                 tooltip("Cache successfully downloaded and updated")
             mw.taskman.run_on_main(complete)
@@ -1004,6 +1028,7 @@ def download_github_cache(browser=None):
             ("Pharmacology", PHARMACOLOGY_DATABASE_ID),
             ("eTG", ETG_DATABASE_ID),
             ("Rotation", ROTATION_DATABASE_ID)
+            ("Textbooks", TEXTBOOKS_DATABASE_ID)
         ]):
             update_progress(idx, f"Downloading {name} database from GitHub...")
             success = notion_cache.download_cache_from_github(database_id)
@@ -1108,7 +1133,8 @@ def init_notion_cache():
                 (SUBJECT_DATABASE_ID, "Subjects"),
                 (PHARMACOLOGY_DATABASE_ID, "Pharmacology"),
                 (ETG_DATABASE_ID, "eTG"),
-                (ROTATION_DATABASE_ID, "Rotation")
+                (ROTATION_DATABASE_ID, "Rotation"),
+                (TEXTBOOKS_DATABASE_ID, "Textbooks")
             ]
 
             for db_id, name in databases:
