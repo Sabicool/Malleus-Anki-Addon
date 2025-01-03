@@ -50,7 +50,7 @@ class NotionCache:
             "Content-Type": "application/json"
         }
         #self.config_manager = ConfigManager()
-        self.CACHE_EXPIRY = config['cache_expiry'] * 24 * 60 * 60
+        self.CACHE_EXPIRY = config['cache_expiry'] * 24 * 60 * 60 + 1 * 60 * 60 # Added 1 hour to allow time for github bot
         self.github_repo = "Sabicool/Malleus-Anki-Addon"  # Replace with your GitHub repo
         self.github_branch = "main"  # Or whatever branch you use
 
