@@ -85,7 +85,8 @@ class NotionCache:
 
             if (cache_data.get('version') != self.CACHE_VERSION or
                 current_time - cache_timestamp > self.CACHE_EXPIRY):
-                return [], current_time  # Return current time instead of 0
+                #return [], current_time  # Return current time instead of 0
+                tooltip("Newer database version available. Restart anki or click update database to update database")
 
             return cache_data.get('pages', []), cache_timestamp
 
