@@ -271,26 +271,153 @@ class NotionCache:
         return pages
 
     def filter_pages(self, pages: List[Dict], search_term: str) -> List[Dict]:
-        """Filter pages based on search term"""
-        search_term = search_term.lower()
-        filtered_pages = []
+        """Filter pages based on search term using fuzzy matching with precise word boundaries"""
+        from difflib import SequenceMatcher
+        import re
+        from functools import lru_cache
 
+        # Medical term variations stored as a constant to avoid rebuilding
+        MEDICAL_VARIATIONS = {
+            'paed': {'paediatric', 'paediatrics', 'pediatric', 'pediatrics'},
+            'paediatric': {'paed', 'paediatrics', 'pediatric', 'pediatrics'},
+            'paediatrics': {'paed', 'paediatric', 'pediatric', 'pediatrics'},
+            'emergency': {'emergencies'},
+            'emergencies': {'emergency'},
+            'cardio': {'cardiac', 'cardiovascular'},
+            'cardiac': {'cardio', 'cardiovascular'},
+            'cardiology': {'cardio', 'cardiac', 'cardiovascular'},
+            'gastro': {'gastrointestinal', 'gastroenterology'},
+            'neuro': {'neurological', 'neurology'},
+            'pulm': {'pulmonary', 'respiratory'},
+            'resp': {'respiratory', 'pulmonary'},
+            'gyn': {'gynecology', 'gynaecology'},
+            'obs': {'obstetrics', 'obstetrical'},
+            'surg': {'surgical', 'surgery'}
+        }
+
+        @lru_cache(maxsize=1000)
+        def get_word_variations(word: str) -> frozenset:
+            """Get common variations of medical terms with caching"""
+            variations = {word}
+            word_lower = word.lower()
+
+            # Add variations from mappings
+            for key, values in MEDICAL_VARIATIONS.items():
+                if word_lower == key:
+                    variations.update(values)
+                elif word_lower in values:
+                    variations.add(key)
+                    variations.update(values)
+
+            # Handle plural forms
+            if word.endswith('y'):
+                variations.add(word[:-1] + 'ies')
+            elif word.endswith('ies'):
+                variations.add(word[:-3] + 'y')
+            elif word.endswith('s') and not word.endswith('ss'):
+                variations.add(word[:-1])
+            else:
+                variations.add(word + 's')
+
+            return frozenset(variations)  # Immutable for caching
+
+        @lru_cache(maxsize=1000)
+        def normalize_word(word: str) -> frozenset:
+            """Normalize a single word and get its variations"""
+            if len(word) <= 2:
+                return frozenset({word})
+            return get_word_variations(word)
+
+        def normalize_text(text: str) -> set:
+            """Normalize text and return set of variations"""
+            # Clean and split text
+            words = re.sub(r'[^\w\s]', ' ', text.lower()).split()
+
+            # Get variations for each word and union them
+            normalized = set()
+            for word in words:
+                normalized.update(normalize_word(word))
+            return normalized
+
+        @lru_cache(maxsize=1000)
+        def is_partial_match(search_word: str, target_word: str) -> bool:
+            """Check if search_word is a partial match of target_word"""
+            if search_word == target_word:
+                return True
+
+            search_variations = normalize_word(search_word)
+            target_variations = normalize_word(target_word)
+
+            # Check for direct matches first
+            if not search_variations.isdisjoint(target_variations):
+                return True
+
+            # Only do expensive operations for longer terms
+            if len(search_word) > 5 and len(target_word) > 5:
+                if any(s in target_word for s in search_variations):
+                    return True
+
+                # Use sequence matcher as last resort
+                similarity = SequenceMatcher(None, search_word, target_word).ratio()
+                if similarity > 0.85:
+                    return True
+
+            return False
+
+        def calculate_word_match_score(search_words: set, target_words: set) -> float:
+            """Calculate how well the search words match the target words"""
+            if not search_words:
+                return 0.0
+
+            matches = sum(1 for sword in search_words
+                         if any(is_partial_match(sword, tword) for tword in target_words))
+
+            return matches / len(search_words) if matches == len(search_words) else 0.0
+
+        # Pre-process search term once
+        search_words = normalize_text(search_term)
+
+        # Pre-process and cache all page terms
+        page_terms_cache = {}
         for page in pages:
-            # Check if page has properties
             if not page.get('properties'):
                 continue
 
-            # Get the search term from the page
             search_term_prop = page['properties'].get('Search Term', {})
             if not search_term_prop or search_term_prop.get('type') != 'formula':
                 continue
 
-            page_search_term = search_term_prop.get('formula', {}).get('string', '').lower()
+            page_search_term = search_term_prop.get('formula', {}).get('string', '')
+            if page_search_term:
+                page_terms_cache[id(page)] = normalize_text(page_search_term)
 
-            # Check if the search term matches
-            if search_term in page_search_term: #or page_search_term in search_term:
-                filtered_pages.append(page)
+        # Filter pages
+        filtered_pages = []
+        similarity_threshold = 0.5
 
+        for page in pages:
+            page_terms = page_terms_cache.get(id(page))
+            if not page_terms:
+                continue
+
+            # Calculate word match score
+            word_match_score = calculate_word_match_score(search_words, page_terms)
+
+            if word_match_score > 0:
+                # Only calculate sequence similarity if words match
+                sequence_similarity = SequenceMatcher(
+                    None,
+                    ' '.join(search_words),
+                    ' '.join(page_terms)
+                ).ratio()
+
+                similarity = (word_match_score * 0.9) + (sequence_similarity * 0.1)
+
+                if similarity >= similarity_threshold:
+                    page['_similarity'] = similarity
+                    filtered_pages.append(page)
+
+        filtered_pages.sort(key=lambda x: x.get('_similarity', 0), reverse=True)
         return filtered_pages
 
     def download_cache_from_github(self, database_id: str) -> bool:
