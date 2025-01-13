@@ -292,6 +292,7 @@ class NotionCache:
             'resp': {'respiratory', 'pulmonary'},
             'gyn': {'gynecology', 'gynaecology'},
             'obs': {'obstetrics', 'obstetrical'},
+            'psych': {'psychiatry'},
             'surg': {'surgical', 'surgery'}
         }
 
