@@ -815,10 +815,24 @@ class NotionPageSelector(QDialog):
 
         property_name = self.property_selector.currentText()
 
+        if not selected_pages:
+            showInfo("Please select at least one page")
+            return
+
         # Special handling for Subjects database when Tag is selected
-        if self.database_selector.currentText() == "Subjects" and property_name == "Tag":
-            # Use Main Tag instead of Tag
-            property_name = "Main Tag"
+        if property_name == "":
+            if self.database_selector.currentText() in ("Subjects", "Pharmacology", "eTG"):
+                showInfo("Please select a subtag (Change the dropdown to the right of the searchbox)")
+                return
+            else:
+                property_name = "Tag"
+
+        # if self.database_selector.currentText() in ("Subjects", "Pharmacology", "eTG") and property_name == "":
+        #     # Use Main Tag instead of Tag
+        #     # property_name = "Main Tag"
+
+        #     showInfo("Please select a subtag (Change the 'Tag' dropdown to the right of the searchbox)")
+        #     return
 
         # Special handling for eTG database when subtag is empty
         if self.database_selector.currentText() == "eTG" and property_name != "Tag" and property_name != "Main Tag":
