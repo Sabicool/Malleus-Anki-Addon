@@ -502,7 +502,7 @@ class NotionPageSelector(QDialog):
 
         self.database_properties = {
             "Subjects": [
-                "Tag",
+                "",
                 "Epidemiology",
                 "Aetiology",
                 "Risk Factors",
@@ -517,7 +517,7 @@ class NotionPageSelector(QDialog):
                 "Screening/Prevention"
             ],
             "Pharmacology": [
-                "Tag",
+                "",
                 "Generic Names",
                 "Indications",
                 "Contraindications/Precautions",
@@ -528,7 +528,7 @@ class NotionPageSelector(QDialog):
                 "Monitoring"
             ],
             "eTG": [
-                "Tag",
+                "",
                 "Epidemiology",
                 "Aetiology",
                 "Risk Factors",
@@ -551,10 +551,10 @@ class NotionPageSelector(QDialog):
                 "Monitoring"
             ],
             "Rotation": [
-                "Tag"
+                ""
             ],
             "Textbooks": [
-                "Tag"
+                ""
             ]
         }
         self.pages_data = []  # Store full page data
@@ -619,25 +619,28 @@ class NotionPageSelector(QDialog):
         find_cards_button.clicked.connect(self.search_cards)
         button_layout.addWidget(find_cards_button)
 
-        # Only show these buttons when editing an existing note
+        if isinstance(self.parent(), AddCards):
+            create_cards_button = QPushButton("Add Tags (C)")
+        else:
+            create_cards_button = QPushButton("Create Cards")
 
-        create_cards_button = QPushButton("Create Cards")
         create_cards_button.clicked.connect(self.create_cards)
         button_layout.addWidget(create_cards_button)
 
-        if self.current_note is not None:
+        # Only show these buttons when editing an existing note
+
+        if self.current_note is not None or isinstance(self.parent(), AddCards):
             replace_tags_button = QPushButton("Replace Tags")
             replace_tags_button.clicked.connect(self.replace_tags)
+            button_layout.addWidget(replace_tags_button)
 
+        if self.current_note is not None:
             add_tags_button = QPushButton("Add Tags")
             add_tags_button.clicked.connect(self.add_tags)
-
-            button_layout.addWidget(replace_tags_button)
             button_layout.addWidget(add_tags_button)
 
         update_database_button = QPushButton("Update database")
         update_database_button.clicked.connect(download_github_cache)
-
         button_layout.addWidget(update_database_button)
 
         layout.addLayout(button_layout)
@@ -739,7 +742,7 @@ class NotionPageSelector(QDialog):
         for tag in tags:
             individual_tags.extend(tag.split())
 
-        if property_name == 'Tag' or property_name == 'Main Tag':
+        if property_name == '' or property_name == 'Tag' or property_name == 'Main Tag':
             subtag = ""
         else:
             subtag = f"::*{property_name}".replace(' ', '_')
@@ -880,11 +883,6 @@ class NotionPageSelector(QDialog):
 
         # Rest of the method remains the same...
 
-        if not selected_pages:
-            tags = ["#Malleus_CM::#TO_BE_TAGGED"]
-
-        # Rest of the method remains the same...
-
         # Prepare note data
         note = {
             'deckName': config['deck_name'],
@@ -924,7 +922,7 @@ class NotionPageSelector(QDialog):
 
         # Open add cards dialog
         self.guiAddCards(note)
-        self.accept()
+        # self.accept()
 
     def guiAddCards(self, note):
         collection = mw.col
@@ -953,7 +951,7 @@ class NotionPageSelector(QDialog):
                     # Fallback to basic loadNote if both fail
                     addCards.editor.loadNote(current_note)
 
-            self.accept()
+            # self.accept()
             return
 
         # Otherwise, proceed with creating a new note as before
@@ -997,6 +995,8 @@ class NotionPageSelector(QDialog):
         else:
             openNewWindow()
 
+        self.accept()
+
     def get_tags_from_selected_pages(self):
         """Extract tags from selected pages"""
         selected_pages = []
@@ -1034,29 +1034,102 @@ class NotionPageSelector(QDialog):
 
     def replace_tags(self):
         """Replace existing tags with new ones"""
-        if not self.current_note:
+        # Get the appropriate note reference based on context
+        note = None
+        parent = self.parent()
+
+        if isinstance(parent, Browser):
+            note = parent.editor.note
+        elif isinstance(parent, EditCurrent):
+            note = parent.editor.note
+        elif isinstance(parent, AddCards):
+            note = parent.editor.note
+
+        if not note:
+            showInfo("No note found in current context")
             return
 
-        tags = self.get_tags_from_selected_pages()
+        # Get new tags from selected pages
+        new_tags = self.get_tags_from_selected_pages()
 
         # Update the note's tags
-        self.current_note.tags = tags
+        note.tags = new_tags
 
-        # Save the note
-        self.current_note.flush()
-
-        # Refresh the editor
-        if isinstance(self.parent(), Browser):
-            self.parent().model.reset()
-        elif isinstance(self.parent(), EditCurrent):
-            self.parent().editor.loadNote()
+        # Save and refresh based on context
+        if isinstance(parent, AddCards):
+            # For AddCards dialog
+            parent.editor.loadNote()
+            parent.editor.setNote(note)
+            parent.editor.loadNote()
+            mw.requireReset()
+        else:
+            # For Browser/EditCurrent contexts
+            note.flush()
+            if isinstance(parent, Browser):
+                parent.model.reset()
+            elif isinstance(parent, EditCurrent):
+                parent.editor.loadNote()
 
         self.accept()
+
+    # def replace_tags(self):
+    #     """Replace existing tags with new ones"""
+    #     if not selected_pages:
+    #         showInfo("Please select at least one page")
+    #         return
+
+    #     if property_name == "":
+    #         if self.database_selector.currentText() in ("Subjects", "Pharmacology", "eTG"):
+    #             showInfo("Please select a subtag (Change the dropdown to the right of the searchbox)")
+    #             return
+    #         else:
+    #             property_name = "Tag"
+
+    #     if isinstance(self.parent(), AddCards):
+
+
+    #     if not self.current_note:
+    #         return
+
+    #     tags = self.get_tags_from_selected_pages()
+
+    #     # Update the note's tags
+    #     self.current_note.tags = tags
+
+    #     # Save the note
+    #     self.current_note.flush()
+
+    #     # Refresh the editor
+    #     if isinstance(self.parent(), Browser):
+    #         self.parent().model.reset()
+    #     elif isinstance(self.parent(), EditCurrent):
+    #         self.parent().editor.loadNote()
+
+    #     self.accept()
 
     def add_tags(self):
         """Add new tags to existing ones"""
         if not self.current_note:
             return
+
+        selected_pages = []
+        for i in range(self.checkbox_layout.count()):
+            checkbox = self.checkbox_layout.itemAt(i).widget()
+            if checkbox.isChecked():
+                selected_pages.append(self.pages_data[i])
+
+        property_name = self.property_selector.currentText()
+
+        if not selected_pages:
+            showInfo("Please select at least one page")
+            return
+
+        if property_name == "":
+            if self.database_selector.currentText() in ("Subjects", "Pharmacology", "eTG"):
+                showInfo("Please select a subtag (Change the dropdown to the right of the searchbox)")
+                return
+            else:
+                property_name = "Tag"
 
         # Get current tags
         current_tags = set(self.current_note.tags)
@@ -1079,7 +1152,7 @@ class NotionPageSelector(QDialog):
         elif isinstance(self.parent(), EditCurrent):
             self.parent().editor.loadNote()
 
-        self.accept()
+        #self.accept()
 
 def show_page_selector(browser=None):
     """Show the page selector dialog with the appropriate parent window"""
