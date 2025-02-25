@@ -138,24 +138,16 @@ The `cache_expiry` is the number of days after which the local database copy of 
 -   [ ] Add guidelines database
 -   [X] Integrate full database syncs using python script
 -   [ ] Integrate with local LLM or neural network to suggest tags
+-   [ ] Add note type customisation options
 
 
 <a id="org164e890"></a>
 
 ## Troubleshooting
 
-This extension requires access to the internet to use the notion API. Please ensure you are using it while connected to the internet.
-
-There are some issues when trying to use the add-on while the database is being updated. Try re-installing the addon if issues occur.
+There are some issues when trying to use the add-on while the database is being updated. Please wait for the progress bar to finish before using the page selector.
 
 <a id="org389a9f6"></a>
-
-## Limitations
-
-I have not yet implemented full database syncs into the add on. Full database syncs can take a bit of time unfortunately and I will update the cache and re-upload the Anki addon when this occurs. I could consider writing a script in python to do this on a publicly hosted github repository and then the cache can be downloaded the cache from there.
-
-
-<a id="orgd2879ee"></a>
 
 ## Licence
 
