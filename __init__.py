@@ -823,13 +823,28 @@ class NotionPageSelector(QDialog):
             showInfo("Please select at least one page")
             return
 
-        # Special handling for Subjects database when Tag is selected
+        all_general = all(
+            'General' in page.get('properties', {}).get('Search Suffix', {}).get('formula', {}).get('string', '')
+            for page in selected_pages
+            )
+
         if property_name == "":
-            if self.database_selector.currentText() in ("Subjects", "Pharmacology", "eTG"):
-                showInfo("Please select a subtag (Change the dropdown to the right of the searchbox)")
-                return
+            if self.database_selector.currentText() in ("Subjects", "Pharmacology"):
+                if not all_general:  # Only show warning if NOT all general
+                    showInfo("Please select a subtag (Change the dropdown to the right of the searchbox)")
+                    return
+                else:
+                    property_name = "Main Tag"  # Use main tag if all are general
             else:
                 property_name = "Tag"
+
+        # Special handling for Subjects database when Tag is selected
+        #if property_name == "":
+        #    if self.database_selector.currentText() in ("Subjects", "Pharmacology", "eTG"):
+        #        showInfo("Please select a subtag (Change the dropdown to the right of the searchbox)")
+        #        return
+        #    else:
+        #        property_name = "Tag"
 
         # if self.database_selector.currentText() in ("Subjects", "Pharmacology", "eTG") and property_name == "":
         #     # Use Main Tag instead of Tag
@@ -861,17 +876,16 @@ class NotionPageSelector(QDialog):
 
         tags = []
         for page in selected_pages:
-            # Determine which property to use for tags
-            if property_name == "Tag" or property_name == "Main Tag":
-                tag_prop = page['properties'].get(property_name)
-            else:
-                # Try to use the selected subtag property
-                tag_prop = page['properties'].get(property_name)
+            # Try to use the selected subtag property
+            tag_prop = page['properties'].get(property_name)
 
-                # If subtag is empty, fall back to 'Tag'
-                if (not tag_prop or
-                    (tag_prop['type'] == 'formula' and
-                     (not tag_prop['formula'].get('string') or tag_prop['formula'].get('string').strip() == ''))):
+            # If subtag is empty, fall back to 'Tag'
+            if (not tag_prop or
+                (tag_prop['type'] == 'formula' and
+                 (not tag_prop['formula'].get('string') or tag_prop['formula'].get('string').strip() == ''))):
+                if self.database_selector.currentText() == "Subjects":
+                    tag_prop = page['properties'].get('Main Tag')
+                else:
                     tag_prop = page['properties'].get('Tag')
 
             if tag_prop and tag_prop['type'] == 'formula':
