@@ -1090,10 +1090,18 @@ class NotionPageSelector(QDialog):
             showInfo("Please select at least one page")
             return
 
+        all_general = all(
+            'General' in page.get('properties', {}).get('Search Suffix', {}).get('formula', {}).get('string', '')
+            for page in selected_pages
+            )
+
         if property_name == "":
-            if self.database_selector.currentText() in ("Subjects", "Pharmacology", "eTG"):
-                showInfo("Please select a subtag (Change the dropdown to the right of the searchbox)")
-                return
+            if self.database_selector.currentText() in ("Subjects", "Pharmacology"):
+                if not all_general:  # Only show warning if NOT all general
+                    showInfo("Please select a subtag (Change the dropdown to the right of the searchbox)")
+                    return
+                else:
+                    property_name = "Main Tag"  # Use main tag if all are general
             else:
                 property_name = "Tag"
 
