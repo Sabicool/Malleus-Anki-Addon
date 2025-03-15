@@ -18,6 +18,9 @@ import threading
 from datetime import datetime
 import asyncio
 from functools import partial
+from aqt.qt import QKeySequence, QShortcut
+import weakref
+from aqt.qt import Qt
 
 # Load environment variables
 addon_dir = os.path.dirname(os.path.realpath(__file__))
@@ -1169,18 +1172,29 @@ class NotionPageSelector(QDialog):
 
         #self.accept()
 
-def show_page_selector(browser=None):
+def show_page_selector(parent=None):
     """Show the page selector dialog with the appropriate parent window"""
     # Ensure we have a proper QWidget parent
-    if browser is None or not isinstance(browser, QWidget):
+    if parent is None or not isinstance(parent, QWidget):
         parent = mw
-    else:
-        parent = browser
 
-    dialogue = NotionPageSelector(parent)
-    dialogue.show()
-    # dialog = NotionPageSelector(parent)
-    # dialog.exec_()
+    # Use a dictionary to track dialogs per parent
+    if not hasattr(parent, '_malleus_dialogs'):
+        parent._malleus_dialogs = []
+
+    # Clean up any deleted dialogs
+    parent._malleus_dialogs = [d for d in parent._malleus_dialogs if not sip.isdeleted(d)]
+
+    # Check for existing visible dialog for this parent
+    for dialog in parent._malleus_dialogs:
+        if dialog.isVisible():
+            dialog.activateWindow()
+            return
+
+    # Create new dialog with proper parent
+    dialog = NotionPageSelector(parent)
+    parent._malleus_dialogs.append(dialog)
+    dialog.show()
 
 malleus_add_card_action = QAction("Malleus Find/Add Cards", mw)
 malleus_add_card_action.triggered.connect(show_page_selector)
@@ -1360,6 +1374,10 @@ browser_menus_did_init.append(setup_browser_menu)
 # Initialize cache on addon load
 def init_notion_cache():
     """Initialize the cache check asynchronously on startup"""
+    global config
+    if 'shortcut' not in config:
+        config['shortcut'] = 'Ctrl+Alt+M'
+        mw.addonManager.writeConfig(__name__, config)
     def check_caches():
         try:
             print("Starting background cache check...")
@@ -1396,8 +1414,60 @@ def init_notion_cache():
     thread = threading.Thread(target=check_caches, daemon=True)
     thread.start()
 
+# mw.addonManager.setConfigAction(__name__, init_notion_cache)
+# Function to register the shortcut in a window
+def register_shortcut(window):
+    shortcut_key = config.get('shortcut', 'Ctrl+Alt+M')
+    shortcut = QShortcut(QKeySequence(shortcut_key), window)
+
+    # Handle Qt version differences for shortcut context
+    if hasattr(Qt, 'ShortcutContext'):
+        # Qt6 style
+        shortcut.setContext(Qt.ShortcutContext.WindowShortcut)
+    else:
+        # Qt5 style
+        shortcut.setContext(Qt.WindowShortcut)
+
+    weak_window = weakref.ref(window)
+
+    def trigger():
+        target_window = weak_window()
+        if target_window and not sip.isdeleted(target_window):
+            show_page_selector(target_window)
+
+    shortcut.activated.connect(trigger)
+
+    if not hasattr(window, '_malleus_shortcuts'):
+        window._malleus_shortcuts = []
+    window._malleus_shortcuts.append(shortcut)
+
+# Register shortcuts for all major window types
+def register_shortcuts():
+    """Register shortcut for main window - others via hooks"""
+    register_shortcut(mw)
+
+# Hooks to register shortcut when windows are created
+def on_browser_setup(browser):
+    register_shortcut(browser)
+
+def on_addcards_setup(add_cards_dialog):
+    register_shortcut(add_cards_dialog)
+
+def on_editor_did_load_note(editor):
+    # Check if we're in an EditCurrent window
+    from aqt.editcurrent import EditCurrent
+    if isinstance(editor.parentWindow, EditCurrent):
+        register_shortcut(editor.parentWindow)
+
+# Register all hooks
+from aqt.gui_hooks import browser_will_show, add_cards_did_init, editor_did_load_note
+
+browser_will_show.append(on_browser_setup)
+add_cards_did_init.append(on_addcards_setup)
+editor_did_load_note.append(on_editor_did_load_note)
+
+# Initial registration for existing windows
+register_shortcuts()
+
 # Initialize cache when addon is loaded
 init_notion_cache()
-
-
-# mw.addonManager.setConfigAction(__name__, init_notion_cache)

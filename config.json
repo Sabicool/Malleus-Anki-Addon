@@ -1,4 +1,6 @@
 {
     "deck_name": "Malleus Clinical Medicine (AU/NZ)",
-    "cache_expiry": 1
+    "cache_expiry": 1,
+    "shortcut": "Ctrl+Alt+M"
 }
+
