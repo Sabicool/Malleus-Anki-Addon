@@ -44,8 +44,6 @@ class NotionCache:
         self.cache_dir = Path(addon_dir) / "cache"
         self.cache_dir.mkdir(exist_ok=True)
         self.cache_lock = threading.Lock()
-        #self.sync_progress = None
-        #self.sync_timer = None
         self._sync_thread = None
         self.headers = {
             "Authorization": f"Bearer {NOTION_TOKEN}",
@@ -56,17 +54,6 @@ class NotionCache:
         self.CACHE_EXPIRY = config['cache_expiry'] * 24 * 60 * 60 + 1 * 60 * 60 # Added 1 hour to allow time for github bot
         self.github_repo = "Sabicool/Malleus-Anki-Addon"  # Replace with your GitHub repo
         self.github_branch = "main"  # Or whatever branch you use
-
-    def confirm_sync(self, database_name: str) -> bool:
-        """Ask user for confirmation before syncing a specific database"""
-        # Use QMessageBox directly for confirmation
-        msg = QMessageBox(mw)
-        msg.setWindowTitle("Sync Confirmation")
-        msg.setText(f"Would you like to sync the {database_name} database?")
-        msg.setInformativeText("This may take a few minutes.")
-        msg.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
-        msg.setDefaultButton(QMessageBox.Yes)
-        return msg.exec_() == QMessageBox.Yes
 
     def get_cache_path(self, database_id: str) -> Path:
         """Get the path for a specific database's cache file"""
@@ -463,10 +450,6 @@ class NotionCache:
 
         return success
 
-    def get_cache_path(self, database_id: str) -> Path:
-        """Get the path for a specific database's cache file"""
-        return self.cache_dir / f"{database_id}.json"
-
 def open_browser_with_search(search_query):
     """Open the browser with a search query"""
     browser = dialogs.open('Browser', mw)
@@ -624,7 +607,7 @@ class NotionPageSelector(QDialog):
         button_layout.addWidget(find_cards_button)
 
         if isinstance(self.parent(), AddCards):
-            create_cards_button = QPushButton("Add Tags (C)")
+            create_cards_button = QPushButton("Add Tags")
         else:
             create_cards_button = QPushButton("Create Cards")
 
@@ -1090,41 +1073,6 @@ class NotionPageSelector(QDialog):
 
         self.accept()
 
-    # def replace_tags(self):
-    #     """Replace existing tags with new ones"""
-    #     if not selected_pages:
-    #         showInfo("Please select at least one page")
-    #         return
-
-    #     if property_name == "":
-    #         if self.database_selector.currentText() in ("Subjects", "Pharmacology", "eTG"):
-    #             showInfo("Please select a subtag (Change the dropdown to the right of the searchbox)")
-    #             return
-    #         else:
-    #             property_name = "Tag"
-
-    #     if isinstance(self.parent(), AddCards):
-
-
-    #     if not self.current_note:
-    #         return
-
-    #     tags = self.get_tags_from_selected_pages()
-
-    #     # Update the note's tags
-    #     self.current_note.tags = tags
-
-    #     # Save the note
-    #     self.current_note.flush()
-
-    #     # Refresh the editor
-    #     if isinstance(self.parent(), Browser):
-    #         self.parent().model.reset()
-    #     elif isinstance(self.parent(), EditCurrent):
-    #         self.parent().editor.loadNote()
-
-    #     self.accept()
-
     def add_tags(self):
         """Add new tags to existing ones"""
         if not self.current_note:
@@ -1292,10 +1240,6 @@ def download_github_cache(browser=None):
     thread = threading.Thread(target=download_thread)
     thread.start()
 
-# download_cache_action = QAction("Malleus Full Database Sync", mw)
-# download_cache_action.triggered.connect(download_github_cache)
-# mw.form.menuTools.addAction(download_cache_action)
-
 def setup_editor_buttons(buttons, editor):
     """Add Malleus button to the editor toolbar"""
     button = editor.addButton(
@@ -1307,14 +1251,6 @@ def setup_editor_buttons(buttons, editor):
     )
     buttons.append(button)
     return buttons
-
-def show_page_selector_from_editor(editor):
-    """Show the page selector dialog from the editor context"""
-    # Get the AddCards window that contains this editor
-    addCards = editor.parentWindow
-    if isinstance(addCards, QWidget):  # Ensure parent is a QWidget
-        dialog = NotionPageSelector(addCards)
-        dialog.exec_()
 
 # Add the hook for editor buttons
 addHook("setupEditorButtons", setup_editor_buttons)
@@ -1354,18 +1290,6 @@ def setup_browser_menu(browser):
             toolbar.addAction(page_selector_button)
     except:
         pass
-
-# def update_notion_cache(browser=None):
-#     """Update the Notion database cache"""
-#     notion_cache = NotionCache(addon_dir)
-#     if SUBJECT_DATABASE_ID:
-#         notion_cache.update_cache_async(SUBJECT_DATABASE_ID, force=True)
-#     if PHARMACOLOGY_DATABASE_ID:
-#         notion_cache.update_cache_async(PHARMACOLOGY_DATABASE_ID, force=True)
-#     if ETG_DATABASE_ID:
-#         notion_cache.update_cache_async(ETG_DATABASE_ID, force=True)
-#     if ROTATION_DATABASE_ID:
-#         notion_cache.update_cache_async(ROTATION_DATABASE_ID, force=True)
 
 # Add hook for browser setup
 from aqt.gui_hooks import browser_menus_did_init
