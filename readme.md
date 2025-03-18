@@ -129,8 +129,8 @@ The `cache_expiry` is the number of days after which the local database copy of 
 -   [X] Add button in editor page
 -   [X] Publish to Ankiweb addons
 -   [X] Keep local cache and update only newly updated
--   [ ] Add configuration for:
-    -   [ ] Keybindings
+-   [X] Add configuration for:
+    -   [X] Keybindings
     -   [X] Default deck location
     -   [X] Cache expiry duration
 -   [X] Add eTG database
