@@ -471,9 +471,11 @@ class NotionPageSelector(QDialog):
 
         # Initialize current_note first
         self.current_note = None
-        if isinstance(parent, Browser):
+        if isinstance(parent, Browser) and hasattr(parent.editor, 'note'):
             self.current_note = parent.editor.note
-        elif isinstance(parent, EditCurrent):
+        elif isinstance(parent, EditCurrent) and hasattr(parent.editor, 'note'):
+            self.current_note = parent.editor.note
+        elif isinstance(parent, AddCards) and hasattr(parent.editor, 'note'):
             self.current_note = parent.editor.note
 
         self.notion_cache = NotionCache(addon_dir)
@@ -1033,9 +1035,9 @@ class NotionPageSelector(QDialog):
 
         return tags
 
-    def replace_tags(self):
-        """Replace existing tags with new ones"""
-        # Get the appropriate note reference based on context
+    def add_tags(self):
+        """Add new tags to existing ones"""
+        # Get the latest note reference
         note = None
         parent = self.parent()
 
@@ -1043,39 +1045,11 @@ class NotionPageSelector(QDialog):
             note = parent.editor.note
         elif isinstance(parent, EditCurrent):
             note = parent.editor.note
-        elif isinstance(parent, AddCards):
-            note = parent.editor.note
+        else:
+            note = self.current_note
 
         if not note:
             showInfo("No note found in current context")
-            return
-
-        # Get new tags from selected pages
-        new_tags = self.get_tags_from_selected_pages()
-
-        # Update the note's tags
-        note.tags = new_tags
-
-        # Save and refresh based on context
-        if isinstance(parent, AddCards):
-            # For AddCards dialog
-            parent.editor.loadNote()
-            parent.editor.setNote(note)
-            parent.editor.loadNote()
-            mw.requireReset()
-        else:
-            # For Browser/EditCurrent contexts
-            note.flush()
-            if isinstance(parent, Browser):
-                parent.model.reset()
-            elif isinstance(parent, EditCurrent):
-                parent.editor.loadNote()
-
-        self.accept()
-
-    def add_tags(self):
-        """Add new tags to existing ones"""
-        if not self.current_note:
             return
 
         selected_pages = []
@@ -1106,7 +1080,7 @@ class NotionPageSelector(QDialog):
                 property_name = "Tag"
 
         # Get current tags
-        current_tags = set(self.current_note.tags)
+        current_tags = set(note.tags)
 
         # Get new tags
         new_tags = set(self.get_tags_from_selected_pages())
@@ -1115,18 +1089,85 @@ class NotionPageSelector(QDialog):
         combined_tags = list(current_tags | new_tags)
 
         # Update the note's tags
-        self.current_note.tags = combined_tags
+        note.tags = combined_tags
 
         # Save the note
-        self.current_note.flush()
+        note.flush()
 
         # Refresh the editor
-        if isinstance(self.parent(), Browser):
-            self.parent().model.reset()
-        elif isinstance(self.parent(), EditCurrent):
-            self.parent().editor.loadNote()
+        if isinstance(parent, Browser):
+            parent.model.reset()
+        elif isinstance(parent, EditCurrent):
+            parent.editor.loadNote()
 
-        #self.accept()
+    def replace_tags(self):
+        """Replace existing tags with new ones"""
+        # Get the appropriate note reference based on context
+        note = None
+        parent = self.parent()
+
+        if isinstance(parent, Browser):
+            note = parent.editor.note
+        elif isinstance(parent, EditCurrent):
+            note = parent.editor.note
+        elif isinstance(parent, AddCards):
+            note = parent.editor.note
+        else:
+            note = self.current_note
+
+        if not note:
+            showInfo("No note found in current context")
+            return
+
+        selected_pages = []
+        for i in range(self.checkbox_layout.count()):
+            checkbox = self.checkbox_layout.itemAt(i).widget()
+            if checkbox.isChecked():
+                selected_pages.append(self.pages_data[i])
+
+        property_name = self.property_selector.currentText()
+
+        if not selected_pages:
+            showInfo("Please select at least one page")
+            return
+
+        all_general = all(
+            'General' in page.get('properties', {}).get('Search Suffix', {}).get('formula', {}).get('string', '')
+            for page in selected_pages
+            )
+
+        if property_name == "":
+            if self.database_selector.currentText() in ("Subjects", "Pharmacology"):
+                if not all_general:  # Only show warning if NOT all general
+                    showInfo("Please select a subtag (Change the dropdown to the right of the searchbox)")
+                    return
+                else:
+                    property_name = "Main Tag"  # Use main tag if all are general
+            else:
+                property_name = "Tag"
+
+        # Get new tags from selected pages
+        new_tags = self.get_tags_from_selected_pages()
+
+        # Update the note's tags
+        note.tags = new_tags
+
+        # Save and refresh based on context
+        if isinstance(parent, AddCards):
+            # For AddCards dialog
+            parent.editor.loadNote()
+            parent.editor.setNote(note)
+            parent.editor.loadNote()
+            mw.requireReset()
+        else:
+            # For Browser/EditCurrent contexts
+            note.flush()
+            if isinstance(parent, Browser):
+                parent.model.reset()
+            elif isinstance(parent, EditCurrent):
+                parent.editor.loadNote()
+
+            #self.accept()
 
 def show_page_selector(parent=None):
     """Show the page selector dialog with the appropriate parent window"""
@@ -1141,16 +1182,37 @@ def show_page_selector(parent=None):
     # Clean up any deleted dialogs
     parent._malleus_dialogs = [d for d in parent._malleus_dialogs if not sip.isdeleted(d)]
 
-    # Check for existing visible dialog for this parent
-    for dialog in parent._malleus_dialogs:
-        if dialog.isVisible():
-            dialog.activateWindow()
-            return
-
     # Create new dialog with proper parent
     dialog = NotionPageSelector(parent)
+
+    # Set up browser note selection change handler
+    if isinstance(parent, Browser):
+        # Store original currentRowChanged handler
+        original_handler = parent.onRowChanged
+
+        # Create a wrapper function that updates the dialog
+        def row_changed_wrapper(current, previous):
+            # Call the original handler first
+            original_handler(current, previous)
+
+            # Update the dialog's current_note reference
+            if dialog and not sip.isdeleted(dialog):
+                if hasattr(parent, 'editor') and hasattr(parent.editor, 'note'):
+                    dialog.current_note = parent.editor.note
+
+        # Replace the browser's row change handler
+        parent.onRowChanged = row_changed_wrapper
+
+        # Restore original handler when dialog closes
+        def on_dialog_finished():
+            if hasattr(parent, 'onRowChanged') and parent.onRowChanged == row_changed_wrapper:
+                parent.onRowChanged = original_handler
+
+        dialog.finished.connect(on_dialog_finished)
+
     parent._malleus_dialogs.append(dialog)
     dialog.show()
+    return dialog
 
 malleus_add_card_action = QAction("Malleus Find/Add Cards", mw)
 malleus_add_card_action.triggered.connect(show_page_selector)
