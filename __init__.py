@@ -261,7 +261,7 @@ class NotionCache:
         return pages
 
     def filter_pages(self, pages: List[Dict], search_term: str) -> List[Dict]:
-        """Filter pages based on search term using fuzzy matching with precise word boundaries"""
+        """Filter pages based on search term using fuzzy matching with multi-tier sorting"""
         from difflib import SequenceMatcher
         import re
         from functools import lru_cache
@@ -368,20 +368,29 @@ class NotionCache:
 
         # Pre-process search term once
         search_words = normalize_text(search_term)
+        normalized_search_term = search_term.lower()
 
         # Pre-process and cache all page terms
         page_terms_cache = {}
+        page_titles_cache = {}
+
         for page in pages:
             if not page.get('properties'):
                 continue
 
+            # Cache search terms
             search_term_prop = page['properties'].get('Search Term', {})
-            if not search_term_prop or search_term_prop.get('type') != 'formula':
-                continue
+            if search_term_prop and search_term_prop.get('type') == 'formula':
+                page_search_term = search_term_prop.get('formula', {}).get('string', '')
+                if page_search_term:
+                    page_terms_cache[id(page)] = normalize_text(page_search_term)
 
-            page_search_term = search_term_prop.get('formula', {}).get('string', '')
-            if page_search_term:
-                page_terms_cache[id(page)] = normalize_text(page_search_term)
+            # Cache titles
+            title_prop = page['properties'].get('Name', {})
+            if title_prop and title_prop.get('type') == 'title' and title_prop.get('title'):
+                title_text = title_prop['title'][0]['text']['content'] if title_prop['title'] else ""
+                if title_text:
+                    page_titles_cache[id(page)] = title_text.lower()
 
         # Filter pages
         filtered_pages = []
@@ -406,10 +415,44 @@ class NotionCache:
                 similarity = (word_match_score * 0.9) + (sequence_similarity * 0.1)
 
                 if similarity >= similarity_threshold:
+                    # Store similarity score
                     page['_similarity'] = similarity
+
+                    # Calculate title match score for first-tier sorting
+                    title = page_titles_cache.get(id(page), "")
+
+                    # Exact title match gets highest priority
+                    if title == normalized_search_term:
+                        page['_title_match'] = 1.0
+                    # Title starts with search term gets high priority
+                    elif title.startswith(normalized_search_term):
+                        page['_title_match'] = 0.9
+                    # Title contains search term gets medium priority
+                    elif normalized_search_term in title:
+                        page['_title_match'] = 0.8
+                    # Title contains part of search term gets lower priority
+                    elif any(part in title for part in normalized_search_term.split()):
+                        page['_title_match'] = 0.5
+                    else:
+                        page['_title_match'] = 0.0
+
+                    # Store title for alphabetical sorting
+                    page['_title_text'] = title
+
                     filtered_pages.append(page)
 
-        filtered_pages.sort(key=lambda x: x.get('_similarity', 0), reverse=True)
+        # Multi-tier sorting:
+        # 1. Sort by title match (descending)
+        # 2. Sort by similarity score (descending)
+        # 3. Sort alphabetically by title (ascending)
+        filtered_pages.sort(
+            key=lambda x: (
+                -x.get('_title_match', 0),  # Negative for descending order
+                -x.get('_similarity', 0),   # Negative for descending order
+                x.get('_title_text', '')    # Ascending alphabetical order
+            )
+        )
+
         return filtered_pages
 
     def download_cache_from_github(self, database_id: str) -> bool:
