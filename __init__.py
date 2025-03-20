@@ -716,8 +716,12 @@ class NotionPageSelector(QDialog):
                 else:
                     title = page['properties']['Name']['title'][0]['text']['content'] if page['properties']['Name']['title'] else "Untitled"
                 search_suffix = page['properties']['Search Suffix']['formula']['string'] if page['properties'].get('Search Suffix', {}).get('formula', {}).get('string') else ""
+                if self.database_selector.currentText() == "Subjects" or self.database_selector.currentText() == "Pharmacology":
+                    search_prefix = page['properties']['Search Prefix']['formula']['string'] if page['properties'].get('Search Suffix', {}).get('formula', {}).get('string') else ""
+                    display_text = f"{search_prefix} {title} {search_suffix}"
+                else:
+                    display_text = f"{title} {search_suffix}"
 
-                display_text = f"{title} {search_suffix}"
                 checkbox = QCheckBox(display_text)
                 self.checkbox_layout.addWidget(checkbox)
             except Exception as e:
@@ -848,7 +852,7 @@ class NotionPageSelector(QDialog):
             return
 
         all_general = all(
-            'General' in page.get('properties', {}).get('Search Suffix', {}).get('formula', {}).get('string', '')
+            'ℹ️' in page.get('properties', {}).get('Search Prefix', {}).get('formula', {}).get('string', '')
             for page in selected_pages
             )
 
@@ -925,7 +929,7 @@ class NotionPageSelector(QDialog):
         # Prepare note data
         note = {
             'deckName': config['deck_name'],
-            'modelName': 'MalleusCM - Cloze (Malleus Clinical Medicine / Stapedius)',
+            'modelName': 'MalleusCM - Cloze (Malleus Clinical Medicine [AU/NZ] / Stapedius)',
             'fields': {},
             'tags': tags
         }
@@ -1101,7 +1105,7 @@ class NotionPageSelector(QDialog):
             return
 
         all_general = all(
-            'General' in page.get('properties', {}).get('Search Suffix', {}).get('formula', {}).get('string', '')
+            'ℹ️' in page.get('properties', {}).get('Search Prefix', {}).get('formula', {}).get('string', '')
             for page in selected_pages
             )
 
@@ -1168,7 +1172,7 @@ class NotionPageSelector(QDialog):
             return
 
         all_general = all(
-            'General' in page.get('properties', {}).get('Search Suffix', {}).get('formula', {}).get('string', '')
+            'ℹ️' in page.get('properties', {}).get('Search Prefix', {}).get('formula', {}).get('string', '')
             for page in selected_pages
             )
 
