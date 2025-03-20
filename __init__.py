@@ -1050,9 +1050,12 @@ class NotionPageSelector(QDialog):
 
         property_name = self.property_selector.currentText()
 
-        # Special handling for Subjects database when Tag is selected
-        if self.database_selector.currentText() == "Subjects" and property_name == "Tag":
+        # Special handling for Subjects database when empty is selected
+        if self.database_selector.currentText() == "Subjects" and property_name == "":
             property_name = "Main Tag"
+
+        if self.database_selector.currentText() == "Pharmacology" and property_name == "":
+            property_name = "Tag"
 
         tags = []
         for page in selected_pages:
