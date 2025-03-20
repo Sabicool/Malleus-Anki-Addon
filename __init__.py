@@ -562,11 +562,18 @@ class NotionPageSelector(QDialog):
         self.database_selector = QComboBox()
         self.database_selector.addItems(["Subjects", "Pharmacology", "eTG", "Rotation", "Textbooks"])
         self.database_selector.currentTextChanged.connect(self.update_property_selector)
+        self.database_selector.currentTextChanged.connect(self.clear_search_results)
         search_layout.addWidget(self.database_selector)
+
+        # Initialize search timer
+        self.search_timer = QTimer()
+        self.search_timer.setSingleShot(True)
+        self.search_timer.timeout.connect(self.perform_search)
 
         # Search input
         self.search_input = QLineEdit()
         self.search_input.setPlaceholderText("Enter search term...")
+        self.search_input.textChanged.connect(self.on_search_text_changed)
         search_layout.addWidget(self.search_input)
 
         # Property selector
@@ -576,9 +583,10 @@ class NotionPageSelector(QDialog):
         self.update_property_selector(self.database_selector.currentText())
 
         # Search button
-        search_button = QPushButton("Search")
-        search_button.clicked.connect(self.perform_search)
-        search_layout.addWidget(search_button)
+        if not config['autosearch']:
+            search_button = QPushButton("Search")
+            search_button.clicked.connect(self.perform_search)
+            search_layout.addWidget(search_button)
 
         layout.addLayout(search_layout)
 
@@ -653,6 +661,20 @@ class NotionPageSelector(QDialog):
         else:
             return TEXTBOOKS_DATABASE_ID
 
+    def clear_search_results(self):
+        """Clear the search results when database is changed"""
+        # Clear existing checkboxes
+        for i in reversed(range(self.checkbox_layout.count())):
+            widget = self.checkbox_layout.itemAt(i).widget()
+            if widget:
+                widget.setParent(None)
+
+        # Reset pages data
+        self.pages_data = []
+
+        # Optional: also clear the search input
+        # self.search_input.clear()
+
     def query_notion_pages(self, filter_text: str, database_id: str) -> List[Dict]:
         """Query pages from cache and filter them"""
         try:
@@ -667,8 +689,8 @@ class NotionPageSelector(QDialog):
 
     def perform_search(self):
         search_term = self.search_input.text()
-        if not search_term:
-            showInfo("Please enter a search term")
+        if not search_term or len(search_term) < 2:
+            self.clear_search_results()
             return
 
         database_id = self.get_selected_database_id()
@@ -680,6 +702,10 @@ class NotionPageSelector(QDialog):
         # Clear existing checkboxes
         for i in reversed(range(self.checkbox_layout.count())):
             self.checkbox_layout.itemAt(i).widget().setParent(None)
+
+        if not self.pages_data and not config['autosearch']:
+            tooltip("No results found. Try a different search term")
+            return
 
         # Create checkboxes for results
 
@@ -696,6 +722,16 @@ class NotionPageSelector(QDialog):
                 self.checkbox_layout.addWidget(checkbox)
             except Exception as e:
                 showInfo(f"Error processing page: {e}")
+
+    def on_search_text_changed(self, text):
+        """Handle search text changes and perform search when typing"""
+        # Only search if we have at least 2 characters to avoid too many results
+        if config['autosearch']:
+            if len(text) >= 2:
+                # Wait 300ms before performing search
+                self.search_timer.start(config['search_delay'])
+            else:
+                self.clear_search_results()
 
     def select_all_pages(self):
         for i in range(self.checkbox_layout.count()):
