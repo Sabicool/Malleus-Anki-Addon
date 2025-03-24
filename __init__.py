@@ -857,6 +857,10 @@ class NotionPageSelector(QDialog):
             if formula_value['type'] == 'string':
                 source_text = formula_value.get('string', '')
 
+                # Make sure source_text is a string before processing
+                if not isinstance(source_text, str):
+                    source_text = str(source_text) if source_text is not None else ""
+
                 # Parse and format URLs in the source text
                 def format_urls(text):
                     import re
