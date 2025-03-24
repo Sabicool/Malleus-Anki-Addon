@@ -278,13 +278,19 @@ class NotionCache:
             'cardiology': {'cardio', 'cardiac', 'cardiovascular'},
             'gastro': {'gastrointestinal', 'gastroenterology'},
             'neuro': {'neurological', 'neurology'},
+            'rheum': {'rheumatology', 'rheumatological'},
+            'haem': {'haematology', 'haematological'},
+            'onc': {'oncology', 'oncological'},
+            'endo': {'endocrinology', 'endocrinological'},
             'pulm': {'pulmonary', 'respiratory'},
             'resp': {'respiratory', 'pulmonary'},
             'gyn': {'gynecology', 'gynaecology'},
+            'gynae': {'gynecology', 'gynaecology'},
             'obs': {'obstetrics', 'obstetrical', 'gynecology', 'gynaecology'},
             'obgyn': {'obstetrics', 'obstetrical'},
             'psych': {'psychiatry'},
-            'surg': {'surgical', 'surgery'}
+            'surg': {'surgical', 'surgery'},
+            'uro': {'urological', 'urology'}
         }
 
         @lru_cache(maxsize=1000)
