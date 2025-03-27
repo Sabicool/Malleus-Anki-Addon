@@ -266,15 +266,18 @@ class NotionCache:
         import re
         from functools import lru_cache
 
+        # Early return if search term is too short
+        if len(search_term.replace(' ', '')) < 3:
+            return []
+
         # Medical term variations stored as a constant to avoid rebuilding
         MEDICAL_VARIATIONS = {
-            'paed': {'paediatric', 'paediatrics', 'pediatric', 'pediatrics'},
-            'paediatric': {'paed', 'paediatrics', 'pediatric', 'pediatrics'},
-            'paediatrics': {'paed', 'paediatric', 'pediatric', 'pediatrics'},
+            'paed': {'paediatric', 'paediatrics'},
+            'paeds': {'paediatric', 'paediatrics'},
             'emergency': {'emergencies'},
             'emergencies': {'emergency'},
             'cardio': {'cardiac', 'cardiovascular'},
-            'cardiac': {'cardio', 'cardiovascular'},
+            'cardiac': {'cardiovascular'},
             'cardiology': {'cardio', 'cardiac', 'cardiovascular'},
             'gastro': {'gastrointestinal', 'gastroenterology'},
             'neuro': {'neurological', 'neurology'},
@@ -286,176 +289,138 @@ class NotionCache:
             'resp': {'respiratory', 'pulmonary'},
             'gyn': {'gynecology', 'gynaecology'},
             'gynae': {'gynecology', 'gynaecology'},
-            'obs': {'obstetrics', 'obstetrical', 'gynecology', 'gynaecology'},
+            'obs': {'obstetrics', 'obstetrical'},
             'obgyn': {'obstetrics', 'obstetrical'},
             'psych': {'psychiatry'},
             'surg': {'surgical', 'surgery'},
+            'pall': {'palliative'},
             'uro': {'urological', 'urology'}
         }
 
         @lru_cache(maxsize=1000)
-        def get_word_variations(word: str) -> frozenset:
-            """Get common variations of medical terms with caching"""
-            variations = {word}
-            word_lower = word.lower()
-
-            # Add variations from mappings
-            for key, values in MEDICAL_VARIATIONS.items():
-                if word_lower == key:
-                    variations.update(values)
-                elif word_lower in values:
-                    variations.add(key)
-                    variations.update(values)
-
-            # Handle plural forms
-            if word.endswith('y'):
-                variations.add(word[:-1] + 'ies')
-            elif word.endswith('ies'):
-                variations.add(word[:-3] + 'y')
-            elif word.endswith('s') and not word.endswith('ss'):
-                variations.add(word[:-1])
-            else:
-                variations.add(word + 's')
-
-            return frozenset(variations)  # Immutable for caching
-
-        @lru_cache(maxsize=1000)
-        def normalize_word(word: str) -> frozenset:
-            """Normalize a single word and get its variations"""
-            if len(word) <= 2:
-                return frozenset({word})
-            return get_word_variations(word)
-
         def normalize_text(text: str) -> set:
             """Normalize text and return set of variations"""
             # Clean and split text
             words = re.sub(r'[^\w\s]', ' ', text.lower()).split()
 
-            # Get variations for each word and union them
+            # Get variations for each word
             normalized = set()
             for word in words:
-                normalized.update(normalize_word(word))
+                # Always include original word, lowercase variants, and medical variations
+                normalized.add(word)
+                normalized.add(word.lower())
+
+                # Add plurals and medical variations
+                if word.endswith('y'):
+                    normalized.add(word[:-1] + 'ies')
+                elif word.endswith('s') and not word.endswith('ss'):
+                    normalized.add(word[:-1])
+
+                # Add medical term variations if applicable
+                for key, variations in MEDICAL_VARIATIONS.items():
+                    if word.lower() == key or word.lower() in variations:
+                        normalized.update(variations)
+                        normalized.add(key)
+
             return normalized
 
-        @lru_cache(maxsize=1000)
-        def is_partial_match(search_word: str, target_word: str) -> bool:
-            """Check if search_word is a partial match of target_word"""
-            if search_word == target_word:
-                return True
+        def page_matches_all_terms(page_words: list, search_terms: set) -> bool:
+            """Check if page matches ALL search terms with start-of-word matching"""
+            for search_term in search_terms:
+                # Flag to track if this term matches any word
+                term_matched = False
 
-            search_variations = normalize_word(search_word)
-            target_variations = normalize_word(target_word)
+                for page_word in page_words:
+                    # Normalize both search term and page word
+                    page_variations = normalize_text(page_word)
 
-            # Check for direct matches first
-            if not search_variations.isdisjoint(target_variations):
-                return True
+                    # Check if search term starts any normalized variation
+                    if any(
+                        var.startswith(search_term)
+                        for var in page_variations
+                    ):
+                        term_matched = True
+                        break
 
-            # Only do expensive operations for longer terms
-            if len(search_word) > 5 and len(target_word) > 5:
-                if any(s in target_word for s in search_variations):
-                    return True
+                # If no match found for this term, return False
+                if not term_matched:
+                    return False
 
-                # Use sequence matcher as last resort
-                similarity = SequenceMatcher(None, search_word, target_word).ratio()
-                if similarity > 0.85:
-                    return True
+            return True
 
-            return False
-
-        def calculate_word_match_score(search_words: set, target_words: set) -> float:
-            """Calculate how well the search words match the target words"""
-            if not search_words:
-                return 0.0
-
-            matches = sum(1 for sword in search_words
-                         if any(is_partial_match(sword, tword) for tword in target_words))
-
-            return matches / len(search_words) if matches == len(search_words) else 0.0
-
-        # Pre-process search term once
-        search_words = normalize_text(search_term)
+        # Pre-process search term
+        search_terms = search_term.lower().split()
         normalized_search_term = search_term.lower()
-
-        # Pre-process and cache all page terms
-        page_terms_cache = {}
-        page_titles_cache = {}
-
-        for page in pages:
-            if not page.get('properties'):
-                continue
-
-            # Cache search terms
-            search_term_prop = page['properties'].get('Search Term', {})
-            if search_term_prop and search_term_prop.get('type') == 'formula':
-                page_search_term = search_term_prop.get('formula', {}).get('string', '')
-                if page_search_term:
-                    page_terms_cache[id(page)] = normalize_text(page_search_term)
-
-            # Cache titles
-            title_prop = page['properties'].get('Name', {})
-            if title_prop and title_prop.get('type') == 'title' and title_prop.get('title'):
-                title_text = title_prop['title'][0]['text']['content'] if title_prop['title'] else ""
-                if title_text:
-                    page_titles_cache[id(page)] = title_text.lower()
 
         # Filter pages
         filtered_pages = []
-        similarity_threshold = 0.5
-
         for page in pages:
-            page_terms = page_terms_cache.get(id(page))
-            if not page_terms:
+            # Skip pages without properties
+            if not page.get('properties'):
                 continue
 
-            # Calculate word match score
-            word_match_score = calculate_word_match_score(search_words, page_terms)
+            # Extract page search terms
+            page_search_terms_prop = page['properties'].get('Search Term', {})
+            if not page_search_terms_prop or page_search_terms_prop.get('type') != 'formula':
+                continue
 
-            if word_match_score > 0:
-                # Only calculate sequence similarity if words match
+            page_search_term = page_search_terms_prop.get('formula', {}).get('string', '').lower()
+            if not page_search_term:
+                continue
+
+            # Normalize page search terms
+            page_terms = normalize_text(page_search_term)
+
+            # Check if page matches ALL search terms
+            if page_matches_all_terms(page_terms, search_terms):
+                # Extract title for additional context
+                title_prop = page['properties'].get('Name', {})
+                title = title_prop['title'][0]['text']['content'] if title_prop.get('title') else ""
+                title_lower = title.lower()
+
+                # Calculate multiple similarity metrics
+                # 1. Exact match score
+                exact_match_score = 1.0 if normalized_search_term in page_search_term else 0.0
+
+                # 2. Title match score
+                title_match_score = 1.0 if normalized_search_term in title_lower else (
+                    0.9 if any(term in title_lower for term in search_terms) else 0.0
+                )
+
+                # 3. Term frequency score
+                term_freq_score = sum(
+                    page_search_term.count(term) for term in search_terms
+                ) / len(search_terms)
+
+                # 4. Sequence similarity
                 sequence_similarity = SequenceMatcher(
                     None,
-                    ' '.join(search_words),
-                    ' '.join(page_terms)
+                    normalized_search_term,
+                    page_search_term
                 ).ratio()
 
-                similarity = (word_match_score * 0.9) + (sequence_similarity * 0.1)
+                # Composite ranking score
+                # Prioritize exact matches, then title matches, then frequency
+                composite_score = (
+                    exact_match_score * 0.4 +
+                    title_match_score * 0.3 +
+                    term_freq_score * 0.2 +
+                    sequence_similarity * 0.1
+                )
 
-                if similarity >= similarity_threshold:
-                    # Store similarity score
-                    page['_similarity'] = similarity
+                # Store scores for sorting
+                page['_composite_score'] = composite_score
+                page['_title'] = title_lower
+                page['_exact_match'] = exact_match_score
 
-                    # Calculate title match score for first-tier sorting
-                    title = page_titles_cache.get(id(page), "")
+                filtered_pages.append(page)
 
-                    # Exact title match gets highest priority
-                    if title == normalized_search_term:
-                        page['_title_match'] = 1.0
-                    # Title starts with search term gets high priority
-                    elif title.startswith(normalized_search_term):
-                        page['_title_match'] = 0.9
-                    # Title contains search term gets medium priority
-                    elif normalized_search_term in title:
-                        page['_title_match'] = 0.8
-                    # Title contains part of search term gets lower priority
-                    elif any(part in title for part in normalized_search_term.split()):
-                        page['_title_match'] = 0.5
-                    else:
-                        page['_title_match'] = 0.0
-
-                    # Store title for alphabetical sorting
-                    page['_title_text'] = title
-
-                    filtered_pages.append(page)
-
-        # Multi-tier sorting:
-        # 1. Sort by title match (descending)
-        # 2. Sort by similarity score (descending)
-        # 3. Sort alphabetically by title (ascending)
+        # Sorting with more nuanced ranking
         filtered_pages.sort(
             key=lambda x: (
-                -x.get('_title_match', 0),  # Negative for descending order
-                -x.get('_similarity', 0),   # Negative for descending order
-                x.get('_title_text', '')    # Ascending alphabetical order
+                -x.get('_exact_match', 0),      # Exact matches first
+                -x.get('_composite_score', 0),  # Then by composite score
+                x.get('_title', '')             # Then alphabetically
             )
         )
 
