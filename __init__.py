@@ -1148,6 +1148,19 @@ def show_randomization_dialog(editor):
     dialog = RandomizationDialog(editor.parentWindow, editor)
     dialog.exec()  # Note: In PyQt6, exec_() is deprecated, use exec() instead
 
+def open_browser_with_search(search_query):
+    """Open the browser with a search query"""
+    browser = dialogs.open('Browser', mw)
+    browser.activateWindow()
+
+    if search_query:
+        browser.form.searchEdit.lineEdit().setText(search_query)
+        if hasattr(browser, 'onSearch'):
+            browser.onSearch()
+        else:
+            browser.onSearchActivated()
+    return
+
 class NotionPageSelector(QDialog):
     def __init__(self, parent=None):
         if parent is not None and not isinstance(parent, QWidget):
