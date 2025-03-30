@@ -634,6 +634,10 @@ class NotionPageSelector(QDialog):
             create_cards_button = QPushButton("Add Tags")
         else:
             create_cards_button = QPushButton("Create Cards")
+            if self.current_note is not None:
+                add_tags_button = QPushButton("Add Tags")
+                add_tags_button.clicked.connect(self.add_tags)
+                button_layout.addWidget(add_tags_button)
 
         create_cards_button.clicked.connect(self.create_cards)
         button_layout.addWidget(create_cards_button)
@@ -644,11 +648,6 @@ class NotionPageSelector(QDialog):
             replace_tags_button = QPushButton("Replace Tags")
             replace_tags_button.clicked.connect(self.replace_tags)
             button_layout.addWidget(replace_tags_button)
-
-        if self.current_note is not None:
-            add_tags_button = QPushButton("Add Tags")
-            add_tags_button.clicked.connect(self.add_tags)
-            button_layout.addWidget(add_tags_button)
 
         update_database_button = QPushButton("Update database")
         update_database_button.clicked.connect(download_github_cache)
