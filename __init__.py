@@ -1206,6 +1206,7 @@ class NotionPageSelector(QDialog):
             "Pharmacology": [
                 "",
                 "Generic Names",
+                "Mechanism of Action",
                 "Indications",
                 "Contraindications/Precautions",
                 "Route/Frequency",
@@ -1229,6 +1230,7 @@ class NotionPageSelector(QDialog):
                 "Complications/Prognosis",
                 "Screening/Prevention",
                 "Generic Names",
+                "Mechanism of Action",
                 "Indications",
                 "Contraindications/Precautions",
                 "Route/Frequency",
