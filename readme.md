@@ -19,7 +19,6 @@ This is an Anki addon that integrates with the Malleus notion database to seamle
 
 • [Malleus Clinical Medicine Website](https://malleuscm.notion.site) •
 [Ankiweb Link](https://ankiweb.net/shared/info/620451841) •
-[Showcase](#Showcase) •
 [Usage](#Usage) •
 
 <a id="org724359b"></a>
