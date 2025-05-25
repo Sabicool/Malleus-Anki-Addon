@@ -22,14 +22,13 @@ This is an Anki addon that integrates with the Malleus notion database to seamle
 [Showcase](#Showcase) •
 [Usage](#Usage) •
 
-</div>
-
-
 <a id="org724359b"></a>
 ## Showcase
 [📺 Watch the full howto and showcase playlist on YouTube](https://www.youtube.com/playlist?list=PLKoggb5cOb9lP5mCR2-2yqdFRe6aaqEaw)
 
 [![Watch the playlist](https://img.youtube.com/vi/bgRVxccuMho/0.jpg)](https://www.youtube.com/playlist?list=PLKoggb5cOb9lP5mCR2-2yqdFRe6aaqEaw)
+
+</div>
 
 <a id="org48ca793"></a>
 
