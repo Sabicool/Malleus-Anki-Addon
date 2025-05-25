@@ -27,7 +27,9 @@ This is an Anki addon that integrates with the Malleus notion database to seamle
 
 <a id="org724359b"></a>
 ## Showcase
-- [ ] I'm scripting a youtube video for the Malleus youtube channel
+[📺 Watch the full howto and showcase playlist on YouTube](https://www.youtube.com/playlist?list=PLKoggb5cOb9lP5mCR2-2yqdFRe6aaqEaw)
+
+[![Watch the playlist](https://img.youtube.com/vi/bgRVxccuMho/0.jpg)](https://www.youtube.com/playlist?list=PLKoggb5cOb9lP5mCR2-2yqdFRe6aaqEaw)
 
 <a id="org48ca793"></a>
 
