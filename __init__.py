@@ -540,7 +540,7 @@ class RandomizationDialog(QDialog):
         self.type_combo = QComboBox()
         self.type_combo.addItems([
             "Random Number", "Random List", "Scored List",
-            "Scored Number", "Target Score", "Answer by Score"
+            "Scored Number", "Show Score", "Answer by Score"
         ])
         self.type_combo.currentIndexChanged.connect(self.update_form)
         type_layout.addWidget(self.type_combo)
@@ -672,26 +672,21 @@ class RandomizationDialog(QDialog):
         scored_number_widget.setLayout(scored_number_layout)
         self.stack.addWidget(scored_number_widget)
 
-        # Target Score form
-        target_score_widget = QWidget()
-        target_score_layout = QFormLayout()
+        # Show Score form - simplified to just a button
+        show_score_widget = QWidget()
+        show_score_layout = QVBoxLayout()
 
-        self.min_score = QSpinBox()
-        self.min_score.setMinimum(0)
-        self.min_score.setMaximum(1000)
-        target_score_layout.addRow("Minimum Score:", self.min_score)
+        info_label = QLabel("This will insert [showscore] which displays the total calculated score from all scored elements.")
+        info_label.setWordWrap(True)
+        info_label.setStyleSheet("color: #666; font-style: italic; margin: 10px;")
+        show_score_layout.addWidget(info_label)
 
-        self.max_score = QSpinBox()
-        self.max_score.setMinimum(0)
-        self.max_score.setMaximum(1000)
-        self.max_score.setValue(10)
-        target_score_layout.addRow("Maximum Score:", self.max_score)
+        # Add some vertical spacing to center the content
+        show_score_layout.addStretch()
+        show_score_layout.addStretch()
 
-        self.show_score = QCheckBox("Show Score")
-        target_score_layout.addRow("", self.show_score)
-
-        target_score_widget.setLayout(target_score_layout)
-        self.stack.addWidget(target_score_widget)
+        show_score_widget.setLayout(show_score_layout)
+        self.stack.addWidget(show_score_widget)
 
         # Answer by Score form
         answer_score_widget = QWidget()
@@ -1092,21 +1087,8 @@ class RandomizationDialog(QDialog):
                 showInfo(f"Invalid input: {str(e)}")
                 return
 
-        elif index == 4:  # Target Score
-            min_score = self.min_score.value()
-            max_score = self.max_score.value()
-
-            if min_score > max_score:
-                showInfo("Minimum score must be less than or equal to maximum score.")
-                return
-
-            prefix = "showscore" if self.show_score.isChecked() else "score"
-
-            if min_score == max_score:
-                tag = f"[{prefix}:{min_score}]"
-            else:
-                tag = f"[{prefix}:{min_score},{max_score}]"
-
+        elif index == 4:  # Show Score
+            tag = "[showscore]"
             insert_at_cursor(self.editor, tag)
 
         elif index == 5:  # Answer by Score
