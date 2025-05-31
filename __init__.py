@@ -730,6 +730,75 @@ class RandomizationDialog(QDialog):
 
         self.setLayout(layout)
 
+    def add_randomization_tag(self):
+        """Add the randomization tag to the current note"""
+        try:
+            if isinstance(self.parent(), AddCards):
+                # We're in an AddCards dialog, modify the existing note directly
+                randomization_tag = "#Malleus_CM::#Card_Feature::Randomisation"
+
+                try:
+                    # Get the AddCards dialog
+                    add_cards_dialog = self.parent()
+                    current_note = None
+
+                    # Try to get the current note from the dialog
+                    if hasattr(add_cards_dialog, 'editor') and hasattr(add_cards_dialog.editor, 'note'):
+                        current_note = add_cards_dialog.editor.note
+                    elif hasattr(add_cards_dialog, 'note'):
+                        current_note = add_cards_dialog.note
+
+                    if current_note:
+                        # Get current tags
+                        current_tags = list(current_note.tags) if current_note.tags else []
+
+                        # Add randomization tag if not already present
+                        if randomization_tag not in current_tags:
+                            current_tags.append(randomization_tag)
+                            current_note.tags = current_tags
+
+                            # Try to refresh the tags display in the dialog
+                            if hasattr(add_cards_dialog, 'editor') and hasattr(add_cards_dialog.editor, 'loadNote'):
+                                add_cards_dialog.editor.loadNote()
+
+                            print(f"Added randomization tag: {randomization_tag}")
+                        else:
+                            print("Randomization tag already present")
+                    else:
+                        print("Could not find note in AddCards dialog")
+
+                except Exception as e:
+                    print(f"Error modifying note in AddCards dialog: {e}")
+                return
+
+            # The tag to add
+            randomization_tag = "#Malleus_CM::#Card_Feature::Randomisation"
+            # Get current tags
+            current_tags = []
+            if note.tags:
+                current_tags = list(note.tags)
+            # Add the randomization tag if it's not already present
+            if randomization_tag not in current_tags:
+                current_tags.append(randomization_tag)
+                # Update the note with new tags
+                note.tags = current_tags
+                # Save the note
+                note.flush()
+                # Try to refresh the editor if possible
+                try:
+                    if hasattr(self.editor, 'loadNote'):
+                        self.editor.loadNote()
+                    elif hasattr(self.editor.parentWindow, 'editor') and hasattr(self.editor.parentWindow.editor, 'loadNote'):
+                        self.editor.parentWindow.editor.loadNote()
+                except:
+                    pass  # If refresh fails, it's not critical
+                print(f"Added randomization tag: {randomization_tag}")
+            else:
+                print("Randomization tag already present")
+        except Exception as e:
+            print(f"Error adding randomization tag: {e}")
+            # Don't fail the entire operation if tagging fails
+
     def add_random_list_item(self):
         """Add a new option field to the random list"""
         item_layout = QHBoxLayout()
@@ -1019,6 +1088,7 @@ class RandomizationDialog(QDialog):
     def accept(self):
         # Generate the appropriate tag based on selection
         index = self.type_combo.currentIndex()
+        tag_added = False  # Track if we successfully added a randomization element
 
         if index == 0:  # Random Number
             try:
@@ -1027,6 +1097,7 @@ class RandomizationDialog(QDialog):
                 decimals = self.decimals.value()
                 tag = f"[random:{min_val},{max_val},{decimals}]"
                 insert_at_cursor(self.editor, tag)
+                tag_added = True
             except ValueError:
                 showInfo("Invalid number format. Please enter valid numbers.")
                 return
@@ -1044,6 +1115,7 @@ class RandomizationDialog(QDialog):
 
             tag = f"[randomlist:{','.join(options)}]"
             insert_at_cursor(self.editor, tag)
+            tag_added = True
 
         elif index == 2:  # Scored List
             scored_options = []
@@ -1060,6 +1132,7 @@ class RandomizationDialog(QDialog):
 
             tag = f"[scoredlist:{','.join(scored_options)}]"
             insert_at_cursor(self.editor, tag)
+            tag_added = True
 
         elif index == 3:  # Scored Number
             try:
@@ -1083,6 +1156,7 @@ class RandomizationDialog(QDialog):
 
                 tag = f"[scorednumber:{','.join(map(str, thresholds))}:{decimals}:{','.join(map(str, scores))}]"
                 insert_at_cursor(self.editor, tag)
+                tag_added = True
             except Exception as e:
                 showInfo(f"Invalid input: {str(e)}")
                 return
@@ -1090,6 +1164,7 @@ class RandomizationDialog(QDialog):
         elif index == 4:  # Show Score
             tag = "[showscore]"
             insert_at_cursor(self.editor, tag)
+            tag_added = True
 
         elif index == 5:  # Answer by Score
             segments = []
@@ -1122,6 +1197,13 @@ class RandomizationDialog(QDialog):
 
             tag = f"[answerbyscore:{':'.join(segments)}]"
             insert_at_cursor(self.editor, tag)
+            tag_added = True
+
+        # If we successfully added a randomization element, add the randomization tag
+        print(f"Need to add randomisation tag: {tag_added}")
+
+        if tag_added:
+            self.add_randomization_tag()
 
         super().accept()
 
