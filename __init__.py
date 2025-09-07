@@ -460,7 +460,8 @@ class NotionCache:
             '9ff96451736d43909d49e3b9d60971f8',  # PHARMACOLOGY_DATABASE_ID
             '22282971487f4f559dce199476709b03',  # ETG_DATABASE_ID
             '69b3e7fdce1548438b26849466d7c18e',  # ROTATION_DATABASE_ID
-            '13d5964e68a480bfb07cf7e2f1786075'
+            '13d5964e68a480bfb07cf7e2f1786075',  # TEXTBOOKS_DATABASE_ID
+            '13d5964e68a48056b40de8148dd91a06'
         ]:
             if not self.download_cache_from_github(database_id):
                 success = False
@@ -1486,8 +1487,10 @@ class NotionPageSelector(QDialog):
                     title = page['properties']['Search Term']['formula']['string'] if page['properties'].get('Search Term', {}).get('formula', {}).get('string') else "Untitled"
                 else:
                     title = page['properties']['Name']['title'][0]['text']['content'] if page['properties']['Name']['title'] else "Untitled"
+
                 search_suffix = page['properties']['Search Suffix']['formula']['string'] if page['properties'].get('Search Suffix', {}).get('formula', {}).get('string') else ""
-                if self.database_selector.currentText() == "Subjects" or self.database_selector.currentText() == "Pharmacology"  or self.database.selector.currentText() == "Guidelines":
+
+                if self.database_selector.currentText() == "Subjects" or self.database_selector.currentText() == "Pharmacology":
                     search_prefix = page['properties']['Search Prefix']['formula']['string'] if page['properties'].get('Search Suffix', {}).get('formula', {}).get('string') else ""
                     display_text = f"{search_prefix} {title} {search_suffix}"
                 else:
@@ -2081,7 +2084,7 @@ def download_github_cache(browser=None):
             (PHARMACOLOGY_DATABASE_ID, "Pharmacology database"),
             (ETG_DATABASE_ID, "eTG database"),
             (ROTATION_DATABASE_ID, "Rotation database"),
-            (TEXTBOOKS_DATABASE_ID, "Textbooks database")
+            (TEXTBOOKS_DATABASE_ID, "Textbooks database"),
             (GUIDELINES_DATABASE_ID, "Guidelines database")
         ]
 
