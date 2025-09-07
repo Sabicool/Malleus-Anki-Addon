@@ -178,6 +178,8 @@ class NotionCache:
             return "Rotation"
         elif database_id == TEXTBOOKS_DATABASE_ID:
             return "Textbooks"
+        elif database_id == GUIDELINES_DATABASE_ID:
+            return "Guidelines"
         return "Unknown Database"
 
     def _update_cache_thread(self, database_id: str, database_name: str, callback: callable = None):
@@ -1309,6 +1311,9 @@ class NotionPageSelector(QDialog):
             ],
             "Textbooks": [
                 ""
+            ],
+            "Guidelines": [
+                ""
             ]
         }
         self.pages_data = []  # Store full page data
@@ -1325,7 +1330,7 @@ class NotionPageSelector(QDialog):
 
         # Database selector
         self.database_selector = QComboBox()
-        self.database_selector.addItems(["Subjects", "Pharmacology", "eTG", "Rotation", "Textbooks"])
+        self.database_selector.addItems(["Subjects", "Pharmacology", "eTG", "Rotation", "Textbooks", "Guidelines"])
         self.database_selector.currentTextChanged.connect(self.update_property_selector)
         self.database_selector.currentTextChanged.connect(self.clear_search_results)
         search_layout.addWidget(self.database_selector)
@@ -1422,8 +1427,10 @@ class NotionPageSelector(QDialog):
             return ETG_DATABASE_ID
         elif self.database_selector.currentText() == "Rotation":
             return ROTATION_DATABASE_ID
-        else:
+        elif self.database_selector.currentText() == "Textbooks":
             return TEXTBOOKS_DATABASE_ID
+        else:
+            return GUIDELINES_DATABASE_ID
 
     def clear_search_results(self):
         """Clear the search results when database is changed"""
@@ -1480,7 +1487,7 @@ class NotionPageSelector(QDialog):
                 else:
                     title = page['properties']['Name']['title'][0]['text']['content'] if page['properties']['Name']['title'] else "Untitled"
                 search_suffix = page['properties']['Search Suffix']['formula']['string'] if page['properties'].get('Search Suffix', {}).get('formula', {}).get('string') else ""
-                if self.database_selector.currentText() == "Subjects" or self.database_selector.currentText() == "Pharmacology":
+                if self.database_selector.currentText() == "Subjects" or self.database_selector.currentText() == "Pharmacology"  or self.database.selector.currentText() == "Guidelines":
                     search_prefix = page['properties']['Search Prefix']['formula']['string'] if page['properties'].get('Search Suffix', {}).get('formula', {}).get('string') else ""
                     display_text = f"{search_prefix} {title} {search_suffix}"
                 else:
@@ -1703,21 +1710,7 @@ class NotionPageSelector(QDialog):
         }
 
         # Add source field for eTG database
-        if self.database_selector.currentText() == "eTG":
-            sources = []
-            for page in selected_pages:
-                source = self.get_property_content(page, 'Source')
-                if source:
-                    sources.append(source)
-
-            # Combine sources, remove duplicates
-            unique_sources = list(dict.fromkeys(sources))
-
-            # Join sources with line breaks and add to fields
-            if unique_sources:
-                note['fields']['Source'] = '<br>'.join(unique_sources)
-
-        if self.database_selector.currentText() == "Textbooks":
+        if self.database_selector.currentText() == "eTG" or self.database_selector.currentText() == "Textbooks" or self.database_selector.currentText() == "Guidelines":
             sources = []
             for page in selected_pages:
                 source = self.get_property_content(page, 'Source')
@@ -2089,6 +2082,7 @@ def download_github_cache(browser=None):
             (ETG_DATABASE_ID, "eTG database"),
             (ROTATION_DATABASE_ID, "Rotation database"),
             (TEXTBOOKS_DATABASE_ID, "Textbooks database")
+            (GUIDELINES_DATABASE_ID, "Guidelines database")
         ]
 
         if current_notion_update < len(databases):
@@ -2132,7 +2126,8 @@ def download_github_cache(browser=None):
             ("Pharmacology", PHARMACOLOGY_DATABASE_ID),
             ("eTG", ETG_DATABASE_ID),
             ("Rotation", ROTATION_DATABASE_ID),
-            ("Textbooks", TEXTBOOKS_DATABASE_ID)
+            ("Textbooks", TEXTBOOKS_DATABASE_ID),
+            ("Guidelines",GUIDELINES_DATABASE_ID)
         ]):
             update_progress(idx, f"Downloading {name} database from GitHub...")
             success = notion_cache.download_cache_from_github(database_id)
@@ -2203,7 +2198,8 @@ def init_notion_cache():
                 (PHARMACOLOGY_DATABASE_ID, "Pharmacology"),
                 (ETG_DATABASE_ID, "eTG"),
                 (ROTATION_DATABASE_ID, "Rotation"),
-                (TEXTBOOKS_DATABASE_ID, "Textbooks")
+                (TEXTBOOKS_DATABASE_ID, "Textbooks"),
+                (GUIDELINES_DATABASE_ID, "Guidelines")
             ]
 
             for db_id, name in databases:

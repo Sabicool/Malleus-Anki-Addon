@@ -13,6 +13,7 @@ SUBJECT_DATABASE_ID = os.getenv('DATABASE_ID')
 PHARMACOLOGY_DATABASE_ID = os.getenv('PHARMACOLOGY_DATABASE_ID')
 ETG_DATABASE_ID = os.getenv('ETG_DATABASE_ID')
 ROTATION_DATABASE_ID = os.getenv('ROTATION_DATABASE_ID')
+GUIDELINES_DATABASE_ID = os.getenv('GUIDELINES_DATABASE_ID')
 
 class NotionCache:
     def __init__(self, addon_dir: str):
@@ -86,14 +87,16 @@ class NotionCache:
 def update_notion_cache():
     """Update the Notion database cache"""
     notion_cache = NotionCache(addon_dir)
-    if SUBJECT_DATABASE_ID:
-        notion_cache.update_cache(SUBJECT_DATABASE_ID)
-    if PHARMACOLOGY_DATABASE_ID:
-        notion_cache.update_cache(PHARMACOLOGY_DATABASE_ID)
-    if ETG_DATABASE_ID:
-        notion_cache.update_cache(ETG_DATABASE_ID)
-    if ROTATION_DATABASE_ID:
-        notion_cache.update_cache(ROTATION_DATABASE_ID)
+    if GUIDELINES_DATABASE_ID:
+        notion_cache.update_cache(GUIDELINES_DATABASE_ID)
+##    if SUBJECT_DATABASE_ID:
+##        notion_cache.update_cache(SUBJECT_DATABASE_ID)
+##    if PHARMACOLOGY_DATABASE_ID:
+##        notion_cache.update_cache(PHARMACOLOGY_DATABASE_ID)
+##    if ETG_DATABASE_ID:
+##        notion_cache.update_cache(ETG_DATABASE_ID)
+##    if ROTATION_DATABASE_ID:
+##        notion_cache.update_cache(ROTATION_DATABASE_ID)
 
 if __name__ == "__main__":
     update_notion_cache()

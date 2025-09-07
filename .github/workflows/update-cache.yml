@@ -39,6 +39,7 @@ jobs:
         ETG_DATABASE_ID = '22282971487f4f559dce199476709b03'
         ROTATION_DATABASE_ID = '69b3e7fdce1548438b26849466d7c18e'
         TEXTBOOKS_DATABASE_ID = '13d5964e68a480bfb07cf7e2f1786075'
+        GUIDELINES_DATABASE_ID = '13d5964e68a48056b40de8148dd91a06'
 
         class NotionCache:
             def __init__(self):
@@ -122,7 +123,8 @@ jobs:
                 PHARMACOLOGY_DATABASE_ID,
                 ETG_DATABASE_ID,
                 ROTATION_DATABASE_ID,
-                TEXTBOOKS_DATABASE_ID
+                TEXTBOOKS_DATABASE_ID,
+                GUIDELINES_DATABASE_ID
             ]
 
             for database_id in databases:
