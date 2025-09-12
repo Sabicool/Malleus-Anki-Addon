@@ -9,6 +9,7 @@ meta.json
 readme for ankiweb.md
 #cache/*
 *.zip
+.env
 
 # Optional: Ignore node_modules, if relevant to the project
 node_modules/
