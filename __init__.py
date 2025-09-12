@@ -1377,6 +1377,90 @@ class NotionPageSelector(QDialog):
         self.results_group.setLayout(results_layout)
         layout.addWidget(self.results_group)
 
+        # Yield selection section
+        yield_group = QGroupBox("Yield Level")
+        yield_layout = QVBoxLayout()
+
+        # Create a custom title bar for the group box with info icon
+        yield_title_layout = QHBoxLayout()
+        yield_title_label = QLabel("Yield Level")
+        yield_title_label.setStyleSheet("font-weight: bold; font-size: 13px;")
+
+        # Create single info icon with combined tooltip
+        combined_tooltip = """<p style="margin: 0; padding: 4px;">
+        <b style="font-size: 14px;">High Yield</b> <span>(~50% cards)</span><br><br>
+        <span>• If you study just these cards, you will likely pass final year medical school exams, but likely not do much better if studied in isolation</span><br>
+        <span>• These cards touch on high yield topics that are essential for basic understanding of clinical medicine at the level of a final year medical student/intern and should be prioritised for study</span><br><br>
+        <b>Examples:</b><br>
+        <span style="margin-left: 12px;">◦ First line management of acute heart failure (LMNOP)</span><br>
+        <span style="margin-left: 12px;">◦ 1st line empirical antibiotics used for low-severity community acquired pneumonia</span><br>
+        <span style="margin-left: 12px;">◦ Basics of statistics (PPV, NPP, sensitivity, specificity, etc.)</span><br>
+        <span style="margin-left: 12px;">◦ Identifying ST elevation criteria on an ECG</span><br>
+        <span style="margin-left: 12px;">◦ Common causes of HAGMAs/NAGMAs</span><br><br>
+
+        <b style="font-size: 14px;">Medium Yield</b> <span>(~30% cards)</span><br><br>
+        <span>• These cards cover topics that are <i>useful</i>, but not essential for basic understanding of clinical medicine</span><br>
+        <span>• They may provide helpful context to 'high yield' cards and background knowledge</span><br><br>
+        <b>Examples:</b><br>
+        <span style="margin-left: 12px;">◦ ST-elevation cut-offs (ie. mm) on ECG according to national guidelines</span><br>
+        <span style="margin-left: 12px;">◦ Antibiotics used in management of cystitis in women &lt;50 years old</span><br><br>
+
+        <b style="font-size: 14px;">Low Yield</b> <span>(~10% cards)</span><br><br>
+        <span>• These cards are low yield and cover knowledge that goes well beyond what is expected for a basic understanding of clinical medicine</span><br>
+        <span>• Includes niche topics and facts that might be useful for getting a HD in topics for final year medical school exams, but has little utility beyond that</span><br><br>
+        <b>Examples:</b><br>
+        <span style="margin-left: 12px;">◦ Epidemiology of VSDs in the population</span><br>
+        <span style="margin-left: 12px;">◦ Subtypes of gram-negative bacterium</span><br>
+        <span style="margin-left: 12px;">◦ Exact components of niche risk stratification tools (ie. HASBLED)</span><br>
+        <span style="margin-left: 12px;">◦ Niche examination findings found in Talley &amp; O'Connor (ie. JVP waveform interpretation)</span><br><br>
+
+        <b style="font-size: 14px;">Beyond Medical Student Level</b> <span>(~10% cards)</span><br><br>
+        <span>• These cards are a level 'below' low yield, and are tagged to easily filter out content that may be useful for some clinicians (such as Medical Registrars) however has no role in the curriculum of medical school finals</span><br>
+        <span>• These tags were envisioned to be used for cards made on topics from textbooks directly; it's easy to make cards this way however only select cards will actually be high yield for medical school</span><br><br>
+        <b>Examples:</b><br>
+        <span style="margin-left: 12px;">◦ Diagnostic criteria for sepsis according to college guidelines</span><br>
+        <span style="margin-left: 12px;">◦ Niche pharmacology including half-lives and pharmacokinetics of drugs</span>
+        </p>"""
+
+        info_label = QLabel("ℹ️")
+        info_label.setToolTip(combined_tooltip)
+        info_label.setStyleSheet("QLabel { color: #666; font-size: 14px; margin-left: 5px; }")
+        info_label.setFixedSize(20, 20)
+        info_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        info_label.setCursor(Qt.CursorShape.WhatsThisCursor)
+
+        yield_title_layout.addWidget(yield_title_label)
+        yield_title_layout.addWidget(info_label)
+        yield_title_layout.addStretch()
+
+        # Hide the default title and add custom title
+        yield_group.setTitle("")
+        yield_layout.addLayout(yield_title_layout)
+
+        # Add separator line
+        separator = QFrame()
+        separator.setFrameShape(QFrame.Shape.HLine)
+        separator.setFrameShadow(QFrame.Shadow.Sunken)
+        yield_layout.addWidget(separator)
+
+        # Create yield checkboxes without individual tooltips
+        self.yield_checkboxes = {}
+
+        yield_labels = {
+            "High": "High Yield",
+            "Medium": "Medium Yield",
+            "Low": "Low Yield",
+            "Beyond": "Beyond medical student level"
+        }
+
+        for yield_level, label_text in yield_labels.items():
+            checkbox = QCheckBox(label_text)
+            self.yield_checkboxes[yield_level] = checkbox
+            yield_layout.addWidget(checkbox)
+
+        yield_group.setLayout(yield_layout)
+        layout.addWidget(yield_group)
+
         # Buttons
         button_layout = QHBoxLayout()
         select_all_button = QPushButton("Select All")
@@ -1412,6 +1496,33 @@ class NotionPageSelector(QDialog):
 
         layout.addLayout(button_layout)
         self.setLayout(layout)
+
+    def get_selected_yield_tags(self):
+        """Get the selected yield tags"""
+        selected_yields = []
+        for yield_level, checkbox in self.yield_checkboxes.items():
+            if checkbox.isChecked():
+                # Special case for Beyond to use the correct tag name
+                if yield_level == "Beyond":
+                    selected_yields.append("#Malleus_CM::#Yield::Beyond_medical_student_level")
+                else:
+                    selected_yields.append(f"#Malleus_CM::#Yield::{yield_level}")
+        return selected_yields
+
+    def get_yield_search_query(self):
+        """Get the yield search query for browser"""
+        selected_yields = []
+        for yield_level, checkbox in self.yield_checkboxes.items():
+            if checkbox.isChecked():
+                # Special case for Beyond to use the correct tag name
+                if yield_level == "Beyond":
+                    selected_yields.append("tag:#Malleus_CM::#Yield::Beyond_medical_student_level")
+                else:
+                    selected_yields.append(f"tag:#Malleus_CM::#Yield::{yield_level}")
+
+        if selected_yields:
+            return " or ".join(selected_yields)
+        return ""
 
     def update_property_selector(self, database_name):
         """Update property selector items based on selected database"""
@@ -1556,6 +1667,11 @@ class NotionPageSelector(QDialog):
         # Format tags for Anki search
         search_query = " or ".join(f"\"tag:{escape_underscores(tag)}{subtag}\"" for tag in individual_tags)
 
+        # Add yield search query if any yields are selected
+        yield_query = self.get_yield_search_query()
+        if yield_query:
+            search_query = f"({search_query}) and ({yield_query})"
+
         if isinstance(self.parent(), Browser):
             # If called from browser, update the current browser
             browser = self.parent()
@@ -1617,6 +1733,16 @@ class NotionPageSelector(QDialog):
         return ""
 
     def create_cards(self):
+        # Check yield selection for card creation
+        selected_yields = self.get_selected_yield_tags()
+        if len(selected_yields) > 1:
+            showInfo("Please select only one yield level when creating cards")
+            return
+
+        if len(selected_yields) == 0:
+            showInfo("Please select one yield level when creating cards")
+            return
+
         selected_pages = []
         for i in range(self.checkbox_layout.count()):
             checkbox = self.checkbox_layout.itemAt(i).widget()
@@ -1702,14 +1828,15 @@ class NotionPageSelector(QDialog):
         if not selected_pages:
             tags = ["#Malleus_CM::#TO_BE_TAGGED"]
 
-        # Rest of the method remains the same...
+        # Add yield tags
+        all_tags = tags + selected_yields
 
         # Prepare note data
         note = {
             'deckName': config['deck_name'],
             'modelName': 'MalleusCM - Cloze (Malleus Clinical Medicine [AU/NZ] / Stapedius)',
             'fields': {},
-            'tags': tags
+            'tags': all_tags
         }
 
         # Add source field for eTG database
@@ -1844,6 +1971,12 @@ class NotionPageSelector(QDialog):
 
     def add_tags(self):
         """Add new tags to existing ones"""
+        # Check yield selection
+        selected_yields = self.get_selected_yield_tags()
+        if len(selected_yields) > 1:
+            showInfo("Please select only one yield level when adding tags")
+            return
+
         # Get the latest note reference
         note = None
         parent = self.parent()
@@ -1892,6 +2025,9 @@ class NotionPageSelector(QDialog):
         # Get new tags
         new_tags = set(self.get_tags_from_selected_pages())
 
+        # Add yield tags
+        new_tags.update(selected_yields)
+
         # Combine tags
         combined_tags = list(current_tags | new_tags)
 
@@ -1909,6 +2045,12 @@ class NotionPageSelector(QDialog):
 
     def replace_tags(self):
         """Replace existing tags with new ones"""
+        # Check yield selection
+        selected_yields = self.get_selected_yield_tags()
+        if len(selected_yields) > 1:
+            showInfo("Please select only one yield level when replacing tags")
+            return
+
         # Get the appropriate note reference based on context
         note = None
         parent = self.parent()
@@ -1956,8 +2098,11 @@ class NotionPageSelector(QDialog):
         # Get new tags from selected pages
         new_tags = self.get_tags_from_selected_pages()
 
+        # Add yield tags
+        all_tags = new_tags + selected_yields
+
         # Update the note's tags
-        note.tags = new_tags
+        note.tags = all_tags
 
         # Save and refresh based on context
         if isinstance(parent, AddCards):
