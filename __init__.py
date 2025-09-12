@@ -21,6 +21,8 @@ from functools import partial
 from aqt.qt import QKeySequence, QShortcut
 import weakref
 from aqt.qt import Qt
+from PyQt6.QtCore import QUrl
+from PyQt6.QtGui import QDesktopServices
 
 # Load environment variables
 addon_dir = os.path.dirname(os.path.realpath(__file__))
@@ -1493,6 +1495,14 @@ class NotionPageSelector(QDialog):
         update_database_button = QPushButton("Update database")
         update_database_button.clicked.connect(download_github_cache)
         button_layout.addWidget(update_database_button)
+
+        guidelines_button = QPushButton("Submission Guidelines")
+        guidelines_button.clicked.connect(
+            lambda: QDesktopServices.openUrl(
+                QUrl("https://malleuscm.notion.site/Submission-Guidelines-24a5964e68a48144901aef2252f91483")
+            )
+        )
+        button_layout.addWidget(guidelines_button)
 
         layout.addLayout(button_layout)
         self.setLayout(layout)
