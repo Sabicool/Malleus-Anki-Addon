@@ -135,8 +135,9 @@ The `cache_expiry` is the number of days after which the local database copy of 
     -   [X] Cache expiry duration
 -   [X] Add eTG database
 -   [X] Add rotation database
--   [ ] Add guidelines database
+-   [X] Add guidelines database
 -   [X] Integrate full database syncs using python script
+-   [X] Add yield tags
 -   [ ] Integrate with local LLM or neural network to suggest tags
 -   [ ] Add note type customisation options
 
