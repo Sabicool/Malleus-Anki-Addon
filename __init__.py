@@ -28,7 +28,7 @@ from PyQt6.QtGui import QDesktopServices
 addon_dir = os.path.dirname(os.path.realpath(__file__))
 
 # Hard coded environment variables because was causing issues
-NOTION_TOKEN = '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'
+NOTION_TOKEN = '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'
 SUBJECT_DATABASE_ID = '2674b67cbdf84a11a057a29cc24c524f'
 PHARMACOLOGY_DATABASE_ID = '9ff96451736d43909d49e3b9d60971f8'
 ETG_DATABASE_ID = '22282971487f4f559dce199476709b03'
