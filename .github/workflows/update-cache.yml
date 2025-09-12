@@ -32,8 +32,12 @@ jobs:
         from pathlib import Path
         from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
-        # Direct values since they're public
-        NOTION_TOKEN = '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'
+        # Get token from environment variable
+        NOTION_TOKEN = os.environ.get('NOTION_TOKEN')
+        if not NOTION_TOKEN:
+            raise ValueError("NOTION_TOKEN environment variable is required")
+
+        # Database IDs (these can remain public as they're not sensitive)
         SUBJECT_DATABASE_ID = '2674b67cbdf84a11a057a29cc24c524f'
         PHARMACOLOGY_DATABASE_ID = '9ff96451736d43909d49e3b9d60971f8'
         ETG_DATABASE_ID = '22282971487f4f559dce199476709b03'
@@ -138,6 +142,8 @@ jobs:
         EOL
 
     - name: Update cache
+      env:
+        NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
       uses: nick-fields/retry@v2
       with:
         timeout_minutes: 30
