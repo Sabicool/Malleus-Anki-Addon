@@ -1486,11 +1486,13 @@ class NotionPageSelector(QDialog):
         button_layout.addWidget(create_cards_button)
 
         # Only show these buttons when editing an existing note
-
         if self.current_note is not None or isinstance(self.parent(), AddCards):
             replace_tags_button = QPushButton("Replace Tags")
             replace_tags_button.clicked.connect(self.replace_tags)
             button_layout.addWidget(replace_tags_button)
+            remove_tags_button = QPushButton("Remove Tags")
+            remove_tags_button.clicked.connect(self.remove_tags)
+            button_layout.addWidget(remove_tags_button)
 
         update_database_button = QPushButton("Update database")
         update_database_button.clicked.connect(download_github_cache)
@@ -2439,6 +2441,90 @@ class NotionPageSelector(QDialog):
             elif isinstance(parent, EditCurrent):
                 parent.editor.loadNote()
 
+    def remove_tags(self):
+        """Remove all tags associated with the currently selected database"""
+        # Get the appropriate note reference based on context
+        note = None
+        parent = self.parent()
+
+        if isinstance(parent, Browser):
+            note = parent.editor.note
+        elif isinstance(parent, EditCurrent):
+            note = parent.editor.note
+        elif isinstance(parent, AddCards):
+            note = parent.editor.note
+        else:
+            note = self.current_note
+
+        if not note:
+            showInfo("No note found in current context")
+            return
+
+        # Get selected database name
+        database_name = self.database_selector.currentText()
+
+        # Define the database pattern to match
+        database_pattern = f"#Malleus_CM::#{database_name}::"
+
+        database_tag_mapping = {
+            "Subjects": "Subjects",
+            "Pharmacology": "Pharmacology",
+            "eTG": "eTG_Complete",
+            "Rotation": "Resources_by_Rotation",  # This is the key mapping!
+            "Textbooks": "Textbooks",
+            "Guidelines": "Guidelines"
+        }
+
+        # Get the actual tag name
+        tag_database_name = database_tag_mapping.get(database_name, database_name)
+
+        # Define the database pattern to match
+        database_pattern = f"#{tag_database_name}::"
+
+        # Get current tags
+        current_tags = list(note.tags)
+
+        # Find tags that contain the selected database pattern anywhere in the tag
+        tags_to_remove = [tag for tag in current_tags if database_pattern in tag]
+
+        if not tags_to_remove:
+            showInfo(f"No tags found for database: {database_name}")
+            return
+
+        # Show confirmation dialog with the tags to be removed
+        tag_list = "\n".join(tags_to_remove)
+        reply = QMessageBox.question(
+            self,
+            "Confirm Tag Removal",
+            f"Remove the following {len(tags_to_remove)} tag(s)?\n\n{tag_list}",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No
+        )
+
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        # Remove the tags
+        remaining_tags = [tag for tag in current_tags if tag not in tags_to_remove]
+
+        # Update the note's tags
+        note.tags = remaining_tags
+
+        # Save and refresh based on context
+        if isinstance(parent, AddCards):
+            parent.editor.loadNote()
+            parent.editor.setNote(note)
+            parent.editor.loadNote()
+            mw.requireReset()
+        else:
+            note.flush()
+            if isinstance(parent, Browser):
+                parent.model.reset()
+            elif isinstance(parent, EditCurrent):
+                parent.editor.loadNote()
+
+        showInfo(f"Successfully removed {len(tags_to_remove)} tag(s)")
+                
 # Merge Editor Button Setup
 def setup_editor_buttons(buttons, editor):
     # Malleus button
