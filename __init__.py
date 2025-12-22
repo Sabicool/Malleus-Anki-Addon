@@ -2091,9 +2091,9 @@ class NotionPageSelector(QDialog):
         # Buttons
         button_layout = QHBoxLayout()
 
-        select_all_button = QPushButton("Select All")
-        select_all_button.clicked.connect(lambda: [cb.setChecked(True) for cb in checkboxes])
-        button_layout.addWidget(select_all_button)
+        # select_all_button = QPushButton("Select All")
+        # select_all_button.clicked.connect(lambda: [cb.setChecked(True) for cb in checkboxes])
+        # button_layout.addWidget(select_all_button)
 
         button_layout.addStretch()
 
