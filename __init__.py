@@ -2053,8 +2053,71 @@ class NotionPageSelector(QDialog):
         elif isinstance(parent, EditCurrent):
             parent.editor.loadNote()
 
+    def show_tag_selection_dialog(self, tags_with_subtags):
+        """Show dialog for user to select which tags to replace"""
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Select Tags to Replace")
+        dialog.setMinimumWidth(600)
+
+        layout = QVBoxLayout()
+
+        # Info label
+        info_label = QLabel("Multiple subtags detected. Please select which tags you want to replace:")
+        info_label.setWordWrap(True)
+        layout.addWidget(info_label)
+
+        # Scrollable area for checkboxes
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll_widget = QWidget()
+        checkbox_layout = QVBoxLayout()
+
+        # Store checkboxes and their associated data
+        checkboxes = []
+
+        for tag, subtag in tags_with_subtags:
+            # Remove #Malleus_CM:: prefix for display
+            display_tag = tag.replace("#Malleus_CM::", "")
+
+            checkbox = QCheckBox(display_tag)
+            checkbox.tag_data = (tag, subtag)  # Store full tag and subtag
+            checkboxes.append(checkbox)
+            checkbox_layout.addWidget(checkbox)
+
+        scroll_widget.setLayout(checkbox_layout)
+        scroll.setWidget(scroll_widget)
+        layout.addWidget(scroll)
+
+        # Buttons
+        button_layout = QHBoxLayout()
+
+        select_all_button = QPushButton("Select All")
+        select_all_button.clicked.connect(lambda: [cb.setChecked(True) for cb in checkboxes])
+        button_layout.addWidget(select_all_button)
+
+        button_layout.addStretch()
+
+        ok_button = QPushButton("OK")
+        ok_button.clicked.connect(dialog.accept)
+        button_layout.addWidget(ok_button)
+
+        cancel_button = QPushButton("Cancel")
+        cancel_button.clicked.connect(dialog.reject)
+        button_layout.addWidget(cancel_button)
+
+        layout.addLayout(button_layout)
+        dialog.setLayout(layout)
+
+        # Show dialog and get result
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            # Get selected tags
+            selected = [(cb.tag_data[0], cb.tag_data[1]) for cb in checkboxes if cb.isChecked()]
+            return selected
+
+        return None
+
     def replace_tags(self):
-        """Replace existing tags with new ones"""
+        """Replace existing tags with new ones from selected database"""
         # Check yield selection
         selected_yields = self.get_selected_yield_tags()
         if len(selected_yields) > 1:
@@ -2084,52 +2147,230 @@ class NotionPageSelector(QDialog):
             if checkbox.isChecked():
                 selected_pages.append(self.pages_data[i])
 
-        property_name = self.property_selector.currentText()
-
         if not selected_pages:
             showInfo("Please select at least one page")
             return
 
+        # Get selected database name
+        database_name = self.database_selector.currentText()
+
+        # Define possible subtags - MUST match exactly what's in database_properties
+        possible_subtags = self.database_properties.get(database_name, [])
+        # Remove empty string if present
+        possible_subtags = [s for s in possible_subtags if s]
+
+        # Get user-selected subtag from property selector
+        user_selected_subtag = self.property_selector.currentText()
+
+        # Check if all selected pages are general
         all_general = all(
             'ℹ️' in page.get('properties', {}).get('Search Prefix', {}).get('formula', {}).get('string', '')
             for page in selected_pages
-            )
+        )
 
-        if property_name == "":
-            if self.database_selector.currentText() in ("Subjects", "Pharmacology"):
-                if not all_general:  # Only show warning if NOT all general
-                    showInfo("Please select a subtag (Change the dropdown to the right of the searchbox)")
-                    return
-                else:
-                    property_name = "Main Tag"  # Use main tag if all are general
+        # Get current tags
+        current_tags = list(note.tags)
+
+        # Debug: Show current tags
+        print(f"\n=== DEBUG: Replace Tags ===")
+        print(f"Database: {database_name}")
+        print(f"Current tags: {current_tags}")
+        print(f"User selected subtag: '{user_selected_subtag}'")
+        print(f"Possible subtags: {possible_subtags}")
+
+        # Find tags that match the selected database and extract subtags
+        database_pattern = f"#Malleus_CM::#{database_name}::"
+        tags_with_subtags = []  # Store (tag, subtag) tuples
+        detected_subtags = set()
+
+        def normalize_for_comparison(text):
+            """Normalize text for comparison - handle spaces, slashes, underscores"""
+            # Replace common separators with a standard one for comparison
+            return text.replace(' ', '_').replace('/', '_').replace('&', '_').lower()
+
+        for tag in current_tags:
+            if tag.startswith(database_pattern):
+                print(f"\nProcessing tag: {tag}")
+                # This tag belongs to the selected database
+                detected_subtag = None
+
+                # Split tag and get the last segment
+                tag_parts = tag.split("::")
+                if len(tag_parts) > 2:  # Has at least database and some content
+                    last_segment = tag_parts[-1]
+                    print(f"  Last segment: '{last_segment}'")
+
+                    # Try to match against possible subtags
+                    for subtag in possible_subtags:
+                        # Normalize both for comparison
+                        normalized_subtag = normalize_for_comparison(subtag)
+                        normalized_segment = normalize_for_comparison(last_segment)
+
+                        print(f"  Checking subtag '{subtag}' (normalized: '{normalized_subtag}') against '{normalized_segment}'")
+
+                        # Check if the last segment matches or ends with the subtag
+                        # Handle cases like "11_Complications/Prognosis" matching "Complications/Prognosis"
+                        if normalized_segment == normalized_subtag or normalized_segment.endswith(f"_{normalized_subtag}"):
+                            detected_subtag = subtag
+                            print(f"  ✓ MATCH FOUND: {subtag}")
+                            break
+
+                        # Also try matching without number prefix
+                        # Remove leading numbers and underscores (e.g., "11_" from "11_Complications")
+                        import re
+                        segment_without_prefix = re.sub(r'^\d+_', '', last_segment)
+                        normalized_without_prefix = normalize_for_comparison(segment_without_prefix)
+
+                        if normalized_without_prefix == normalized_subtag:
+                            detected_subtag = subtag
+                            print(f"  ✓ MATCH FOUND (without prefix): {subtag}")
+                            break
+
+                tags_with_subtags.append((tag, detected_subtag))
+                if detected_subtag:
+                    detected_subtags.add(detected_subtag)
+                    print(f"  Added detected subtag: {detected_subtag}")
+
+        print(f"\nTags with subtags: {tags_with_subtags}")
+        print(f"Detected subtags: {detected_subtags}")
+
+        # Determine which tags to remove and what subtag to use
+        tags_to_remove = []
+        final_subtag = None
+
+        if user_selected_subtag and user_selected_subtag not in ("", "Tag", "Main Tag"):
+            # User explicitly selected a subtag - use it and remove all matching tags
+            final_subtag = user_selected_subtag
+            tags_to_remove = [tag for tag, subtag in tags_with_subtags]
+            print(f"Using user-selected subtag: {final_subtag}")
+
+        elif len(detected_subtags) > 1:
+            # Multiple different subtags detected - show selection dialog
+            print("Multiple subtags detected, showing selection dialog...")
+
+            selected_tags_data = self.show_tag_selection_dialog(tags_with_subtags)
+
+            if selected_tags_data is None:
+                # User cancelled
+                return
+
+            if not selected_tags_data:
+                showInfo("Please select at least one tag to replace")
+                return
+
+            # Check if all selected tags have the same subtag
+            selected_subtags = set(subtag for tag, subtag in selected_tags_data if subtag)
+
+            if len(selected_subtags) > 1:
+                showInfo(f"Selected tags have different subtags: {', '.join(sorted(selected_subtags))}\n\nPlease select tags with the same subtag.")
+                return
+            elif len(selected_subtags) == 1:
+                final_subtag = list(selected_subtags)[0]
+                tags_to_remove = [tag for tag, subtag in selected_tags_data]
+                print(f"Using subtag from selected tags: {final_subtag}")
             else:
-                property_name = "Tag"
+                # No subtags in selected tags
+                if database_name in ("Subjects", "Pharmacology"):
+                    if not all_general:
+                        showInfo("Selected tags have no subtags. Please select a subtag from the dropdown.")
+                        return
+                    else:
+                        final_subtag = "Main Tag"
+                        tags_to_remove = [tag for tag, subtag in selected_tags_data]
+                else:
+                    final_subtag = "Tag"
+                    tags_to_remove = [tag for tag, subtag in selected_tags_data]
 
-        # Get new tags from selected pages
+        elif len(detected_subtags) == 1:
+            # Single subtag detected - use it and remove all matching tags
+            final_subtag = list(detected_subtags)[0]
+            tags_to_remove = [tag for tag, subtag in tags_with_subtags]
+            print(f"Using detected subtag: {final_subtag}")
+
+        else:
+            # No subtags detected
+            print(f"No subtags detected. Checking if user needs to select one...")
+            tags_to_remove = [tag for tag, subtag in tags_with_subtags]
+
+            if user_selected_subtag == "":
+                if database_name in ("Subjects", "Pharmacology"):
+                    if not all_general:
+                        # Show debug info in the error message
+                        debug_info = f"\nDEBUG INFO:\n"
+                        debug_info += f"Database: {database_name}\n"
+                        debug_info += f"Tags found for this database:\n"
+                        for tag in tags_to_remove:
+                            debug_info += f"  - {tag}\n"
+                        debug_info += f"\nLast segments checked:\n"
+                        for tag in tags_to_remove:
+                            parts = tag.split("::")
+                            if parts:
+                                debug_info += f"  - '{parts[-1]}'\n"
+
+                        showInfo(f"Please select a subtag (Change the dropdown to the right of the searchbox){debug_info}")
+                        return
+                    else:
+                        final_subtag = "Main Tag"
+                else:
+                    final_subtag = "Tag"
+            else:
+                final_subtag = user_selected_subtag
+
+        print(f"Final subtag to use: {final_subtag}")
+        print(f"Tags to remove: {tags_to_remove}")
+
+        # Remove the selected tags
+        remaining_tags = [tag for tag in current_tags if tag not in tags_to_remove]
+        print(f"Remaining tags after removal: {remaining_tags}")
+
+        # Temporarily set property selector to use the detected/selected subtag
+        original_property = self.property_selector.currentText()
+
+        if final_subtag == "Main Tag" or (database_name in ("Subjects", "Pharmacology") and all_general):
+            self.property_selector.setCurrentIndex(0)  # Empty selection = Main Tag
+        elif final_subtag and final_subtag not in ("Tag", "Main Tag"):
+            # Find and set the subtag in the property selector
+            index = self.property_selector.findText(final_subtag)
+            if index >= 0:
+                self.property_selector.setCurrentIndex(index)
+                print(f"Set property selector to: {final_subtag}")
+            else:
+                print(f"WARNING: Could not find '{final_subtag}' in property selector")
+        else:
+            self.property_selector.setCurrentIndex(0)
+
+        # Get new tags from selected pages with the appropriate subtag
         new_tags = self.get_tags_from_selected_pages()
+        print(f"New tags from selected pages: {new_tags}")
+
+        # Restore original property selector value
+        original_index = self.property_selector.findText(original_property)
+        if original_index >= 0:
+            self.property_selector.setCurrentIndex(original_index)
 
         # Add yield tags
-        all_tags = new_tags + selected_yields
+        all_new_tags = new_tags + selected_yields
+
+        # Combine remaining tags with new tags (remove duplicates)
+        final_tags = list(set(remaining_tags + all_new_tags))
+        print(f"Final combined tags: {final_tags}")
+        print("=== END DEBUG ===\n")
 
         # Update the note's tags
-        note.tags = all_tags
+        note.tags = final_tags
 
         # Save and refresh based on context
         if isinstance(parent, AddCards):
-            # For AddCards dialog
             parent.editor.loadNote()
             parent.editor.setNote(note)
             parent.editor.loadNote()
             mw.requireReset()
         else:
-            # For Browser/EditCurrent contexts
             note.flush()
             if isinstance(parent, Browser):
                 parent.model.reset()
             elif isinstance(parent, EditCurrent):
                 parent.editor.loadNote()
-
-            #self.accept()
 
 # Merge Editor Button Setup
 def setup_editor_buttons(buttons, editor):
