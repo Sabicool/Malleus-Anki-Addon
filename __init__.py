@@ -1519,6 +1519,12 @@ class NotionPageSelector(QDialog):
                     selected_yields.append(f"#Malleus_CM::#Yield::{yield_level}")
         return selected_yields
 
+    def get_existing_yield_tags(self, tags):
+        """Extract existing yield tags from a list of tags"""
+        yield_pattern = "#Malleus_CM::#Yield::"
+        existing_yields = [tag for tag in tags if tag.startswith(yield_pattern)]
+        return existing_yields
+
     def get_yield_search_query(self):
         """Get the yield search query for browser"""
         selected_yields = []
@@ -1981,12 +1987,6 @@ class NotionPageSelector(QDialog):
 
     def add_tags(self):
         """Add new tags to existing ones"""
-        # Check yield selection
-        selected_yields = self.get_selected_yield_tags()
-        if len(selected_yields) > 1:
-            showInfo("Please select only one yield level when adding tags")
-            return
-
         # Get the latest note reference
         note = None
         parent = self.parent()
@@ -2014,6 +2014,33 @@ class NotionPageSelector(QDialog):
             showInfo("Please select at least one page")
             return
 
+        # Handle yield tags
+        existing_yields = self.get_existing_yield_tags(note.tags)
+        selected_yields = self.get_selected_yield_tags()
+
+        print(f"Existing yield tags: {existing_yields}")
+        print(f"Selected yield tags: {selected_yields}")
+
+        # Validate yield selection
+        if len(selected_yields) > 1:
+            showInfo("Please select only one yield level")
+            return
+
+        # Determine final yield tags to use
+        final_yield_tags = []
+        if not existing_yields and not selected_yields:
+            # No existing yield and user hasn't selected one - prompt
+            showInfo("Please select a yield level for this card")
+            return
+        elif existing_yields and not selected_yields:
+            # Existing yield and no selection - keep existing
+            final_yield_tags = existing_yields
+            print(f"Keeping existing yield tags: {final_yield_tags}")
+        elif selected_yields:
+            # User selected a yield - use it (replace existing if any)
+            final_yield_tags = selected_yields
+            print(f"Using selected yield tags: {final_yield_tags}")
+
         all_general = all(
             'ℹ️' in page.get('properties', {}).get('Search Prefix', {}).get('formula', {}).get('string', '')
             for page in selected_pages
@@ -2032,19 +2059,23 @@ class NotionPageSelector(QDialog):
         # Get current tags
         current_tags = set(note.tags)
 
+        # Remove any existing yield tags
+        current_tags = {
+            tag for tag in current_tags
+            if not tag.startswith("#Malleus_CM::#Yield::")
+        }
+
         # Get new tags
         new_tags = set(self.get_tags_from_selected_pages())
 
-        # Add yield tags
-        new_tags.update(selected_yields)
+        # Combine new tags with final yield tags
+        all_new_tags = new_tags | set(final_yield_tags)
 
-        # Combine tags
-        combined_tags = list(current_tags | new_tags)
+        # Combine everything
+        combined_tags = list(current_tags | all_new_tags)
 
-        # Update the note's tags
+        # Update the note
         note.tags = combined_tags
-
-        # Save the note
         note.flush()
 
         # Refresh the editor
@@ -2118,12 +2149,6 @@ class NotionPageSelector(QDialog):
 
     def replace_tags(self):
         """Replace existing tags with new ones from selected database"""
-        # Check yield selection
-        selected_yields = self.get_selected_yield_tags()
-        if len(selected_yields) > 1:
-            showInfo("Please select only one yield level when replacing tags")
-            return
-
         # Get the appropriate note reference based on context
         note = None
         parent = self.parent()
@@ -2150,6 +2175,33 @@ class NotionPageSelector(QDialog):
         if not selected_pages:
             showInfo("Please select at least one page")
             return
+
+        # Handle yield tags
+        existing_yields = self.get_existing_yield_tags(note.tags)
+        selected_yields = self.get_selected_yield_tags()
+
+        print(f"Existing yield tags: {existing_yields}")
+        print(f"Selected yield tags: {selected_yields}")
+
+        # Validate yield selection
+        if len(selected_yields) > 1:
+            showInfo("Please select only one yield level")
+            return
+
+        # Determine final yield tags to use
+        final_yield_tags = []
+        if not existing_yields and not selected_yields:
+            # No existing yield and user hasn't selected one - prompt
+            showInfo("Please select a yield level for this card")
+            return
+        elif existing_yields and not selected_yields:
+            # Existing yield and no selection - keep existing
+            final_yield_tags = existing_yields
+            print(f"Keeping existing yield tags: {final_yield_tags}")
+        elif selected_yields:
+            # User selected a yield - use it (replace existing if any)
+            final_yield_tags = selected_yields
+            print(f"Using selected yield tags: {final_yield_tags}")
 
         # Get selected database name
         database_name = self.database_selector.currentText()
@@ -2348,8 +2400,23 @@ class NotionPageSelector(QDialog):
         if original_index >= 0:
             self.property_selector.setCurrentIndex(original_index)
 
-        # Add yield tags
-        all_new_tags = new_tags + selected_yields
+        # Remove any existing yield tags from remaining tags
+        remaining_tags = [tag for tag in remaining_tags if not tag.startswith("#Malleus_CM::#Yield::")]
+
+        # Combine tags: remaining + new tags + final yield tags
+        all_new_tags = new_tags + final_yield_tags
+
+        # Combine remaining tags with new tags (remove duplicates)
+        final_tags = list(set(remaining_tags + all_new_tags))
+
+        # Final validation: ensure only one yield tag
+        yield_tags_in_final = [tag for tag in final_tags if tag.startswith("#Malleus_CM::#Yield::")]
+        if len(yield_tags_in_final) > 1:
+            showInfo(f"Error: Multiple yield tags detected in final result:\n" + "\n".join(yield_tags_in_final) + "\n\nThis should not happen. Please report this issue.")
+            return
+        elif len(yield_tags_in_final) == 0:
+            showInfo("No yield tag. Please select a yield level.")
+            return
 
         # Combine remaining tags with new tags (remove duplicates)
         final_tags = list(set(remaining_tags + all_new_tags))
