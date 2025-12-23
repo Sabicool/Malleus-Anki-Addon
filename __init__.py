@@ -1518,7 +1518,7 @@ class NotionPageSelector(QDialog):
         guidelines_button = QPushButton("Submission Guidelines")
         guidelines_button.clicked.connect(
             lambda: QDesktopServices.openUrl(
-                QUrl("https://malleuscm.notion.site/Submission-Guidelines-24a5964e68a48144901aef2252f91483")
+                QUrl("https://malleuscm.notion.site/submission-guidelines")
             )
         )
         button_layout.addWidget(guidelines_button)
