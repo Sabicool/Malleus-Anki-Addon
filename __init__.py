@@ -1228,6 +1228,8 @@ def open_browser_with_search(search_query):
     return
 
 class NotionPageSelector(QDialog):
+    last_yield_selection = ""  # Class variable to remember last selection
+
     def __init__(self, parent=None):
         if parent is not None and not isinstance(parent, QWidget):
             parent = mw
@@ -1452,6 +1454,15 @@ class NotionPageSelector(QDialog):
             "Beyond medical student level"
         ])
 
+        # Restore last selection
+        if NotionPageSelector.last_yield_selection:
+            index = self.yield_selector.findText(NotionPageSelector.last_yield_selection)
+            if index >= 0:
+                self.yield_selector.setCurrentIndex(index)
+
+        # Save selection when it changes
+        self.yield_selector.currentTextChanged.connect(self.save_yield_selection)
+
         # Add all elements to the horizontal layout
         yield_title_layout.addWidget(yield_title_label)
         yield_title_layout.addWidget(info_label)
@@ -1513,6 +1524,10 @@ class NotionPageSelector(QDialog):
 
         layout.addLayout(button_layout)
         self.setLayout(layout)
+
+    def save_yield_selection(self, text):
+        """Save the current yield selection"""
+        NotionPageSelector.last_yield_selection = text
 
     def get_selected_yield_tags(self):
         """Get the selected yield tags from the dropdown"""
