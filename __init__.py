@@ -2126,7 +2126,7 @@ class NotionPageSelector(QDialog):
         database_tag_mapping = {
             "Subjects": "Subjects",
             "Pharmacology": "Pharmacology",
-            "eTG": "eTG_Complete",
+            "eTG": "eTG",
             "Rotation": "Resources_by_Rotation",
             "Textbooks": "Textbooks",
             "Guidelines": "Guidelines"
