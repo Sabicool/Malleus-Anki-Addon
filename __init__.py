@@ -1394,12 +1394,12 @@ class NotionPageSelector(QDialog):
         yield_group = QGroupBox("Yield Level")
         yield_layout = QVBoxLayout()
 
-        # Create a custom title bar for the group box with info icon
+        # Create a horizontal layout with title, info icon, and dropdown
         yield_title_layout = QHBoxLayout()
         yield_title_label = QLabel("Yield Level")
         yield_title_label.setStyleSheet("font-weight: bold; font-size: 13px;")
 
-        # Create single info icon with combined tooltip
+        # Create info icon with combined tooltip
         combined_tooltip = """<p style="margin: 0; padding: 4px;">
         <b style="font-size: 14px;">High Yield</b> <span>(~50% cards)</span><br><br>
         <span>• If you study just these cards, you will likely pass final year medical school exams, but likely not do much better if studied in isolation</span><br>
@@ -1442,34 +1442,25 @@ class NotionPageSelector(QDialog):
         info_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         info_label.setCursor(Qt.CursorShape.WhatsThisCursor)
 
+        # Create yield dropdown selector
+        self.yield_selector = QComboBox()
+        self.yield_selector.addItems([
+            "",  # Empty default
+            "High Yield",
+            "Medium Yield",
+            "Low Yield",
+            "Beyond medical student level"
+        ])
+
+        # Add all elements to the horizontal layout
         yield_title_layout.addWidget(yield_title_label)
         yield_title_layout.addWidget(info_label)
         yield_title_layout.addStretch()
+        yield_title_layout.addWidget(self.yield_selector)
 
-        # Hide the default title and add custom title
+        # Hide the default title and add custom layout
         yield_group.setTitle("")
         yield_layout.addLayout(yield_title_layout)
-
-        # Add separator line
-        separator = QFrame()
-        separator.setFrameShape(QFrame.Shape.HLine)
-        separator.setFrameShadow(QFrame.Shadow.Sunken)
-        yield_layout.addWidget(separator)
-
-        # Create yield checkboxes without individual tooltips
-        self.yield_checkboxes = {}
-
-        yield_labels = {
-            "High": "High Yield",
-            "Medium": "Medium Yield",
-            "Low": "Low Yield",
-            "Beyond": "Beyond medical student level"
-        }
-
-        for yield_level, label_text in yield_labels.items():
-            checkbox = QCheckBox(label_text)
-            self.yield_checkboxes[yield_level] = checkbox
-            yield_layout.addWidget(checkbox)
 
         yield_group.setLayout(yield_layout)
         layout.addWidget(yield_group)
@@ -1524,16 +1515,22 @@ class NotionPageSelector(QDialog):
         self.setLayout(layout)
 
     def get_selected_yield_tags(self):
-        """Get the selected yield tags"""
-        selected_yields = []
-        for yield_level, checkbox in self.yield_checkboxes.items():
-            if checkbox.isChecked():
-                # Special case for Beyond to use the correct tag name
-                if yield_level == "Beyond":
-                    selected_yields.append("#Malleus_CM::#Yield::Beyond_medical_student_level")
-                else:
-                    selected_yields.append(f"#Malleus_CM::#Yield::{yield_level}")
-        return selected_yields
+        """Get the selected yield tags from the dropdown"""
+        selected_yield = self.yield_selector.currentText()
+
+        if not selected_yield or selected_yield == "":
+            return []
+
+        # Map the display text to the actual tag
+        yield_tag_mapping = {
+            "High Yield": "#Malleus_CM::#Yield::High",
+            "Medium Yield": "#Malleus_CM::#Yield::Medium",
+            "Low Yield": "#Malleus_CM::#Yield::Low",
+            "Beyond medical student level": "#Malleus_CM::#Yield::Beyond_medical_student_level"
+        }
+
+        tag = yield_tag_mapping.get(selected_yield)
+        return [tag] if tag else []
 
     def get_existing_yield_tags(self, tags):
         """Extract existing yield tags from a list of tags"""
@@ -1543,18 +1540,21 @@ class NotionPageSelector(QDialog):
 
     def get_yield_search_query(self):
         """Get the yield search query for browser"""
-        selected_yields = []
-        for yield_level, checkbox in self.yield_checkboxes.items():
-            if checkbox.isChecked():
-                # Special case for Beyond to use the correct tag name
-                if yield_level == "Beyond":
-                    selected_yields.append("tag:#Malleus_CM::#Yield::Beyond_medical_student_level")
-                else:
-                    selected_yields.append(f"tag:#Malleus_CM::#Yield::{yield_level}")
+        selected_yield = self.yield_selector.currentText()
 
-        if selected_yields:
-            return " or ".join(selected_yields)
-        return ""
+        if not selected_yield or selected_yield == "":
+            return ""
+
+        # Map the display text to the search query format
+        yield_search_mapping = {
+            "High Yield": "tag:#Malleus_CM::#Yield::High",
+            "Medium Yield": "tag:#Malleus_CM::#Yield::Medium",
+            "Low Yield": "tag:#Malleus_CM::#Yield::Low",
+            "Beyond medical student level": "tag:#Malleus_CM::#Yield::Beyond_medical_student_level"
+        }
+
+        search_query = yield_search_mapping.get(selected_yield, "")
+        return search_query
 
     def update_property_selector(self, database_name):
         """Update property selector items based on selected database"""
@@ -2201,9 +2201,16 @@ class NotionPageSelector(QDialog):
             if checkbox.isChecked():
                 selected_pages.append(self.pages_data[i])
 
-        if not selected_pages:
-            showInfo("Please select at least one page")
+        selected_yields = self.get_selected_yield_tags()
+
+        # Check if user has selected either pages or yields
+        if not selected_pages and not selected_yields:
+            showInfo("Please select at least one page or yield level")
             return
+
+        # If only yield is selected (no pages), just update yield
+        if not selected_pages and selected_yields:
+            return self._update_yield_only(notes, selected_yields)
 
         property_name = self.property_selector.currentText()
 
@@ -2326,6 +2333,62 @@ class NotionPageSelector(QDialog):
 
         showInfo(summary)
 
+
+    def _update_yield_only(self, notes, selected_yields):
+        """Update only the yield tags without adding any other tags"""
+        # Validate yield selection
+        if len(selected_yields) > 1:
+            showInfo("Please select only one yield level")
+            return
+
+        if len(selected_yields) == 0:
+            showInfo("Please select a yield level")
+            return
+
+        # Check if we're in AddCards context
+        parent = self.parent()
+        is_add_cards = isinstance(parent, AddCards)
+        is_single_note = (len(notes) == 1)
+
+        # Track statistics
+        total_notes = len(notes)
+        notes_modified = 0
+
+        # Process each note
+        for note in notes:
+            # Get current tags
+            current_tags = list(note.tags)
+
+            # Remove any existing yield tags
+            remaining_tags = [tag for tag in current_tags if not tag.startswith("#Malleus_CM::#Yield::")]
+
+            # Add the selected yield tag
+            final_tags = remaining_tags + selected_yields
+
+            # Update the note
+            note.tags = final_tags
+
+            # Only flush if not in AddCards dialog
+            if not is_add_cards:
+                note.flush()
+
+            notes_modified += 1
+
+        # Refresh the UI
+        if isinstance(parent, Browser):
+            parent.model.reset()
+        elif isinstance(parent, EditCurrent):
+            parent.editor.loadNote()
+        elif isinstance(parent, AddCards):
+            parent.editor.loadNote()
+
+        # Show summary only for multiple notes
+        if not is_single_note:
+            summary = f"Successfully updated yield for {total_notes} note(s)\n"
+            summary += f"New yield: {selected_yields[0].replace('#Malleus_CM::#Yield::', '')}"
+            showInfo(summary)
+
+
     def _add_tags_single_note(self, note, selected_pages, property_name):
         """Handle add tags for a single note with proper validation"""
         # Handle yield tags
@@ -2402,6 +2465,7 @@ class NotionPageSelector(QDialog):
 
         return True
 
+
     def replace_tags(self):
         """Replace existing tags with new ones from selected database"""
         notes = self.get_notes_to_process()
@@ -2416,9 +2480,16 @@ class NotionPageSelector(QDialog):
             if checkbox.isChecked():
                 selected_pages.append(self.pages_data[i])
 
-        if not selected_pages:
-            showInfo("Please select at least one page")
+        selected_yields = self.get_selected_yield_tags()
+
+        # Check if user has selected either pages or yields
+        if not selected_pages and not selected_yields:
+            showInfo("Please select at least one page or yield level")
             return
+
+        # If only yield is selected (no pages), just update yield
+        if not selected_pages and selected_yields:
+            return self._update_yield_only(notes, selected_yields)
 
         # Get selected database name
         database_name = self.database_selector.currentText()
@@ -2457,7 +2528,6 @@ class NotionPageSelector(QDialog):
             )
 
             if result:
-                parent = self.parent()
                 if isinstance(parent, Browser):
                     parent.model.reset()
                 elif isinstance(parent, EditCurrent):
