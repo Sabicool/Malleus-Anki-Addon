@@ -40,7 +40,7 @@ config = mw.addonManager.getConfig(__name__)
 class NotionCache:
     """Handles caching of Notion database content"""
     CACHE_VERSION = 1
-    # CACHE_EXPIRY = config['cache_expiry'] * 24 * 60 * 60  # 24 hours in seconds
+    REQUEST_TIMEOUT = 10  # seconds - prevent hanging on network issues
 
     def __init__(self, addon_dir: str):
         self.cache_dir = Path(addon_dir) / "cache"
@@ -52,38 +52,51 @@ class NotionCache:
             "Notion-Version": "2022-06-28",
             "Content-Type": "application/json"
         }
-        #self.config_manager = ConfigManager()
-        self.CACHE_EXPIRY = config['cache_expiry'] * 24 * 60 * 60 + 1 * 60 * 60 # Added 1 hour to allow time for github bot
-        self.github_repo = "Sabicool/Malleus-Anki-Addon"  # Replace with your GitHub repo
-        self.github_branch = "main"  # Or whatever branch you use
+        self.CACHE_EXPIRY = config['cache_expiry'] * 24 * 60 * 60 + 1 * 60 * 60
+        self.github_repo = "Sabicool/Malleus-Anki-Addon"
+        self.github_branch = "main"
 
     def get_cache_path(self, database_id: str) -> Path:
         """Get the path for a specific database's cache file"""
         return self.cache_dir / f"{database_id}.json"
 
-    def load_from_cache(self, database_id: str) -> Tuple[List[Dict], float]:
-        """Load cached data if it exists and is not expired"""
+    def is_online(self) -> bool:
+        """Check if internet connection is available"""
+        try:
+            # Try to connect to a reliable host
+            requests.head("https://www.google.com", timeout=3)
+            return True
+        except (requests.ConnectionError, requests.Timeout, Exception):
+            return False
+
+    def load_from_cache(self, database_id: str, warn_if_expired: bool = True) -> Tuple[List[Dict], float]:
+        """Load cached data if it exists, even if expired (for offline use)"""
         cache_path = self.get_cache_path(database_id)
         if not cache_path.exists():
-            return [], time.time()  # Return current time instead of 0
+            return [], time.time()
 
         try:
             with cache_path.open('r', encoding='utf-8') as f:
                 cache_data = json.load(f)
 
-            # Check cache version and expiry
             current_time = time.time()
             cache_timestamp = float(cache_data.get('timestamp', current_time))
 
-            if (cache_data.get('version') != self.CACHE_VERSION or
-                current_time - cache_timestamp > self.CACHE_EXPIRY):
-                #return [], current_time  # Return current time instead of 0
-                tooltip("Newer database version available. Restart anki or click update database to update database")
+            # Check if cache is expired
+            is_expired = (cache_data.get('version') != self.CACHE_VERSION or
+                         current_time - cache_timestamp > self.CACHE_EXPIRY)
 
+            # Only warn if expired and online (can update)
+            if is_expired and warn_if_expired and self.is_online():
+                mw.taskman.run_on_main(
+                    lambda: tooltip("Newer database version available. Click 'Update Database' to update.")
+                )
+
+            # Return cached data even if expired (better than crashing)
             return cache_data.get('pages', []), cache_timestamp
 
         except Exception as e:
-            mw.taskman.run_on_main(lambda: showInfo(f"Error loading cache: {e}"))
+            print(f"Error loading cache: {e}")
             return [], time.time()
 
     def save_to_cache(self, database_id: str, pages: List[Dict]):
@@ -97,27 +110,23 @@ class NotionCache:
                 cache_data = json.load(f)
                 existing_pages = cache_data.get('pages', [])
         except (FileNotFoundError, json.JSONDecodeError):
-            # If no existing cache, create new cache data
             cache_data = {
                 'version': self.CACHE_VERSION,
                 'pages': []
             }
             existing_pages = []
 
-        # Always update the timestamp, regardless of whether there are new pages
+        # Always update the timestamp
         cache_data['timestamp'] = current_time
 
         # Only merge pages if there are new ones
         if pages:
-            # Create dictionaries for easy lookup
             existing_dict = {page['id']: page for page in existing_pages}
             new_dict = {page['id']: page for page in pages}
-
-            # Merge existing and new pages
             merged_dict = {**existing_dict, **new_dict}
             cache_data['pages'] = list(merged_dict.values())
 
-        # Save the updated cache data
+        # Save with lock
         with self.cache_lock:
             with cache_path.open('w', encoding='utf-8') as f:
                 json.dump(cache_data, f)
@@ -141,74 +150,91 @@ class NotionCache:
         """Update cache asynchronously with optional callback"""
         database_name = self.get_database_name(database_id)
 
+        # Check if online first
+        if not self.is_online():
+            print(f"Offline: Using cached data for {database_name}")
+            if callback:
+                mw.taskman.run_on_main(callback)
+            return
+
         if not force and not self.is_cache_expired(database_id):
             if callback:
                 callback()
             return
 
         if force:
-            # If force=True, directly update the cache without downloading from GitHub
+            # Direct update without GitHub download
             self._update_cache_thread(database_id, database_name, callback)
         else:
-            # If cache is expired but not forced, download from GitHub
+            # Download from GitHub
             def download_thread():
                 try:
                     success = self.download_all_caches_from_github()
                     if not success:
-                        # If GitHub download fails, log error but don't proceed with update
-                        print(f"Error downloading cache from GitHub")
-                    if callback:
-                        mw.taskman.run_on_main(callback)
+                        print(f"Failed to download cache from GitHub for {database_name}")
                 except Exception as e:
                     print(f"Error during GitHub cache download: {e}")
+                finally:
                     if callback:
                         mw.taskman.run_on_main(callback)
 
-            self._sync_thread = threading.Thread(target=download_thread)
+            self._sync_thread = threading.Thread(target=download_thread, daemon=True)
             self._sync_thread.start()
 
     def get_database_name(self, database_id: str) -> str:
         """Helper method to get database name based on ID"""
-        if database_id == SUBJECT_DATABASE_ID:
-            return "Subjects"
-        elif database_id == PHARMACOLOGY_DATABASE_ID:
-            return "Pharmacology"
-        elif database_id == ETG_DATABASE_ID:
-            return "eTG"
-        elif database_id == ROTATION_DATABASE_ID:
-            return "Rotation"
-        elif database_id == TEXTBOOKS_DATABASE_ID:
-            return "Textbooks"
-        elif database_id == GUIDELINES_DATABASE_ID:
-            return "Guidelines"
-        return "Unknown Database"
+        database_names = {
+            SUBJECT_DATABASE_ID: "Subjects",
+            PHARMACOLOGY_DATABASE_ID: "Pharmacology",
+            ETG_DATABASE_ID: "eTG",
+            ROTATION_DATABASE_ID: "Rotation",
+            TEXTBOOKS_DATABASE_ID: "Textbooks",
+            GUIDELINES_DATABASE_ID: "Guidelines"
+        }
+        return database_names.get(database_id, "Unknown Database")
 
     def _update_cache_thread(self, database_id: str, database_name: str, callback: callable = None):
         """Internal method to update cache in a thread"""
         def sync_thread():
             try:
-                #mw.taskman.run_on_main(lambda: tooltip(f"{database_name} database updated"))
-                cached_pages, last_sync_timestamp = self.load_from_cache(database_id)
-                pages = self.fetch_updated_pages(database_id, last_sync_timestamp)
-                self.save_to_cache(database_id, pages)
+                # Check online status
+                if not self.is_online():
+                    print(f"Offline: Cannot update {database_name}")
+                    if callback:
+                        mw.taskman.run_on_main(callback)
+                    return
 
+                cached_pages, last_sync_timestamp = self.load_from_cache(database_id, warn_if_expired=False)
+                pages = self.fetch_updated_pages(database_id, last_sync_timestamp)
+                
+                if pages:
+                    self.save_to_cache(database_id, pages)
+                    mw.taskman.run_on_main(lambda: tooltip(f"{database_name} database updated"))
+                
+                if callback:
+                    mw.taskman.run_on_main(callback)
+                    
+            except requests.exceptions.RequestException as e:
+                print(f"Network error during {database_name} sync: {e}")
+                mw.taskman.run_on_main(
+                    lambda: tooltip(f"Offline: Using cached {database_name} data")
+                )
                 if callback:
                     mw.taskman.run_on_main(callback)
             except Exception as e:
-                mw.taskman.run_on_main(lambda: showInfo(f"Error during sync: {e}"))
+                print(f"Error during {database_name} sync: {e}")
                 if callback:
                     mw.taskman.run_on_main(callback)
 
-        self._sync_thread = threading.Thread(target=sync_thread)
+        self._sync_thread = threading.Thread(target=sync_thread, daemon=True)
         self._sync_thread.start()
 
     def fetch_updated_pages(self, database_id: str, last_sync_timestamp: float) -> List[Dict]:
-        """Fetch all pages from a Notion database that have been updated since the last sync"""
+        """Fetch all pages from Notion database that have been updated since last sync"""
         pages = []
         has_more = True
         start_cursor = None
 
-        # Ensure we have a valid timestamp
         if last_sync_timestamp <= 0:
             last_sync_timestamp = time.time() - self.CACHE_EXPIRY
 
@@ -241,15 +267,12 @@ class NotionCache:
                 payload["start_cursor"] = start_cursor
 
             try:
-                print(f"Fetching pages updated since: {datetime.fromtimestamp(last_sync_timestamp).isoformat()}")
-                print(f"Payload: {payload}")
                 response = requests.post(
                     f"https://api.notion.com/v1/databases/{database_id}/query",
                     headers=self.headers,
-                    json=payload
+                    json=payload,
+                    timeout=self.REQUEST_TIMEOUT  # Critical: prevent hanging
                 )
-                print(f"Response status code: {response.status_code}")
-                print(f"Response data: {response.json()}")
                 response.raise_for_status()
                 data = response.json()
 
@@ -257,8 +280,14 @@ class NotionCache:
                 has_more = data.get('has_more', False)
                 start_cursor = data.get('next_cursor')
 
+            except requests.exceptions.Timeout:
+                print(f"Timeout fetching from Notion")
+                break
+            except requests.exceptions.ConnectionError:
+                print(f"Connection error fetching from Notion")
+                break
             except Exception as e:
-                showInfo(f"Error fetching from Notion: {e}")
+                print(f"Error fetching from Notion: {e}")
                 break
 
         print(f"Found {len(pages)} updated pages")
@@ -270,11 +299,9 @@ class NotionCache:
         import re
         from functools import lru_cache
 
-        # Early return if search term is too short
         if len(search_term.replace(' ', '')) < 3:
             return []
 
-        # Medical term variations stored as a constant to avoid rebuilding
         MEDICAL_VARIATIONS = {
             'paed': {'paediatric', 'paediatrics'},
             'paeds': {'paediatric', 'paediatrics'},
@@ -303,24 +330,18 @@ class NotionCache:
 
         @lru_cache(maxsize=1000)
         def normalize_text(text: str) -> set:
-            """Normalize text and return set of variations"""
-            # Clean and split text
             words = re.sub(r'[^\w\s]', ' ', text.lower()).split()
-
-            # Get variations for each word
             normalized = set()
+            
             for word in words:
-                # Always include original word, lowercase variants, and medical variations
                 normalized.add(word)
                 normalized.add(word.lower())
 
-                # Add plurals and medical variations
                 if word.endswith('y'):
                     normalized.add(word[:-1] + 'ies')
                 elif word.endswith('s') and not word.endswith('ss'):
                     normalized.add(word[:-1])
 
-                # Add medical term variations if applicable
                 for key, variations in MEDICAL_VARIATIONS.items():
                     if word.lower() == key or word.lower() in variations:
                         normalized.update(variations)
@@ -329,41 +350,25 @@ class NotionCache:
             return normalized
 
         def page_matches_all_terms(page_words: list, search_terms: set) -> bool:
-            """Check if page matches ALL search terms with start-of-word matching"""
             for search_term in search_terms:
-                # Flag to track if this term matches any word
                 term_matched = False
-
                 for page_word in page_words:
-                    # Normalize both search term and page word
                     page_variations = normalize_text(page_word)
-
-                    # Check if search term starts any normalized variation
-                    if any(
-                        var.startswith(search_term)
-                        for var in page_variations
-                    ):
+                    if any(var.startswith(search_term) for var in page_variations):
                         term_matched = True
                         break
-
-                # If no match found for this term, return False
                 if not term_matched:
                     return False
-
             return True
 
-        # Pre-process search term
         search_terms = search_term.lower().split()
         normalized_search_term = search_term.lower()
 
-        # Filter pages
         filtered_pages = []
         for page in pages:
-            # Skip pages without properties
             if not page.get('properties'):
                 continue
 
-            # Extract page search terms
             page_search_terms_prop = page['properties'].get('Search Term', {})
             if not page_search_terms_prop or page_search_terms_prop.get('type') != 'formula':
                 continue
@@ -372,39 +377,24 @@ class NotionCache:
             if not page_search_term:
                 continue
 
-            # Normalize page search terms
             page_terms = normalize_text(page_search_term)
 
-            # Check if page matches ALL search terms
             if page_matches_all_terms(page_terms, search_terms):
-                # Extract title for additional context
                 title_prop = page['properties'].get('Name', {})
                 title = title_prop['title'][0]['text']['content'] if title_prop.get('title') else ""
                 title_lower = title.lower()
 
-                # Calculate multiple similarity metrics
-                # 1. Exact match score
                 exact_match_score = 1.0 if normalized_search_term in page_search_term else 0.0
-
-                # 2. Title match score
                 title_match_score = 1.0 if normalized_search_term in title_lower else (
                     0.9 if any(term in title_lower for term in search_terms) else 0.0
                 )
-
-                # 3. Term frequency score
                 term_freq_score = sum(
                     page_search_term.count(term) for term in search_terms
                 ) / len(search_terms)
-
-                # 4. Sequence similarity
                 sequence_similarity = SequenceMatcher(
-                    None,
-                    normalized_search_term,
-                    page_search_term
+                    None, normalized_search_term, page_search_term
                 ).ratio()
 
-                # Composite ranking score
-                # Prioritize exact matches, then title matches, then frequency
                 composite_score = (
                     exact_match_score * 0.4 +
                     title_match_score * 0.3 +
@@ -412,19 +402,17 @@ class NotionCache:
                     sequence_similarity * 0.1
                 )
 
-                # Store scores for sorting
                 page['_composite_score'] = composite_score
                 page['_title'] = title_lower
                 page['_exact_match'] = exact_match_score
 
                 filtered_pages.append(page)
 
-        # Sorting with more nuanced ranking
         filtered_pages.sort(
             key=lambda x: (
-                -x.get('_exact_match', 0),      # Exact matches first
-                -x.get('_composite_score', 0),  # Then by composite score
-                x.get('_title', '')             # Then alphabetically
+                -x.get('_exact_match', 0),
+                -x.get('_composite_score', 0),
+                x.get('_title', '')
             )
         )
 
@@ -436,34 +424,43 @@ class NotionCache:
         url = f"https://raw.githubusercontent.com/{self.github_repo}/{self.github_branch}/cache/{cache_filename}"
 
         try:
-            response = requests.get(url)
+            response = requests.get(url, timeout=self.REQUEST_TIMEOUT)
             response.raise_for_status()
-
-            # Parse the JSON to validate it
             cache_data = response.json()
 
-            # Save to cache with lock to prevent conflicts
             with self.cache_lock:
                 cache_path = self.get_cache_path(database_id)
                 with cache_path.open('w', encoding='utf-8') as f:
                     json.dump(cache_data, f)
 
             return True
+        except requests.exceptions.Timeout:
+            print(f"Timeout downloading cache from GitHub: {database_id}")
+            return False
+        except requests.exceptions.ConnectionError:
+            print(f"Connection error downloading cache from GitHub: {database_id}")
+            return False
         except Exception as e:
             print(f"Error downloading cache from GitHub: {e}")
             return False
 
     def download_all_caches_from_github(self) -> bool:
         """Download all cache files from GitHub"""
+        if not self.is_online():
+            print("Offline: Cannot download caches from GitHub")
+            return False
+
         success = True
-        for database_id in [
-            '2674b67cbdf84a11a057a29cc24c524f',  # SUBJECT_DATABASE_ID
-            '9ff96451736d43909d49e3b9d60971f8',  # PHARMACOLOGY_DATABASE_ID
-            '22282971487f4f559dce199476709b03',  # ETG_DATABASE_ID
-            '69b3e7fdce1548438b26849466d7c18e',  # ROTATION_DATABASE_ID
-            '13d5964e68a480bfb07cf7e2f1786075',  # TEXTBOOKS_DATABASE_ID
+        database_ids = [
+            '2674b67cbdf84a11a057a29cc24c524f',
+            '9ff96451736d43909d49e3b9d60971f8',
+            '22282971487f4f559dce199476709b03',
+            '69b3e7fdce1548438b26849466d7c18e',
+            '13d5964e68a480bfb07cf7e2f1786075',
             '13d5964e68a48056b40de8148dd91a06'
-        ]:
+        ]
+
+        for database_id in database_ids:
             if not self.download_cache_from_github(database_id):
                 success = False
 
