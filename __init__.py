@@ -1489,17 +1489,18 @@ class NotionPageSelector(QDialog):
         button_layout.addWidget(find_cards_button)
         
         if isinstance(self.parent(), AddCards):
-            create_cards_button = QPushButton("Add Tags")
+            add_tags_button = QPushButton("Add Tags")
+            add_tags_button.clicked.connect(self.add_tags)
+            button_layout.addWidget(add_tags_button)
         else:
             create_cards_button = QPushButton("Create Cards")
+            create_cards_button.clicked.connect(self.create_cards)
+            button_layout.addWidget(create_cards_button)
             # Show Add Tags button if we have notes to process
             if self.has_notes_to_process():
                 add_tags_button = QPushButton("Add Tags")
                 add_tags_button.clicked.connect(self.add_tags)
                 button_layout.addWidget(add_tags_button)
-
-        create_cards_button.clicked.connect(self.create_cards)
-        button_layout.addWidget(create_cards_button)
 
         # Show these buttons when editing an existing note OR when in browser with selected cards
         if self.has_notes_to_process():
@@ -2141,6 +2142,10 @@ class NotionPageSelector(QDialog):
         total_tags_removed = 0
         all_removed_tags = set()
 
+        # Check if we're in AddCards context
+        parent = self.parent()
+        is_add_cards = isinstance(parent, AddCards)
+
         # Process each note
         for note in notes:
             current_tags = list(note.tags)
@@ -2150,14 +2155,16 @@ class NotionPageSelector(QDialog):
                 # Remove the tags
                 remaining_tags = [tag for tag in current_tags if tag not in tags_to_remove]
                 note.tags = remaining_tags
-                note.flush()
+
+                # Only flush if not in AddCards dialog
+                if not is_add_cards:
+                    note.flush()
 
                 notes_modified += 1
                 total_tags_removed += len(tags_to_remove)
                 all_removed_tags.update(tags_to_remove)
 
         # Refresh the UI
-        parent = self.parent()
         if isinstance(parent, Browser):
             parent.model.reset()
         elif isinstance(parent, EditCurrent):
@@ -2183,8 +2190,7 @@ class NotionPageSelector(QDialog):
                 summary += f"\n... and {len(unique_tags) - 20} more"
 
             showInfo(summary)
-
-
+            
     def add_tags(self):
         """Add new tags to existing ones"""
         notes = self.get_notes_to_process()
@@ -2221,11 +2227,29 @@ class NotionPageSelector(QDialog):
             else:
                 property_name = "Tag"
 
-        # Track statistics
+        # For single note, use dedicated function
+        if len(notes) == 1:
+            result = self._add_tags_single_note(notes[0], selected_pages, property_name)
+
+            if result:
+                parent = self.parent()
+                if isinstance(parent, Browser):
+                    parent.model.reset()
+                elif isinstance(parent, EditCurrent):
+                    parent.editor.loadNote()
+                elif isinstance(parent, AddCards):
+                    parent.editor.loadNote()
+            return
+
+        # Track statistics for multiple notes
         total_notes = len(notes)
         notes_modified = 0
         notes_with_yield_issues = 0
         notes_needing_yield = 0
+
+        # Check if we're in AddCards context
+        parent = self.parent()
+        is_add_cards = isinstance(parent, AddCards)
 
         # Process each note
         for note in notes:
@@ -2280,11 +2304,14 @@ class NotionPageSelector(QDialog):
 
             # Update the note
             note.tags = combined_tags
-            note.flush()
+
+            # Only flush if not in AddCards dialog
+            if not is_add_cards:
+                note.flush()
+
             notes_modified += 1
 
         # Refresh the UI
-        parent = self.parent()
         if isinstance(parent, Browser):
             parent.model.reset()
         elif isinstance(parent, EditCurrent):
@@ -2293,17 +2320,91 @@ class NotionPageSelector(QDialog):
             parent.editor.loadNote()
 
         # Show summary only for multiple notes
-        if total_notes > 1:
-            summary = f"Successfully processed {total_notes} note(s)\n"
-            summary += f"Modified: {notes_modified} note(s)\n"
+        summary = f"Successfully processed {total_notes} note(s)\n"
+        summary += f"Modified: {notes_modified} note(s)\n"
 
-            if notes_with_yield_issues > 0:
-                summary += f"Skipped (multiple yields selected): {notes_with_yield_issues} note(s)\n"
-            if notes_needing_yield > 0:
-                summary += f"Skipped (no yield selected): {notes_needing_yield} note(s)\n"
+        if notes_with_yield_issues > 0:
+            summary += f"Skipped (multiple yields selected): {notes_with_yield_issues} note(s)\n"
+        if notes_needing_yield > 0:
+            summary += f"Skipped (no yield selected): {notes_needing_yield} note(s)\n"
 
-            showInfo(summary)
+        showInfo(summary)
 
+    def _add_tags_single_note(self, note, selected_pages, property_name):
+        """Handle add tags for a single note with proper validation"""
+        # Handle yield tags
+        existing_yields = self.get_existing_yield_tags(note.tags)
+        selected_yields = self.get_selected_yield_tags()
+
+        print(f"DEBUG Add Tags Single Note:")
+        print(f"  Note tags: {note.tags}")
+        print(f"  Existing yields: {existing_yields}")
+        print(f"  Selected yields: {selected_yields}")
+
+        # Validate yield selection
+        if len(selected_yields) > 1:
+            showInfo("Please select only one yield level")
+            return False
+
+        # Determine final yield tags to use
+        final_yield_tags = []
+        if not existing_yields and not selected_yields:
+            showInfo("Please select a yield level for this card")
+            return False
+        elif existing_yields and not selected_yields:
+            # Keep existing yield
+            final_yield_tags = existing_yields
+            print(f"  Using existing yield tags: {final_yield_tags}")
+        elif selected_yields:
+            # Use selected yield (replace existing if any)
+            final_yield_tags = selected_yields
+            print(f"  Using selected yield tags: {final_yield_tags}")
+
+        # Get current tags
+        current_tags = set(note.tags)
+
+        # Remove any existing yield tags
+        current_tags = {
+            tag for tag in current_tags
+            if not tag.startswith("#Malleus_CM::#Yield::")
+        }
+
+        print(f"  Tags after removing yields: {current_tags}")
+
+        # Get new tags
+        # Temporarily set property selector
+        original_property = self.property_selector.currentText()
+        if property_name and property_name not in ("Tag", "Main Tag"):
+            index = self.property_selector.findText(property_name)
+            if index >= 0:
+                self.property_selector.setCurrentIndex(index)
+
+        new_tags = set(self.get_tags_from_selected_pages())
+
+        # Restore original property selector
+        original_index = self.property_selector.findText(original_property)
+        if original_index >= 0:
+            self.property_selector.setCurrentIndex(original_index)
+
+        print(f"  New tags to add: {new_tags}")
+
+        # Combine new tags with final yield tags
+        all_new_tags = new_tags | set(final_yield_tags)
+
+        # Combine everything
+        combined_tags = list(current_tags | all_new_tags)
+
+        print(f"  Final combined tags: {combined_tags}")
+
+        # Update the note
+        note.tags = combined_tags
+
+        # Only flush if not in AddCards dialog
+        parent = self.parent()
+        if not isinstance(parent, AddCards):
+            note.flush()
+
+        return True
 
     def replace_tags(self):
         """Replace existing tags with new ones from selected database"""
@@ -2345,6 +2446,10 @@ class NotionPageSelector(QDialog):
         notes_with_yield_issues = 0
         notes_needing_yield = 0
         notes_with_multiple_subtags = 0
+
+        # Check if we're in AddCards context
+        parent = self.parent()
+        is_add_cards = isinstance(parent, AddCards)
 
         # For single note, allow interactive dialog
         if len(notes) == 1:
@@ -2482,7 +2587,11 @@ class NotionPageSelector(QDialog):
 
             # Update note
             note.tags = final_tags
-            note.flush()
+
+            # Only flush if not in AddCards dialog
+            if not is_add_cards:
+                note.flush()
+
             notes_modified += 1
 
         # Refresh UI
@@ -2667,7 +2776,11 @@ class NotionPageSelector(QDialog):
 
         # Update note
         note.tags = final_tags
-        note.flush()
+
+        # Only flush if not in AddCards dialog
+        parent = self.parent()
+        if not isinstance(parent, AddCards):
+            note.flush()
 
         return True
                 
