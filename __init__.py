@@ -1396,7 +1396,7 @@ class NotionPageSelector(QDialog):
         yield_group = QGroupBox("Yield Level")
         yield_layout = QVBoxLayout()
 
-        # Create a horizontal layout with title, info icon, and dropdown
+        # Create a horizontal layout with title and info icon
         yield_title_layout = QHBoxLayout()
         yield_title_label = QLabel("Yield Level")
         yield_title_label.setStyleSheet("font-weight: bold; font-size: 13px;")
@@ -1444,34 +1444,56 @@ class NotionPageSelector(QDialog):
         info_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         info_label.setCursor(Qt.CursorShape.WhatsThisCursor)
 
-        # Create yield dropdown selector
-        self.yield_selector = QComboBox()
-        self.yield_selector.addItems([
-            "",  # Empty default
-            "High Yield",
-            "Medium Yield",
-            "Low Yield",
-            "Beyond medical student level"
-        ])
-
-        # Restore last selection
-        if NotionPageSelector.last_yield_selection:
-            index = self.yield_selector.findText(NotionPageSelector.last_yield_selection)
-            if index >= 0:
-                self.yield_selector.setCurrentIndex(index)
-
-        # Save selection when it changes
-        self.yield_selector.currentTextChanged.connect(self.save_yield_selection)
-
-        # Add all elements to the horizontal layout
         yield_title_layout.addWidget(yield_title_label)
         yield_title_layout.addWidget(info_label)
         yield_title_layout.addStretch()
-        yield_title_layout.addWidget(self.yield_selector)
 
         # Hide the default title and add custom layout
         yield_group.setTitle("")
         yield_layout.addLayout(yield_title_layout)
+
+        # Add separator line
+        separator = QFrame()
+        separator.setFrameShape(QFrame.Shape.HLine)
+        separator.setFrameShadow(QFrame.Shadow.Sunken)
+        yield_layout.addWidget(separator)
+
+        # Create radio buttons for yield selection
+        self.yield_button_group = QButtonGroup(self)
+        self.yield_button_group.setExclusive(True)
+
+        self.yield_radio_buttons = {}
+        yield_options = [
+            "High Yield",
+            "Medium Yield",
+            "Low Yield",
+            "Beyond medical student level"
+        ]
+
+        for yield_option in yield_options:
+            radio_button = QRadioButton(yield_option)
+            self.yield_radio_buttons[yield_option] = radio_button
+            self.yield_button_group.addButton(radio_button)
+            yield_layout.addWidget(radio_button)
+
+            # Connect to handle click for deselection
+            radio_button.clicked.connect(lambda checked, opt=yield_option: self.handle_yield_click(opt))
+
+        # Initialize tracking variable
+        self._last_checked_yield = None
+
+        print(f"DEBUG RESTORE: Class last_yield_selection = '{NotionPageSelector.last_yield_selection}'")
+
+        # Restore last selection if it exists
+        if NotionPageSelector.last_yield_selection:
+            if NotionPageSelector.last_yield_selection in self.yield_radio_buttons:
+                self.yield_radio_buttons[NotionPageSelector.last_yield_selection].setChecked(True)
+                self._last_checked_yield = NotionPageSelector.last_yield_selection
+                print(f"DEBUG RESTORE: Set _last_checked_yield to '{self._last_checked_yield}'")
+            else:
+                print(f"DEBUG RESTORE: '{NotionPageSelector.last_yield_selection}' not found in buttons")
+        else:
+            print(f"DEBUG RESTORE: No last selection to restore")
 
         yield_group.setLayout(yield_layout)
         layout.addWidget(yield_group)
@@ -1525,17 +1547,36 @@ class NotionPageSelector(QDialog):
         layout.addLayout(button_layout)
         self.setLayout(layout)
 
-    def save_yield_selection(self, text):
-        """Save the current yield selection"""
-        NotionPageSelector.last_yield_selection = text
+    def handle_yield_click(self, yield_option):
+        """Handle yield radio button clicks - allow deselection of selected button"""
+        radio_button = self.yield_radio_buttons[yield_option]
+
+        print(f"DEBUG: Clicked on '{yield_option}'")
+        print(f"  Button is checked: {radio_button.isChecked()}")
+        print(f"  Last tracked type: {type(self._last_checked_yield)}")
+        print(f"  Last tracked value: {repr(self._last_checked_yield)}")
+
+        # Check if this button was already checked before the click
+        if radio_button.isChecked() and self._last_checked_yield == yield_option:
+            print(f"  Action: UNSELECTING")
+            # This button is currently selected, so unselect it
+            # Temporarily allow deselection
+            self.yield_button_group.setExclusive(False)
+            radio_button.setChecked(False)
+            self.yield_button_group.setExclusive(True)
+
+            self._last_checked_yield = None
+            NotionPageSelector.last_yield_selection = ""
+        else:
+            print(f"  Action: SELECTING")
+            # This button is being newly selected
+            self._last_checked_yield = yield_option
+            NotionPageSelector.last_yield_selection = yield_option
+
+        print(f"  After - Last tracked: {repr(self._last_checked_yield)}")
 
     def get_selected_yield_tags(self):
-        """Get the selected yield tags from the dropdown"""
-        selected_yield = self.yield_selector.currentText()
-
-        if not selected_yield or selected_yield == "":
-            return []
-
+        """Get the selected yield tags from the radio buttons"""
         # Map the display text to the actual tag
         yield_tag_mapping = {
             "High Yield": "#Malleus_CM::#Yield::High",
@@ -1544,8 +1585,14 @@ class NotionPageSelector(QDialog):
             "Beyond medical student level": "#Malleus_CM::#Yield::Beyond_medical_student_level"
         }
 
-        tag = yield_tag_mapping.get(selected_yield)
-        return [tag] if tag else []
+        # Find which radio button is checked
+        for yield_option, radio_button in self.yield_radio_buttons.items():
+            if radio_button.isChecked():
+                tag = yield_tag_mapping.get(yield_option)
+                return [tag] if tag else []
+
+        # No selection
+        return []
 
     def get_existing_yield_tags(self, tags):
         """Extract existing yield tags from a list of tags"""
@@ -1555,11 +1602,6 @@ class NotionPageSelector(QDialog):
 
     def get_yield_search_query(self):
         """Get the yield search query for browser"""
-        selected_yield = self.yield_selector.currentText()
-
-        if not selected_yield or selected_yield == "":
-            return ""
-
         # Map the display text to the search query format
         yield_search_mapping = {
             "High Yield": "tag:#Malleus_CM::#Yield::High",
@@ -1568,8 +1610,13 @@ class NotionPageSelector(QDialog):
             "Beyond medical student level": "tag:#Malleus_CM::#Yield::Beyond_medical_student_level"
         }
 
-        search_query = yield_search_mapping.get(selected_yield, "")
-        return search_query
+        # Find which radio button is checked
+        for yield_option, radio_button in self.yield_radio_buttons.items():
+            if radio_button.isChecked():
+                return yield_search_mapping.get(yield_option, "")
+
+        # No selection
+        return ""
 
     def update_property_selector(self, database_name):
         """Update property selector items based on selected database"""
