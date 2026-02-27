@@ -1,1 +1,0 @@
-This file exists purely to ensure a user_files directory is created for the user on installation
