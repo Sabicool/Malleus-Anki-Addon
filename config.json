@@ -1,7 +1,8 @@
 {
-    "deck_name": "Malleus Clinical Medicine (AU/NZ)",
-    "cache_expiry": 1,
-    "shortcut": "Ctrl+Alt+M",
-    "autosearch": true,
-    "search_delay": 300
+  "shortcut": "Ctrl+Alt+M",
+  "cache_expiry": 7,
+  "autosearch": true,
+  "search_delay": 300,
+  "deck_name": "Default",
+  "request_timeout": 30
 }
