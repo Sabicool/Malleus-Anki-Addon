@@ -475,6 +475,7 @@ def update_subject_tags_for_browser(browser, notion_cache, config):
 
         note_context = note['Text'] if 'Text' in note else ""
         new_tags = []
+        replacement_cache = {}  # page_name → (action, page, subtag)        
 
         for original_tag, page_name, raw_subtag in parsed_tags:
             page = search_page_in_cache(notion_cache, page_name)
@@ -485,26 +486,31 @@ def update_subject_tags_for_browser(browser, notion_cache, config):
                     new_tags.extend(tags)
                     total_tags_updated += 1
                 else:
-                    # Page found but property empty – keep the original tag
                     print(f"No tag data for property '{raw_subtag}' on page '{page_name}', keeping original")
                     remaining_tags.append(original_tag)
             else:
-                # Page not found – ask the user
-                dialog = MissingPageDialog(
-                    browser, original_tag, note_context, notion_cache, config
-                )
-                if dialog.exec():
-                    action, selected_page, selected_subtag = dialog.get_result()
-                    if action == 'replace' and selected_page:
-                        tags = get_tags_for_page(selected_page, selected_subtag)
-                        new_tags.extend(tags)
-                        total_tags_updated += 1
-                    else:  # 'ignore'
-                        total_tags_removed += 1
-                        # Tag is simply not re-added
+                # Check if we already asked about this page name
+                if page_name in replacement_cache:
+                    action, selected_page, selected_subtag = replacement_cache[page_name]
                 else:
-                    # Dialog cancelled – restore original tag
+                    dialog = MissingPageDialog(
+                        browser, original_tag, note_context, notion_cache, config
+                    )
+                    if dialog.exec():
+                        action, selected_page, selected_subtag = dialog.get_result()
+                    else:
+                        action, selected_page, selected_subtag = ('cancel', None, None)
+                    replacement_cache[page_name] = (action, selected_page, selected_subtag)
+
+                if action == 'replace' and selected_page:
+                    tags = get_tags_for_page(selected_page, raw_subtag)  # use original raw_subtag
+                    new_tags.extend(tags)
+                    total_tags_updated += 1
+                elif action == 'cancel':
                     remaining_tags.append(original_tag)
+                # 'ignore' → tag is simply dropped
+                else:
+                    total_tags_removed += 1
 
         final_tags = list(set(remaining_tags + new_tags))
 
