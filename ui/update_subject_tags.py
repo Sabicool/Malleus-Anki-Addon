@@ -265,6 +265,8 @@ def parse_subject_tag(tag: str) -> Optional[Tuple[str, str]]:
 
     return (page_name, subtag)
 
+def _normalise(text: str) -> str:
+    return text.replace('_', ' ').replace('\u2019', "'").replace('\u2018', "'").lower().strip()
 
 def search_page_in_cache(notion_cache, page_name: str) -> Optional[Dict]:
     """
@@ -280,14 +282,14 @@ def search_page_in_cache(notion_cache, page_name: str) -> Optional[Dict]:
             return None
 
         # Normalise: underscores → spaces, lowercase
-        target = page_name.replace('_', ' ').lower().strip()
+        target = _normalise(page_name)
 
         for page in cached_pages:
             try:
                 title_list = page['properties']['Name']['title']
                 if not title_list:
                     continue
-                title = title_list[0]['text']['content'].lower().strip()
+                title = _normalise(title_list[0]['text']['content'])
                 if title == target:
                     return page
             except Exception:
