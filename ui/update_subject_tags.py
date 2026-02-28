@@ -12,7 +12,7 @@ from typing import List, Dict, Tuple, Optional
 import re
 from ..config import DATABASE_PROPERTIES, get_database_id
 from ..tag_utils import parse_tag, normalize_subtag_for_matching
-
+import unicodedata
 
 class MissingPageDialog(QDialog):
     """Dialog shown when a subject tag's page cannot be found in the cache."""
@@ -91,9 +91,10 @@ class MissingPageDialog(QDialog):
         self.search_input.setPlaceholderText("Search...")
         # Pre-fill with page name from missing tag
         if self.parsed_tag and self.parsed_tag.get('page_name'):
-            self.search_input.setText(
-                self.parsed_tag['page_name'].replace('_', ' ')
-            )
+            raw = self.parsed_tag['page_name'].replace('_', ' ')
+            normalised = unicodedata.normalize('NFKD', raw)
+            normalised = ''.join(c for c in normalised if not unicodedata.combining(c))
+            self.search_input.setText(normalised)
         self.search_input.textChanged.connect(self.on_search_text_changed)
         search_controls.addWidget(self.search_input)
 
@@ -154,7 +155,10 @@ class MissingPageDialog(QDialog):
         self.setLayout(layout)
 
         # Trigger initial search after UI renders
-        if self.search_input.text():
+        prefill = self.search_input.text()
+        prefill_clean = re.sub(r"['\u2019\u2018\u02bc]", '', prefill)
+        self.search_input.setText(prefill_clean)
+        if prefill_clean:
             self.search_timer.start(100)
 
     # ── Search helpers ───────────────────────────────────────────────
@@ -182,6 +186,11 @@ class MissingPageDialog(QDialog):
             return
 
         self.clear_results()
+
+        # Strip apostrophe variants before searching — filter_pages splits on
+        # punctuation so "Barrett's" → "Barrett s" → fails to match anything.
+        # Removing the apostrophe entirely gives "Barretts" which matches fine.
+        search_term_normalised = re.sub(r"['\u2019\u2018\u02bc]", '', search_term)
 
         database_id = get_database_id("Subjects")
         try:
@@ -266,7 +275,17 @@ def parse_subject_tag(tag: str) -> Optional[Tuple[str, str]]:
     return (page_name, subtag)
 
 def _normalise(text: str) -> str:
-    return text.replace('_', ' ').replace('\u2019', "'").replace('\u2018', "'").lower().strip()
+    """Normalise text for exact-match comparison."""
+    # Decompose accented characters (è → e + combining accent) then strip accents
+    text = unicodedata.normalize('NFKD', text)
+    text = ''.join(c for c in text if not unicodedata.combining(c))
+    # Normalise all apostrophe variants to straight quote
+    text = text.replace('\u2019', "'").replace('\u2018', "'").replace('\u02bc', "'")
+    # Normalise ampersand (tag uses & , title may spell out 'and' or vice versa - normalise both)
+    text = re.sub(r'\s*&\s*', ' and ', text)
+    # Underscores to spaces
+    text = text.replace('_', ' ')
+    return text.lower().strip()
 
 def search_page_in_cache(notion_cache, page_name: str) -> Optional[Dict]:
     """
@@ -446,6 +465,8 @@ def update_subject_tags_for_browser(browser, notion_cache, config):
     total_tags_updated = 0
     total_tags_removed = 0
 
+    replacement_cache = {}  # page_name → (action, page, subtag)
+
     for note_index, note in enumerate(notes):
         print(f"Processing note {note_index + 1} of {total_notes}")
 
@@ -475,7 +496,6 @@ def update_subject_tags_for_browser(browser, notion_cache, config):
 
         note_context = note['Text'] if 'Text' in note else ""
         new_tags = []
-        replacement_cache = {}  # page_name → (action, page, subtag)        
 
         for original_tag, page_name, raw_subtag in parsed_tags:
             page = search_page_in_cache(notion_cache, page_name)
