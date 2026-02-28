@@ -334,6 +334,75 @@ def get_tags_for_page(page: Dict, raw_subtag: str) -> List[str]:
 
     return []
 
+def prompt_for_yield_selection(parent, note_context: str = None) -> Optional[str]:
+    """
+    Prompt the user to select a yield level for a note that has none.
+    Returns the yield tag string, or None if cancelled.
+    """
+    from aqt.qt import QDialog, QVBoxLayout, QLabel, QRadioButton, QButtonGroup, QDialogButtonBox, QFrame
+
+    dialog = QDialog(parent)
+    dialog.setWindowTitle("Select Yield Level")
+    dialog.setMinimumWidth(400)
+
+    layout = QVBoxLayout()
+
+    info_label = QLabel("This card has no yield level. Please select one:")
+    info_label.setWordWrap(True)
+    info_label.setStyleSheet("font-weight: bold; margin-bottom: 10px;")
+    layout.addWidget(info_label)
+
+    if note_context:
+        ctx_frame = QFrame()
+        ctx_frame.setFrameShape(QFrame.Shape.StyledPanel)
+        ctx_frame.setStyleSheet("background-color: #f0f0f0; padding: 8px; border-radius: 4px;")
+        ctx_layout = QVBoxLayout()
+
+        ctx_title = QLabel("Card context:")
+        ctx_title.setStyleSheet("font-weight: bold; font-size: 11px;")
+        ctx_layout.addWidget(ctx_title)
+
+        ctx_text = QLabel(note_context[:200] + ("..." if len(note_context) > 200 else ""))
+        ctx_text.setWordWrap(True)
+        ctx_text.setStyleSheet("font-size: 10px; color: #333;")
+        ctx_layout.addWidget(ctx_text)
+
+        ctx_frame.setLayout(ctx_layout)
+        layout.addWidget(ctx_frame)
+
+    button_group = QButtonGroup(dialog)
+    radio_buttons = {}
+
+    yield_options = {
+        "High Yield":                    "#Malleus_CM::#Yield::High",
+        "Medium Yield":                  "#Malleus_CM::#Yield::Medium",
+        "Low Yield":                     "#Malleus_CM::#Yield::Low",
+        "Beyond medical student level":  "#Malleus_CM::#Yield::Beyond_medical_student_level"
+    }
+
+    for display_text, tag_value in yield_options.items():
+        radio = QRadioButton(display_text)
+        radio_buttons[display_text] = (radio, tag_value)
+        button_group.addButton(radio)
+        layout.addWidget(radio)
+
+    radio_buttons["High Yield"][0].setChecked(True)
+
+    buttons = QDialogButtonBox()
+    buttons.addButton(QDialogButtonBox.StandardButton.Ok)
+    buttons.addButton(QDialogButtonBox.StandardButton.Cancel)
+    buttons.accepted.connect(dialog.accept)
+    buttons.rejected.connect(dialog.reject)
+    layout.addWidget(buttons)
+
+    dialog.setLayout(layout)
+
+    if dialog.exec() == QDialog.DialogCode.Accepted:
+        for display_text, (radio, tag_value) in radio_buttons.items():
+            if radio.isChecked():
+                return tag_value
+
+    return None
 
 # ── Main entry point ─────────────────────────────────────────────────────────
 
@@ -436,6 +505,13 @@ def update_subject_tags_for_browser(browser, notion_cache, config):
                     remaining_tags.append(original_tag)
 
         final_tags = list(set(remaining_tags + new_tags))
+
+        # Check for yield tag — prompt if missing
+        has_yield = any(t.startswith("#Malleus_CM::#Yield::") for t in final_tags)
+        if not has_yield:
+            yield_tag = prompt_for_yield_selection(browser, note_context)
+            if yield_tag:
+                final_tags.append(yield_tag)
 
         if set(final_tags) != set(current_tags):
             note.tags = final_tags
