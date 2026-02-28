@@ -237,8 +237,28 @@ class MissingPageDialog(QDialog):
         if not selected:
             showInfo("Please select a page, or click 'Ignore and Remove Tag'.")
             return
-        self.selected_page = selected.page_data
-        self.selected_subtag = self.subtag_selector.currentText()
+
+        selected_page = selected.page_data
+        selected_subtag = self.subtag_selector.currentText().strip()
+
+        # For Subject pages a numbered subtag is required unless the page is
+        # general (general pages only have a 'Main Tag' property — no subtag).
+        page_is_general = is_general_page(selected_page)
+
+        if not selected_subtag:
+            if page_is_general:
+                # General pages: use the Main Tag property directly
+                selected_subtag = "Main_Tag"
+            else:
+                showInfo(
+                    "Please select a subtag — this page is not a general page.\n\n"
+                    "Use the dropdown next to the search box to choose a category "
+                    "(e.g. Management, Clinical Features)."
+                )
+                return
+
+        self.selected_page = selected_page
+        self.selected_subtag = selected_subtag
         self.action = 'replace'
         self.accept()
 
@@ -286,6 +306,16 @@ def _normalise(text: str) -> str:
     # Underscores to spaces
     text = text.replace('_', ' ')
     return text.lower().strip()
+
+def is_general_page(page: Dict) -> bool:
+    """Check if a page is a general page (has ℹ️ in Search Prefix)."""
+    search_prefix = (
+        page.get('properties', {})
+            .get('Search Prefix', {})
+            .get('formula', {})
+            .get('string', '')
+    )
+    return 'ℹ️' in search_prefix
 
 def search_page_in_cache(notion_cache, page_name: str) -> Optional[Dict]:
     """
@@ -499,6 +529,12 @@ def update_subject_tags_for_browser(browser, notion_cache, config):
 
         for original_tag, page_name, raw_subtag in parsed_tags:
             page = search_page_in_cache(notion_cache, page_name)
+            is_improper = False  # track whether this tag is structurally bad
+
+            if page:
+                if raw_subtag == "Main_Tag" and not is_general_page(page):
+                    page = None
+                    is_improper = True  # bad tag — do NOT restore if user cancels
 
             if page:
                 tags = get_tags_for_page(page, raw_subtag)
@@ -506,31 +542,52 @@ def update_subject_tags_for_browser(browser, notion_cache, config):
                     new_tags.extend(tags)
                     total_tags_updated += 1
                 else:
-                    print(f"No tag data for property '{raw_subtag}' on page '{page_name}', keeping original")
+                    print(f"No tag data for property '{raw_subtag}' on '{page_name}', keeping original")
                     remaining_tags.append(original_tag)
             else:
-                # Check if we already asked about this page name
-                if page_name in replacement_cache:
+                # Improper tags (non-general page with no numbered subtag) must always
+                # go through the dialog — never silently reuse a cached subtag that was
+                # chosen for a different occurrence of the same page name.
+                use_cache = (page_name in replacement_cache) and not is_improper
+
+                if use_cache:
                     action, selected_page, selected_subtag = replacement_cache[page_name]
+                    if action == 'replace' and selected_page:
+                        # Use raw_subtag from the current tag (e.g. '06_Clinical_Features')
+                        # so each legitimate occurrence gets the right property.
+                        tags = get_tags_for_page(selected_page, raw_subtag)
+                        new_tags.extend(tags)
+                        total_tags_updated += 1
+                    elif action == 'cancel':
+                        # Never restore an improper tag (is_improper is False here,
+                        # but keep the guard for clarity)
+                        if not is_improper:
+                            remaining_tags.append(original_tag)
+                    else:  # ignore
+                        total_tags_removed += 1
                 else:
                     dialog = MissingPageDialog(
                         browser, original_tag, note_context, notion_cache, config
                     )
                     if dialog.exec():
                         action, selected_page, selected_subtag = dialog.get_result()
+                        if action == 'replace' and selected_page:
+                            tags = get_tags_for_page(selected_page, selected_subtag)
+                            new_tags.extend(tags)
+                            total_tags_updated += 1
+                        else:  # ignore
+                            total_tags_removed += 1
                     else:
+                        # Dialog cancelled via X
                         action, selected_page, selected_subtag = ('cancel', None, None)
-                    replacement_cache[page_name] = (action, selected_page, selected_subtag)
+                        if not is_improper:
+                            remaining_tags.append(original_tag)
+                        # if improper, drop it — it was a bad tag and the user closed the dialog
 
-                if action == 'replace' and selected_page:
-                    tags = get_tags_for_page(selected_page, raw_subtag)  # use original raw_subtag
-                    new_tags.extend(tags)
-                    total_tags_updated += 1
-                elif action == 'cancel':
-                    remaining_tags.append(original_tag)
-                # 'ignore' → tag is simply dropped
-                else:
-                    total_tags_removed += 1
+                    # Only cache the result for non-improper tags so the same
+                    # user choice can be reused for other legitimate missing pages.
+                    if not is_improper:
+                        replacement_cache[page_name] = (action, selected_page, selected_subtag)
 
         final_tags = list(set(remaining_tags + new_tags))
 
