@@ -4,7 +4,7 @@ Main entry point for the addon
 """
 import os
 from aqt import mw, dialogs
-from aqt.qt import QAction, QShortcut, QKeySequence, Qt
+from aqt.qt import QAction, QShortcut, QKeySequence, Qt, QMenu
 from aqt.utils import showInfo
 from anki.hooks import addHook
 from aqt.gui_hooks import browser_menus_did_init, browser_will_show, add_cards_did_init, editor_did_load_note
@@ -26,6 +26,7 @@ from .notion_cache import NotionCache
 from .ui.page_selector import NotionPageSelector
 from .ui.randomization_dialog import show_randomization_dialog, setup_editor_buttons
 from .utils import open_browser_with_search
+from .ui.update_subject_tags import update_subject_tags_for_browser
 
 # Initialize config first
 config = load_config()
@@ -167,6 +168,23 @@ def setup_browser_menu(browser):
     except:
         pass
 
+def setup_browser_context_menu(browser, menu):
+    """Setup browser context menu (right-click menu)"""
+    # Only show if cards are selected
+    selected_cards = browser.selectedCards()
+    if not selected_cards:
+        return
+    
+    # Add separator before our menu item
+    menu.addSeparator()
+    
+    # Add "Update Malleus Subject Tags" action
+    update_tags_action = QAction("Update Malleus Subject Tags", browser)
+    update_tags_action.triggered.connect(
+        lambda: update_subject_tags_for_browser(browser, notion_cache, config)
+    )
+    menu.addAction(update_tags_action)
+
 def init_notion_cache():
     """Initialize the cache check asynchronously on startup"""
     import threading
@@ -209,6 +227,15 @@ browser_menus_did_init.append(setup_browser_menu)
 browser_will_show.append(on_browser_setup)
 add_cards_did_init.append(on_addcards_setup)
 editor_did_load_note.append(on_editor_did_load_note)
+
+# Register browser context menu hook
+try:
+    # Try to import the context menu hook (Anki 2.1.55+)
+    from aqt.gui_hooks import browser_will_show_context_menu
+    browser_will_show_context_menu.append(setup_browser_context_menu)
+except ImportError:
+    # Fallback for older Anki versions
+    print("Browser context menu hook not available in this Anki version")
 
 # Setup editor buttons with callback
 addHook("setupEditorButtons", lambda buttons, editor: setup_editor_buttons(buttons, editor, show_page_selector))

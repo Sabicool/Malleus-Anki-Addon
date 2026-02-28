@@ -16,6 +16,10 @@ import anki.notes
 from ..config import DATABASE_PROPERTIES, get_database_id, get_database_name
 from ..utils import open_browser_with_search
 from ..cache_updater import perform_cache_update
+from .tag_selection_dialog import TagSelectionDialog
+from ..tag_utils import (simplify_tags_by_page, get_subtag_from_tag, 
+                         get_all_subtags_from_tags, normalize_subtag_for_matching, 
+                         get_subtags_with_normalization)
 
 class NotionPageSelector(QDialog):
     last_yield_selection = ""  # Class variable to remember last selection
@@ -1248,9 +1252,14 @@ class NotionPageSelector(QDialog):
 
         return True
 
-
     def replace_tags(self):
-        """Replace existing tags with new ones from selected database"""
+        """
+        Improved replace tags with better tag identification and user selection
+        """
+        from .tag_selection_dialog import TagSelectionDialog
+        from ..tag_utils import simplify_tags_by_page
+        from aqt.qt import QDialog
+
         notes = self.get_notes_to_process()
 
         if not notes:
@@ -1274,6 +1283,12 @@ class NotionPageSelector(QDialog):
         if not selected_pages and selected_yields:
             return self._update_yield_only(notes, selected_yields)
 
+        # VALIDATION: Check if multiple pages are selected
+        if len(selected_pages) > 1:
+            showInfo("Please select only ONE page at a time when replacing tags.\n\n"
+                    "Multiple pages selected will make tag replacement ambiguous.")
+            return
+
         # Get selected database name
         database_name = self.database_selector.currentText()
 
@@ -1294,33 +1309,18 @@ class NotionPageSelector(QDialog):
         total_notes = len(notes)
         notes_modified = 0
         notes_with_yield_issues = 0
-        notes_needing_yield = 0
-        notes_with_multiple_subtags = 0
+        notes_skipped = 0
 
         # Check if we're in AddCards context
         parent = self.parent()
         is_add_cards = isinstance(parent, AddCards)
 
-        # For single note, allow interactive dialog
-        if len(notes) == 1:
-            # Original single-note logic with dialog
-            note = notes[0]
-            result = self._replace_tags_single_note(
-                note, selected_pages, database_name, possible_subtags,
-                user_selected_subtag, all_general
-            )
+        # Process each note
+        for note_index, note in enumerate(notes):
+            # For batch operations, show progress
+            if len(notes) > 1:
+                print(f"Processing note {note_index + 1} of {total_notes}")
 
-            if result:
-                if isinstance(parent, Browser):
-                    parent.model.reset()
-                elif isinstance(parent, EditCurrent):
-                    parent.editor.loadNote()
-                elif isinstance(parent, AddCards):
-                    parent.editor.loadNote()
-            return
-
-        # For multiple notes, process automatically
-        for note in notes:
             # Handle yield tags
             existing_yields = self.get_existing_yield_tags(note.tags)
             selected_yields = self.get_selected_yield_tags()
@@ -1333,8 +1333,19 @@ class NotionPageSelector(QDialog):
             # Determine final yield tags
             final_yield_tags = []
             if not existing_yields and not selected_yields:
-                notes_needing_yield += 1
-                continue
+                # Prompt user to select a yield for this card
+                note_context = None
+                if 'Text' in note:
+                    note_context = note['Text']
+                
+                prompted_yield = self._prompt_for_yield_selection(note_context)
+                
+                if prompted_yield is None:
+                    # User cancelled - skip this note
+                    notes_skipped += 1
+                    continue
+                
+                final_yield_tags = [prompted_yield]
             elif existing_yields and not selected_yields:
                 final_yield_tags = existing_yields
             elif selected_yields:
@@ -1343,108 +1354,66 @@ class NotionPageSelector(QDialog):
             # Get current tags
             current_tags = list(note.tags)
 
-            # Find tags that match the selected database
+            # Find tags matching the selected database
             database_pattern = f"#Malleus_CM::#{database_name}::"
-            tags_with_subtags = []
-            detected_subtags = set()
+            matching_tags = [tag for tag in current_tags if tag.startswith(database_pattern)]
 
-            for tag in current_tags:
-                if tag.startswith(database_pattern):
-                    detected_subtag = None
-                    tag_parts = tag.split("::")
-
-                    if len(tag_parts) > 2:
-                        last_segment = tag_parts[-1]
-
-                        for subtag in possible_subtags:
-                            normalized_subtag = self._normalize_for_comparison(subtag)
-                            normalized_segment = self._normalize_for_comparison(last_segment)
-
-                            if normalized_segment == normalized_subtag or normalized_segment.endswith(f"_{normalized_subtag}"):
-                                detected_subtag = subtag
-                                break
-
-                            import re
-                            segment_without_prefix = re.sub(r'^\d+_', '', last_segment)
-                            normalized_without_prefix = self._normalize_for_comparison(segment_without_prefix)
-
-                            if normalized_without_prefix == normalized_subtag:
-                                detected_subtag = subtag
-                                break
-
-                    tags_with_subtags.append((tag, detected_subtag))
-                    if detected_subtag:
-                        detected_subtags.add(detected_subtag)
-
-            # Determine which tags to remove and what subtag to use
-            tags_to_remove = []
-            final_subtag = None
-
-            if user_selected_subtag and user_selected_subtag not in ("", "Tag", "Main Tag"):
-                final_subtag = user_selected_subtag
-                tags_to_remove = [tag for tag, subtag in tags_with_subtags]
-            elif len(detected_subtags) > 1:
-                # Multiple subtags - skip this note in batch mode
-                notes_with_multiple_subtags += 1
+            if not matching_tags:
+                # No tags to replace
                 continue
-            elif len(detected_subtags) == 1:
-                final_subtag = list(detected_subtags)[0]
-                tags_to_remove = [tag for tag, subtag in tags_with_subtags]
-            else:
-                tags_to_remove = [tag for tag, subtag in tags_with_subtags]
 
-                if user_selected_subtag == "":
-                    if database_name in ("Subjects", "Pharmacology"):
-                        if not all_general:
-                            continue
-                        else:
-                            final_subtag = "Main Tag"
-                    else:
-                        final_subtag = "Tag"
+            # Simplify tags by page and subtag
+            simplified_tags = simplify_tags_by_page(matching_tags, database_name)
+
+            if not simplified_tags:
+                continue
+
+            # Determine which tags to replace
+            tags_to_replace = []
+
+            if len(simplified_tags) == 1:
+                # Only one unique page/subtag combination - replace it directly
+                tags_to_replace = simplified_tags[0]['original_tags']
+            else:
+                # Multiple tags - show selection dialog
+                # Get context from note's Text field if available
+                note_context = None
+                if 'Text' in note:
+                    note_context = note['Text']
+
+                # Show dialog for this specific note
+                dialog = TagSelectionDialog(self, simplified_tags, note_context)
+
+                if dialog.exec() == QDialog.DialogCode.Accepted:
+                    selected_tag_info = dialog.get_selected_tags()
+                    # Collect all original tags from selected items
+                    for tag_info in selected_tag_info:
+                        tags_to_replace.extend(tag_info['original_tags'])
                 else:
-                    final_subtag = user_selected_subtag
+                    # User cancelled - skip this note
+                    notes_skipped += 1
+                    continue
 
-            # Remove selected tags
-            remaining_tags = [tag for tag in current_tags if tag not in tags_to_remove]
+            if not tags_to_replace:
+                continue
 
-            # Set property selector temporarily
-            original_property = self.property_selector.currentText()
+            # Now perform the replacement
+            result = self._perform_tag_replacement(
+                note, 
+                tags_to_replace, 
+                selected_pages,
+                database_name,
+                possible_subtags,
+                user_selected_subtag,
+                all_general,
+                final_yield_tags,
+                is_add_cards
+            )
 
-            if final_subtag == "Main Tag" or (database_name in ("Subjects", "Pharmacology") and all_general):
-                self.property_selector.setCurrentIndex(0)
-            elif final_subtag and final_subtag not in ("Tag", "Main Tag"):
-                index = self.property_selector.findText(final_subtag)
-                if index >= 0:
-                    self.property_selector.setCurrentIndex(index)
-            else:
-                self.property_selector.setCurrentIndex(0)
+            if result:
+                notes_modified += 1
 
-            # Get new tags
-            new_tags = self.get_tags_from_selected_pages()
-
-            # Restore property selector
-            original_index = self.property_selector.findText(original_property)
-            if original_index >= 0:
-                self.property_selector.setCurrentIndex(original_index)
-
-            # Remove existing yield tags
-            remaining_tags = [tag for tag in remaining_tags if not tag.startswith("#Malleus_CM::#Yield::")]
-
-            # Combine tags
-            all_new_tags = new_tags + final_yield_tags
-            final_tags = list(set(remaining_tags + all_new_tags))
-
-            # Update note
-            note.tags = final_tags
-
-            # Only flush if not in AddCards dialog
-            if not is_add_cards:
-                note.flush()
-
-            notes_modified += 1
-
-        # Refresh UI
-        parent = self.parent()
+        # Refresh the UI
         if isinstance(parent, Browser):
             parent.model.reset()
         elif isinstance(parent, EditCurrent):
@@ -1453,154 +1422,122 @@ class NotionPageSelector(QDialog):
             parent.editor.loadNote()
 
         # Show summary
-        summary = f"Successfully processed {total_notes} note(s)\n"
-        summary += f"Modified: {notes_modified} note(s)\n"
+        if len(notes) > 1:
+            summary = f"Successfully processed {total_notes} note(s)\n"
+            summary += f"Modified: {notes_modified} note(s)\n"
 
-        if notes_with_yield_issues > 0:
-            summary += f"Skipped (multiple yields selected): {notes_with_yield_issues} note(s)\n"
-        if notes_needing_yield > 0:
-            summary += f"Skipped (no yield selected): {notes_needing_yield} note(s)\n"
-        if notes_with_multiple_subtags > 0:
-            summary += f"Skipped (multiple subtags detected): {notes_with_multiple_subtags} note(s)\n"
+            if notes_with_yield_issues > 0:
+                summary += f"Skipped (multiple yields selected): {notes_with_yield_issues} note(s)\n"
+            if notes_skipped > 0:
+                summary += f"Skipped (user cancelled): {notes_skipped} note(s)\n"
 
-        showInfo(summary)
+            showInfo(summary)
+            
+    def _perform_tag_replacement(self, note, tags_to_replace, selected_pages, database_name,
+                                 possible_subtags, user_selected_subtag, all_general,
+                                 final_yield_tags, is_add_cards):
+        """
+        Perform the actual tag replacement on a note
 
+        FIXED: Now properly handles subtags with number prefixes (e.g., "10_Management")
 
-    def _normalize_for_comparison(self, text):
-        """Normalize text for comparison - handle spaces, slashes, underscores"""
-        return text.replace(' ', '_').replace('/', '_').replace('&', '_').lower()
+        Args:
+            note: The note to modify
+            tags_to_replace: List of tag strings to replace
+            selected_pages: List of selected page data from Notion
+            database_name: Name of the database
+            possible_subtags: List of possible subtags for this database
+            user_selected_subtag: User's selected subtag from dropdown
+            all_general: Whether all pages are general pages
+            final_yield_tags: The yield tags to use
+            is_add_cards: Whether we're in AddCards context
 
-
-    def _replace_tags_single_note(self, note, selected_pages, database_name, 
-                                   possible_subtags, user_selected_subtag, all_general):
-        """Handle replace tags for a single note (with dialog support)"""
-        # Handle yield tags
-        existing_yields = self.get_existing_yield_tags(note.tags)
-        selected_yields = self.get_selected_yield_tags()
-
-        # Validate yield selection
-        if len(selected_yields) > 1:
-            showInfo("Please select only one yield level")
-            return False
-
-        # Determine final yield tags
-        final_yield_tags = []
-        if not existing_yields and not selected_yields:
-            showInfo("Please select a yield level for this card")
-            return False
-        elif existing_yields and not selected_yields:
-            final_yield_tags = existing_yields
-        elif selected_yields:
-            final_yield_tags = selected_yields
+        Returns:
+            True if successful, False otherwise
+        """
+        from ..tag_utils import (get_subtag_from_tag, get_all_subtags_from_tags, 
+                                 normalize_subtag_for_matching, get_subtags_with_normalization)
 
         # Get current tags
         current_tags = list(note.tags)
 
-        # Find tags matching database
-        database_pattern = f"#Malleus_CM::#{database_name}::"
-        tags_with_subtags = []
-        detected_subtags = set()
+        # Remove the tags we're replacing
+        remaining_tags = [tag for tag in current_tags if tag not in tags_to_replace]
 
-        for tag in current_tags:
-            if tag.startswith(database_pattern):
-                detected_subtag = None
-                tag_parts = tag.split("::")
-
-                if len(tag_parts) > 2:
-                    last_segment = tag_parts[-1]
-
-                    for subtag in possible_subtags:
-                        normalized_subtag = self._normalize_for_comparison(subtag)
-                        normalized_segment = self._normalize_for_comparison(last_segment)
-
-                        if normalized_segment == normalized_subtag or normalized_segment.endswith(f"_{normalized_subtag}"):
-                            detected_subtag = subtag
-                            break
-
-                        import re
-                        segment_without_prefix = re.sub(r'^\d+_', '', last_segment)
-                        normalized_without_prefix = self._normalize_for_comparison(segment_without_prefix)
-
-                        if normalized_without_prefix == normalized_subtag:
-                            detected_subtag = subtag
-                            break
-
-                tags_with_subtags.append((tag, detected_subtag))
-                if detected_subtag:
-                    detected_subtags.add(detected_subtag)
-
-        # Determine which tags to remove and what subtag to use
-        tags_to_remove = []
+        # Determine what subtag to use
         final_subtag = None
 
         if user_selected_subtag and user_selected_subtag not in ("", "Tag", "Main Tag"):
+            # User explicitly selected a subtag
             final_subtag = user_selected_subtag
-            tags_to_remove = [tag for tag, subtag in tags_with_subtags]
-        elif len(detected_subtags) > 1:
-            # Show selection dialog
-            selected_tags_data = self.show_tag_selection_dialog(tags_with_subtags)
-
-            if selected_tags_data is None:
-                return False
-
-            if not selected_tags_data:
-                showInfo("Please select at least one tag to replace")
-                return False
-
-            selected_subtags = set(subtag for tag, subtag in selected_tags_data if subtag)
-
-            if len(selected_subtags) > 1:
-                showInfo(f"Selected tags have different subtags: {', '.join(sorted(selected_subtags))}\n\nPlease select tags with the same subtag.")
-                return False
-            elif len(selected_subtags) == 1:
-                final_subtag = list(selected_subtags)[0]
-                tags_to_remove = [tag for tag, subtag in selected_tags_data]
-            else:
-                if database_name in ("Subjects", "Pharmacology"):
-                    if not all_general:
-                        showInfo("Selected tags have no subtags. Please select a subtag from the dropdown.")
-                        return False
-                    else:
-                        final_subtag = "Main Tag"
-                        tags_to_remove = [tag for tag, subtag in selected_tags_data]
-                else:
-                    final_subtag = "Tag"
-                    tags_to_remove = [tag for tag, subtag in selected_tags_data]
-        elif len(detected_subtags) == 1:
-            final_subtag = list(detected_subtags)[0]
-            tags_to_remove = [tag for tag, subtag in tags_with_subtags]
         else:
-            tags_to_remove = [tag for tag, subtag in tags_with_subtags]
+            # Infer subtag from the tags being replaced
+            # Get the actual subtags from the tags (with number prefixes)
+            raw_subtags = get_all_subtags_from_tags(tags_to_replace)
 
-            if user_selected_subtag == "":
-                if database_name in ("Subjects", "Pharmacology"):
-                    if not all_general:
-                        showInfo("Please select a subtag (Change the dropdown to the right of the searchbox)")
-                        return False
+            if len(raw_subtags) == 1:
+                # All tags have the same subtag - normalize it to match property selector
+                raw_subtag = list(raw_subtags)[0]
+                final_subtag = normalize_subtag_for_matching(raw_subtag, possible_subtags)
+                print(f"DEBUG: Normalized subtag '{raw_subtag}' → '{final_subtag}'")
+            elif len(raw_subtags) == 0:
+                # No subtags in original tags
+                if user_selected_subtag == "":
+                    if database_name in ("Subjects", "Pharmacology"):
+                        if not all_general:
+                            showInfo("Please select a subtag (Change the dropdown to the right of the searchbox)")
+                            return False
+                        else:
+                            final_subtag = "Main Tag"
                     else:
-                        final_subtag = "Main Tag"
+                        final_subtag = "Tag"
                 else:
-                    final_subtag = "Tag"
+                    final_subtag = user_selected_subtag
             else:
-                final_subtag = user_selected_subtag
+                # Multiple different subtags
+                # Try to normalize them and see if they're actually the same
+                normalized_subtags = get_subtags_with_normalization(tags_to_replace, possible_subtags)
 
-        # Remove selected tags
-        remaining_tags = [tag for tag in current_tags if tag not in tags_to_remove]
+                if len(normalized_subtags) == 1:
+                    # After normalization, they're all the same
+                    final_subtag = list(normalized_subtags)[0]
+                    print(f"DEBUG: Multiple raw subtags normalized to single: '{final_subtag}'")
+                else:
+                    # They're genuinely different - need user selection
+                    if not user_selected_subtag or user_selected_subtag == "":
+                        showInfo("The tags you're replacing have different subtags. Please select a subtag from the dropdown.")
+                        return False
+                    final_subtag = user_selected_subtag
 
-        # Set property selector temporarily
+        print(f"DEBUG: Final subtag to use: '{final_subtag}'")
+
+        # Set property selector temporarily to get new tags
         original_property = self.property_selector.currentText()
 
         if final_subtag == "Main Tag" or (database_name in ("Subjects", "Pharmacology") and all_general):
             self.property_selector.setCurrentIndex(0)
+            print("DEBUG: Set property selector to index 0 (Main Tag)")
         elif final_subtag and final_subtag not in ("Tag", "Main Tag"):
             index = self.property_selector.findText(final_subtag)
             if index >= 0:
                 self.property_selector.setCurrentIndex(index)
+                print(f"DEBUG: Set property selector to '{final_subtag}' at index {index}")
+            else:
+                print(f"WARNING: Could not find '{final_subtag}' in property selector")
+                # Try without spaces
+                for i in range(self.property_selector.count()):
+                    item_text = self.property_selector.itemText(i)
+                    if item_text.replace(' ', '').lower() == final_subtag.replace(' ', '').lower():
+                        self.property_selector.setCurrentIndex(i)
+                        print(f"DEBUG: Found match at index {i}: '{item_text}'")
+                        break
         else:
             self.property_selector.setCurrentIndex(0)
+            print("DEBUG: Set property selector to index 0 (default)")
 
         # Get new tags
         new_tags = self.get_tags_from_selected_pages()
+        print(f"DEBUG: New tags: {new_tags}")
 
         # Restore property selector
         original_index = self.property_selector.findText(original_property)
@@ -1623,13 +1560,98 @@ class NotionPageSelector(QDialog):
             showInfo("No yield tag. Please select a yield level.")
             return False
 
+        print(f"DEBUG: Final tags for note: {final_tags}")
+
         # Update note
         note.tags = final_tags
 
         # Only flush if not in AddCards dialog
-        parent = self.parent()
-        if not isinstance(parent, AddCards):
+        if not is_add_cards:
             note.flush()
 
         return True
-                
+
+    def _normalize_for_comparison(self, text):
+        """Normalize text for comparison - handle spaces, slashes, underscores"""
+        return text.replace(' ', '_').replace('/', '_').replace('&', '_').lower()
+
+    def _prompt_for_yield_selection(self, note_context=None):
+        """
+        Show a dialog to prompt user for yield selection
+        
+        Args:
+            note_context: Optional context from note's Text field to help identify the card
+            
+        Returns:
+            Selected yield tag as string, or None if cancelled
+        """
+        from aqt.qt import QDialog, QVBoxLayout, QLabel, QRadioButton, QButtonGroup, QDialogButtonBox, QFrame
+        
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Select Yield Level")
+        dialog.setMinimumWidth(400)
+        
+        layout = QVBoxLayout()
+        
+        # Info label
+        info_label = QLabel("This card has no yield level. Please select one:")
+        info_label.setWordWrap(True)
+        info_label.setStyleSheet("font-weight: bold; margin-bottom: 10px;")
+        layout.addWidget(info_label)
+        
+        # Show note context if available
+        if note_context:
+            context_frame = QFrame()
+            context_frame.setFrameShape(QFrame.Shape.StyledPanel)
+            context_frame.setStyleSheet("background-color: #f0f0f0; padding: 10px; border-radius: 5px;")
+            context_layout = QVBoxLayout()
+            
+            context_title = QLabel("Card Context (Text field):")
+            context_title.setStyleSheet("font-weight: bold; font-size: 11px;")
+            context_layout.addWidget(context_title)
+            
+            context_text = QLabel(note_context[:200] + ("..." if len(note_context) > 200 else ""))
+            context_text.setWordWrap(True)
+            context_text.setStyleSheet("font-size: 10px; color: #666;")
+            context_layout.addWidget(context_text)
+            
+            context_frame.setLayout(context_layout)
+            layout.addWidget(context_frame)
+        
+        # Yield selection radio buttons
+        button_group = QButtonGroup(dialog)
+        radio_buttons = {}
+        
+        yield_options = {
+            "High Yield": "#Malleus_CM::#Yield::High",
+            "Medium Yield": "#Malleus_CM::#Yield::Medium",
+            "Low Yield": "#Malleus_CM::#Yield::Low",
+            "Beyond medical student level": "#Malleus_CM::#Yield::Beyond_medical_student_level"
+        }
+        
+        for display_text, tag_value in yield_options.items():
+            radio = QRadioButton(display_text)
+            radio_buttons[display_text] = (radio, tag_value)
+            button_group.addButton(radio)
+            layout.addWidget(radio)
+        
+        # Set High Yield as default
+        radio_buttons["High Yield"][0].setChecked(True)
+        
+        # OK and Cancel buttons
+        buttons = QDialogButtonBox()
+        buttons.addButton(QDialogButtonBox.StandardButton.Ok)
+        buttons.addButton(QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        
+        dialog.setLayout(layout)
+        
+        # Show dialog and return result
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            for display_text, (radio, tag_value) in radio_buttons.items():
+                if radio.isChecked():
+                    return tag_value
+        
+        return None
