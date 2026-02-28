@@ -1640,7 +1640,7 @@ class NotionPageSelector(QDialog):
             context_frame.setStyleSheet("background-color: #f0f0f0; padding: 10px; border-radius: 5px;")
             context_layout = QVBoxLayout()
             
-            context_title = QLabel("Card Context (Text field):")
+            context_title = QLabel("Card Context:")
             context_title.setStyleSheet("font-weight: bold; font-size: 11px;")
             context_layout.addWidget(context_title)
             
