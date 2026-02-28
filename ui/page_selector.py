@@ -229,7 +229,35 @@ class NotionPageSelector(QDialog):
             print(f"DEBUG RESTORE: No last selection to restore")
 
         yield_group.setLayout(yield_layout)
-        layout.addWidget(yield_group)
+
+        # Paediatrics section (right side)
+        paeds_group = QGroupBox("")
+        paeds_layout = QVBoxLayout()
+
+        paeds_title = QLabel("Specialty Tags")
+        paeds_title.setStyleSheet("font-weight: bold; font-size: 13px;")
+        paeds_layout.addWidget(paeds_title)
+
+        paeds_separator = QFrame()
+        paeds_separator.setFrameShape(QFrame.Shape.HLine)
+        paeds_separator.setFrameShadow(QFrame.Shadow.Sunken)
+        paeds_layout.addWidget(paeds_separator)
+
+        paeds_question = QLabel("Is this a card on paediatrics?")
+        paeds_question.setWordWrap(True)
+        paeds_layout.addWidget(paeds_question)
+
+        self.paeds_checkbox = QCheckBox("Yes")
+        paeds_layout.addWidget(self.paeds_checkbox)
+        paeds_layout.addStretch()
+
+        paeds_group.setLayout(paeds_layout)
+
+        # Place yield and paediatrics side by side
+        yield_paeds_layout = QHBoxLayout()
+        yield_paeds_layout.addWidget(yield_group, stretch=2)
+        yield_paeds_layout.addWidget(paeds_group, stretch=1)
+        layout.addLayout(yield_paeds_layout)
 
         # Buttons
         button_layout = QHBoxLayout()
@@ -352,6 +380,12 @@ class NotionPageSelector(QDialog):
 
         # No selection
         return ""
+
+    def get_paediatrics_tag(self):
+        """Get the paediatrics rotation tag if the paediatrics checkbox is checked"""
+        if hasattr(self, 'paeds_checkbox') and self.paeds_checkbox.isChecked():
+            return ["#Malleus_CM::#Resources_by_Rotation::Paediatrics"]
+        return []
 
     def update_property_selector(self, database_name):
         """Update property selector items based on selected database"""
@@ -647,8 +681,8 @@ class NotionPageSelector(QDialog):
         if not selected_pages:
             tags = ["#Malleus_CM::#TO_BE_TAGGED"]
 
-        # Add yield tags
-        all_tags = tags + selected_yields
+        # Add yield and paediatrics tags
+        all_tags = tags + selected_yields + self.get_paediatrics_tag()
 
         # Prepare note data
         note = {
@@ -1086,8 +1120,8 @@ class NotionPageSelector(QDialog):
             if original_index >= 0:
                 self.property_selector.setCurrentIndex(original_index)
 
-            # Combine new tags with final yield tags
-            all_new_tags = new_tags | set(final_yield_tags)
+            # Combine new tags with final yield tags and paediatrics tag
+            all_new_tags = new_tags | set(final_yield_tags) | set(self.get_paediatrics_tag())
 
             # Combine everything
             combined_tags = list(current_tags | all_new_tags)
@@ -1234,8 +1268,8 @@ class NotionPageSelector(QDialog):
 
         print(f"  New tags to add: {new_tags}")
 
-        # Combine new tags with final yield tags
-        all_new_tags = new_tags | set(final_yield_tags)
+        # Combine new tags with final yield tags and paediatrics tag
+        all_new_tags = new_tags | set(final_yield_tags) | set(self.get_paediatrics_tag())
 
         # Combine everything
         combined_tags = list(current_tags | all_new_tags)
@@ -1548,7 +1582,7 @@ class NotionPageSelector(QDialog):
         remaining_tags = [tag for tag in remaining_tags if not tag.startswith("#Malleus_CM::#Yield::")]
 
         # Combine tags
-        all_new_tags = new_tags + final_yield_tags
+        all_new_tags = new_tags + final_yield_tags + self.get_paediatrics_tag()
         final_tags = list(set(remaining_tags + all_new_tags))
 
         # Final validation
