@@ -5,6 +5,7 @@
 *~
 
 __pycache__/*
+ui/__pycache__/*
 meta.json
 readme for ankiweb.md
 #cache/*
