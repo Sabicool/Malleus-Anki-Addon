@@ -162,7 +162,7 @@ class NotionPageSelector(QDialog):
 
         results_layout.addWidget(scroll)
         self.results_group.setLayout(results_layout)
-        content_layout.addWidget(self.results_group)
+        content_layout.addWidget(self.results_group, stretch=1)
 
         # Yield selection section
         yield_group = QGroupBox("Yield Level")
@@ -280,46 +280,46 @@ class NotionPageSelector(QDialog):
         paeds_layout.setSpacing(2)
         paeds_layout.setContentsMargins(6, 4, 6, 6)
 
-        # Create a horizontal layout with title
         paeds_title_layout = QHBoxLayout()
-        paeds_title_label = QLabel("Specialty Tags")
-        paeds_title_label.setStyleSheet("font-weight: 700; font-size: 13px; background: transparent;")
-
-        # Add invisible spacer to match the info icon dimensions from yield section
-        spacer_label = QLabel("")
-        spacer_label.setFixedSize(20, 20)
-        spacer_label.setStyleSheet("background: transparent;")
-
-        paeds_title_layout.addWidget(paeds_title_label)
-        paeds_title_layout.addWidget(spacer_label)  # invisible spacer
+        paeds_title_layout.setContentsMargins(0, 0, 0, 0)
+        paeds_title_layout.setSpacing(0)
+        paeds_title = QLabel("Specialty Tags")
+        paeds_title.setStyleSheet("font-weight: 700; font-size: 13px; background: transparent;")
+        paeds_title_layout.addWidget(paeds_title)
         paeds_title_layout.addStretch()
 
-        # Hide the default title and add custom layout
+        # Suppress the native QGroupBox title, drawing our own instead (same as yield_group)
         paeds_group.setTitle("")
         paeds_layout.addLayout(paeds_title_layout)
 
-        # Add separator line
         paeds_separator = QFrame()
         paeds_separator.setFrameShape(QFrame.Shape.HLine)
         paeds_separator.setFrameShadow(QFrame.Shadow.Sunken)
         paeds_layout.addWidget(paeds_separator)
 
-        paeds_layout.addSpacing(6)
         paeds_question = QLabel("Is this a card on paediatrics?")
         paeds_question.setWordWrap(True)
         paeds_layout.addWidget(paeds_question)
 
         self.paeds_checkbox = QCheckBox("Yes")
         paeds_layout.addWidget(self.paeds_checkbox)
+        paeds_layout.addStretch()  # pin content to top; absorb remaining height
 
-        paeds_layout.addStretch()  # push content to the top
         paeds_group.setLayout(paeds_layout)
 
         # Place yield and paediatrics side by side
-        yield_paeds_layout = QHBoxLayout()
+        # Wrap in a QWidget with fixed vertical size policy so this row never grows
+        from aqt.qt import QSizePolicy
+        yield_paeds_widget = QWidget()
+        yield_paeds_layout = QHBoxLayout(yield_paeds_widget)
+        yield_paeds_layout.setContentsMargins(0, 0, 0, 0)
         yield_paeds_layout.addWidget(yield_group, stretch=2)
         yield_paeds_layout.addWidget(paeds_group, stretch=1)
-        content_layout.addLayout(yield_paeds_layout)
+        yield_paeds_widget.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Fixed     # Fixed vertical — won't grow on resize
+        )
+        content_layout.addWidget(yield_paeds_widget, stretch=0)
 
         # Buttons
         button_layout = QHBoxLayout()
@@ -375,17 +375,23 @@ class NotionPageSelector(QDialog):
         button_layout.addWidget(guidelines_button)
 
         # Donate button — unobtrusive, coffee-toned outline style
-        donate_button = QPushButton("🫶 Support")
+        donate_button = QPushButton("☕ Support")
         donate_button.setObjectName("donate")
-        donate_button.setToolTip("Support Malleus on Paypal")
+        donate_button.setToolTip("Support Malleus on Buy Me a Coffee")
         donate_button.clicked.connect(
             lambda: QDesktopServices.openUrl(
-                QUrl("https://www.paypal.com/donate/?hosted_button_id=9VM7MHMMK5JJJ")
+                QUrl("https://buymeacoffee.com/projectmalleus")
             )
         )
         button_layout.addWidget(donate_button)
 
-        content_layout.addLayout(button_layout)
+        button_widget = QWidget()
+        button_widget.setLayout(button_layout)
+        button_widget.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Fixed
+        )
+        content_layout.addWidget(button_widget, stretch=0)
 
         layout.addWidget(content_widget)
         self.setLayout(layout)
