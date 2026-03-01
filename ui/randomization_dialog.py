@@ -11,6 +11,17 @@ from aqt.utils import showInfo
 from aqt.addcards import AddCards
 import json
 from ..utils import insert_at_cursor
+try:
+    from .styles import apply_malleus_style, make_header, COLORS
+except Exception:
+    def apply_malleus_style(w): pass
+    def make_header(title="Malleus Clinical Medicine", subtitle=None, logo_path=None):
+        from aqt.qt import QWidget, QHBoxLayout, QLabel
+        h = QWidget(); h.setFixedHeight(48 if not subtitle else 62)
+        lay = QHBoxLayout(h); lay.setContentsMargins(12, 0, 12, 0)
+        lbl = QLabel(title); lbl.setStyleSheet("font-weight: bold; font-size: 14px;")
+        lay.addWidget(lbl); lay.addStretch(); return h
+    COLORS = {}
 
 
 class RandomizationDialog(QDialog):
@@ -18,11 +29,33 @@ class RandomizationDialog(QDialog):
         super().__init__(parent)
         self.editor = editor
         self.setWindowTitle("Add Randomization Elements")
-        self.setMinimumWidth(500)
+        self.setMinimumWidth(520)
+        import os as _os
+        from aqt import mw as _mw
+        self._addon_dir = _os.path.dirname(_os.path.dirname(_os.path.realpath(__file__)))
         self.setup_ui()
+        apply_malleus_style(self)
 
     def setup_ui(self):
         layout = QVBoxLayout()
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        import os as _os
+        _logo = _os.path.join(self._addon_dir, "logo.png")
+        if not _os.path.exists(_logo):
+            _logo = _os.path.join(self._addon_dir, "logo.jpg")
+        header = make_header(
+            "Add Randomization Elements",
+            "Insert dynamic content into card fields",
+            logo_path=_logo if _os.path.exists(_logo) else None,
+        )
+        layout.addWidget(header)
+
+        content_widget = QWidget()
+        content_layout = QVBoxLayout(content_widget)
+        content_layout.setContentsMargins(16, 14, 16, 12)
+        content_layout.setSpacing(10)
 
         # Element type selection
         type_group = QGroupBox("Element Type")
@@ -37,7 +70,7 @@ class RandomizationDialog(QDialog):
         type_layout.addWidget(self.type_combo)
 
         type_group.setLayout(type_layout)
-        layout.addWidget(type_group)
+        content_layout.addWidget(type_group)
 
         # Stacked widget setup
         self.stack = QStackedWidget()
@@ -209,7 +242,7 @@ class RandomizationDialog(QDialog):
         answer_score_widget.setLayout(answer_score_layout)
         self.stack.addWidget(answer_score_widget)
 
-        layout.addWidget(self.stack)
+        content_layout.addWidget(self.stack)
 
         # Buttons - PyQt6 compatible approach
         buttons = QDialogButtonBox()
@@ -217,8 +250,9 @@ class RandomizationDialog(QDialog):
         buttons.addButton(QDialogButtonBox.StandardButton.Cancel)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
-        layout.addWidget(buttons)
+        content_layout.addWidget(buttons)
 
+        layout.addWidget(content_widget)
         self.setLayout(layout)
 
     def add_randomization_tag(self):

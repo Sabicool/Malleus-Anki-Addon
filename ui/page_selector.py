@@ -17,6 +17,17 @@ from ..config import DATABASE_PROPERTIES, get_database_id, get_database_name
 from ..utils import open_browser_with_search
 from ..cache_updater import perform_cache_update
 from .tag_selection_dialog import TagSelectionDialog
+try:
+    from .styles import apply_malleus_style, make_header, COLORS
+except Exception:
+    def apply_malleus_style(w): pass
+    def make_header(title="Malleus Clinical Medicine", subtitle=None, logo_path=None):
+        from aqt.qt import QWidget, QHBoxLayout, QLabel
+        h = QWidget(); h.setFixedHeight(48 if not subtitle else 62)
+        lay = QHBoxLayout(h); lay.setContentsMargins(12, 0, 12, 0)
+        lbl = QLabel(title); lbl.setStyleSheet("font-weight: bold; font-size: 14px;")
+        lay.addWidget(lbl); lay.addStretch(); return h
+    COLORS = {}
 from ..tag_utils import (simplify_tags_by_page, get_subtag_from_tag, 
                          get_all_subtags_from_tags, normalize_subtag_for_matching, 
                          get_subtags_with_normalization)
@@ -39,6 +50,9 @@ class NotionPageSelector(QDialog):
             self.current_note = parent.editor.note
         self.notion_cache = notion_cache
         self.config = config
+        # Derive addon_dir from the cache directory so we can load the logo
+        import os
+        self._addon_dir = str(notion_cache.cache_dir.parent)
         # Initialize cache on startup without forcing
         # if SUBJECT_DATABASE_ID:
         #     self.notion_cache.update_cache_async(SUBJECT_DATABASE_ID, force=False)
@@ -52,6 +66,7 @@ class NotionPageSelector(QDialog):
         self.database_properties = DATABASE_PROPERTIES
         self.pages_data = []  # Store full page data
         self.setup_ui()
+        apply_malleus_style(self)
 
     def has_notes_to_process(self):
         """Check if there are notes available to process"""
@@ -70,12 +85,34 @@ class NotionPageSelector(QDialog):
 
     def setup_ui(self):
         self.setWindowTitle("Malleus Page Selector")
-        self.setMinimumWidth(600)
+        self.setMinimumWidth(640)
+        self.setMinimumHeight(580)
 
         layout = QVBoxLayout()
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        # ── Branded header ──────────────────────────────────────────────────
+        import os as _os
+        _logo = _os.path.join(self._addon_dir, "logo.png")
+        if not _os.path.exists(_logo):
+            _logo = _os.path.join(self._addon_dir, "logo.jpg")
+        header = make_header(
+            title="Malleus Clinical Medicine",
+            subtitle="Find, create and tag Anki cards",
+            logo_path=_logo if _os.path.exists(_logo) else None,
+        )
+        layout.addWidget(header)
+
+        # ── Inner content (padded) ──────────────────────────────────────────
+        content_widget = QWidget()
+        content_layout = QVBoxLayout(content_widget)
+        content_layout.setContentsMargins(16, 14, 16, 12)
+        content_layout.setSpacing(10)
 
         # Search section
         search_layout = QHBoxLayout()
+        search_layout.setSpacing(8)
 
         # Database selector
         self.database_selector = QComboBox()
@@ -91,8 +128,9 @@ class NotionPageSelector(QDialog):
 
         # Search input
         self.search_input = QLineEdit()
-        self.search_input.setPlaceholderText("Enter search term...")
+        self.search_input.setPlaceholderText("🔍  Search pages...")
         self.search_input.textChanged.connect(self.on_search_text_changed)
+        self.search_input.setMinimumHeight(34)
         search_layout.addWidget(self.search_input)
 
         # Property selector
@@ -107,7 +145,7 @@ class NotionPageSelector(QDialog):
             search_button.clicked.connect(self.perform_search)
             search_layout.addWidget(search_button)
 
-        layout.addLayout(search_layout)
+        content_layout.addLayout(search_layout)
 
         # Results section
         self.results_group = QGroupBox("Search Results")
@@ -116,6 +154,7 @@ class NotionPageSelector(QDialog):
         # Scrollable area for checkboxes
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
+        scroll.setMinimumHeight(220)
         scroll_widget = QWidget()
         self.checkbox_layout = QVBoxLayout()
         scroll_widget.setLayout(self.checkbox_layout)
@@ -123,16 +162,18 @@ class NotionPageSelector(QDialog):
 
         results_layout.addWidget(scroll)
         self.results_group.setLayout(results_layout)
-        layout.addWidget(self.results_group)
+        content_layout.addWidget(self.results_group)
 
         # Yield selection section
         yield_group = QGroupBox("Yield Level")
         yield_layout = QVBoxLayout()
+        yield_layout.setSpacing(2)
+        yield_layout.setContentsMargins(6, 4, 6, 6)
 
         # Create a horizontal layout with title and info icon
         yield_title_layout = QHBoxLayout()
         yield_title_label = QLabel("Yield Level")
-        yield_title_label.setStyleSheet("font-weight: bold; font-size: 13px;")
+        yield_title_label.setStyleSheet("font-weight: 700; font-size: 13px; background: transparent;")
 
         # Create info icon with combined tooltip
         combined_tooltip = """<p style="margin: 0; padding: 4px;">
@@ -172,7 +213,7 @@ class NotionPageSelector(QDialog):
 
         info_label = QLabel("ℹ️")
         info_label.setToolTip(combined_tooltip)
-        info_label.setStyleSheet("QLabel { color: #666; font-size: 14px; margin-left: 5px; }")
+        info_label.setStyleSheet("QLabel { color: #4a82cc; font-size: 14px; margin-left: 5px; background: transparent; }")
         info_label.setFixedSize(20, 20)
         info_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         info_label.setCursor(Qt.CursorShape.WhatsThisCursor)
@@ -231,37 +272,60 @@ class NotionPageSelector(QDialog):
         yield_group.setLayout(yield_layout)
 
         # Paediatrics section (right side)
-        paeds_group = QGroupBox("")
+        # Mirror yield_group structure exactly:
+        # use a non-empty placeholder title then suppress it with setTitle("")
+        # so Qt's native title margin is removed identically to yield_group.
+        paeds_group = QGroupBox("Specialty Tags")
         paeds_layout = QVBoxLayout()
+        paeds_layout.setSpacing(2)
+        paeds_layout.setContentsMargins(6, 4, 6, 6)
 
-        paeds_title = QLabel("Specialty Tags")
-        paeds_title.setStyleSheet("font-weight: bold; font-size: 13px;")
-        paeds_layout.addWidget(paeds_title)
+        # Create a horizontal layout with title
+        paeds_title_layout = QHBoxLayout()
+        paeds_title_label = QLabel("Specialty Tags")
+        paeds_title_label.setStyleSheet("font-weight: 700; font-size: 13px; background: transparent;")
 
+        # Add invisible spacer to match the info icon dimensions from yield section
+        spacer_label = QLabel("")
+        spacer_label.setFixedSize(20, 20)
+        spacer_label.setStyleSheet("background: transparent;")
+
+        paeds_title_layout.addWidget(paeds_title_label)
+        paeds_title_layout.addWidget(spacer_label)  # invisible spacer
+        paeds_title_layout.addStretch()
+
+        # Hide the default title and add custom layout
+        paeds_group.setTitle("")
+        paeds_layout.addLayout(paeds_title_layout)
+
+        # Add separator line
         paeds_separator = QFrame()
         paeds_separator.setFrameShape(QFrame.Shape.HLine)
         paeds_separator.setFrameShadow(QFrame.Shadow.Sunken)
         paeds_layout.addWidget(paeds_separator)
 
+        paeds_layout.addSpacing(6)
         paeds_question = QLabel("Is this a card on paediatrics?")
         paeds_question.setWordWrap(True)
         paeds_layout.addWidget(paeds_question)
 
         self.paeds_checkbox = QCheckBox("Yes")
         paeds_layout.addWidget(self.paeds_checkbox)
-        paeds_layout.addStretch()
 
+        paeds_layout.addStretch()  # push content to the top
         paeds_group.setLayout(paeds_layout)
 
         # Place yield and paediatrics side by side
         yield_paeds_layout = QHBoxLayout()
         yield_paeds_layout.addWidget(yield_group, stretch=2)
         yield_paeds_layout.addWidget(paeds_group, stretch=1)
-        layout.addLayout(yield_paeds_layout)
+        content_layout.addLayout(yield_paeds_layout)
 
         # Buttons
         button_layout = QHBoxLayout()
+        button_layout.setSpacing(6)
         select_all_button = QPushButton("Select All")
+        select_all_button.setObjectName("secondary")
         select_all_button.clicked.connect(self.select_all_pages)
         button_layout.addWidget(select_all_button)
 
@@ -290,16 +354,19 @@ class NotionPageSelector(QDialog):
             button_layout.addWidget(replace_tags_button)
 
             remove_tags_button = QPushButton("Remove Tags")
+            remove_tags_button.setObjectName("danger")
             remove_tags_button.clicked.connect(self.remove_tags)
             button_layout.addWidget(remove_tags_button)
 
-        update_database_button = QPushButton("Update database")
+        update_database_button = QPushButton("↻  Update Database")
+        update_database_button.setObjectName("secondary")
         update_database_button.clicked.connect(
             lambda: perform_cache_update(self.notion_cache, mw)
         )
         button_layout.addWidget(update_database_button)
 
-        guidelines_button = QPushButton("Submission Guidelines")
+        guidelines_button = QPushButton("Guidelines ↗")
+        guidelines_button.setObjectName("secondary")
         guidelines_button.clicked.connect(
             lambda: QDesktopServices.openUrl(
                 QUrl("https://malleuscm.notion.site/submission-guidelines")
@@ -1637,7 +1704,7 @@ class NotionPageSelector(QDialog):
         if note_context:
             context_frame = QFrame()
             context_frame.setFrameShape(QFrame.Shape.StyledPanel)
-            context_frame.setStyleSheet("background-color: #f0f0f0; padding: 10px; border-radius: 5px;")
+            context_frame.setStyleSheet("background-color: palette(alternateBase); padding: 10px; border-radius: 7px; border: 1px solid rgba(74,130,204,0.30);")
             context_layout = QVBoxLayout()
             
             context_title = QLabel("Card Context:")
@@ -1646,7 +1713,7 @@ class NotionPageSelector(QDialog):
             
             context_text = QLabel(note_context[:200] + ("..." if len(note_context) > 200 else ""))
             context_text.setWordWrap(True)
-            context_text.setStyleSheet("font-size: 10px; color: #666;")
+            context_text.setStyleSheet("font-size: 10px;")
             context_layout.addWidget(context_text)
             
             context_frame.setLayout(context_layout)

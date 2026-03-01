@@ -11,7 +11,19 @@ from aqt import mw
 from typing import List, Dict, Tuple, Optional
 import re
 from ..config import DATABASE_PROPERTIES, get_database_id
+from ..cache_updater import perform_cache_update
 from ..tag_utils import parse_tag, normalize_subtag_for_matching
+try:
+    from ..ui.styles import apply_malleus_style, make_header, COLORS
+except Exception:
+    def apply_malleus_style(w): pass
+    def make_header(title="Malleus Clinical Medicine", subtitle=None, logo_path=None):
+        from aqt.qt import QWidget, QHBoxLayout, QLabel
+        h = QWidget(); h.setFixedHeight(48 if not subtitle else 62)
+        lay = QHBoxLayout(h); lay.setContentsMargins(12, 0, 12, 0)
+        lbl = QLabel(title); lbl.setStyleSheet("font-weight: bold; font-size: 14px;")
+        lay.addWidget(lbl); lay.addStretch(); return h
+    COLORS = {}
 import unicodedata
 
 class MissingPageDialog(QDialog):
@@ -31,59 +43,77 @@ class MissingPageDialog(QDialog):
         self.pages_data = []
 
         self.setup_ui()
+        apply_malleus_style(self)
 
     def setup_ui(self):
         self.setWindowTitle("Tag Not Found")
         self.setMinimumWidth(700)
-        self.setMinimumHeight(520)
+        self.setMinimumHeight(540)
 
         layout = QVBoxLayout()
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        header = make_header("Tag Not Found",
+                             "This subject tag could not be matched in the database")
+        layout.addWidget(header)
+
+        content_widget = QWidget()
+        content_layout = QVBoxLayout(content_widget)
+        content_layout.setContentsMargins(16, 14, 16, 12)
+        content_layout.setSpacing(10)
 
         # ── Missing tag ──────────────────────────────────────────────
-        tag_label = QLabel("Tag not found:")
-        tag_label.setStyleSheet("font-weight: bold; font-size: 13px;")
-        layout.addWidget(tag_label)
+        tag_label = QLabel("Missing tag:")
+        tag_label.setStyleSheet(f"font-weight: 700; font-size: 11px; color: {COLORS.get('accent','#4a82cc')}; background: transparent; letter-spacing: 0.3px;")
+        content_layout.addWidget(tag_label)
 
+        tag_frame = QFrame()
+        tag_frame.setStyleSheet("background-color: palette(base); border: 1.5px solid rgba(192,80,80,0.45); border-radius: 6px; padding: 6px;")
+        tag_frame_layout = QVBoxLayout(tag_frame)
+        tag_frame_layout.setContentsMargins(10, 6, 10, 6)
         tag_value = QLabel(self.missing_tag)
-        tag_value.setStyleSheet("color: #d32f2f; margin-bottom: 6px;")
+        tag_value.setStyleSheet("color: #c05050; font-size: 12px; font-family: monospace; background: transparent;")
         tag_value.setWordWrap(True)
-        layout.addWidget(tag_value)
+        tag_frame_layout.addWidget(tag_value)
+        content_layout.addWidget(tag_frame)
 
         sep1 = QFrame()
         sep1.setFrameShape(QFrame.Shape.HLine)
         sep1.setFrameShadow(QFrame.Shadow.Sunken)
-        layout.addWidget(sep1)
+        content_layout.addWidget(sep1)
 
         # ── Card context ─────────────────────────────────────────────
         if self.note_context:
             ctx_frame = QFrame()
             ctx_frame.setFrameShape(QFrame.Shape.StyledPanel)
             ctx_frame.setStyleSheet(
-                "background-color: #f0f0f0; padding: 8px; border-radius: 4px; margin: 6px 0;"
+                f"background-color: palette(alternateBase); padding: 8px; border-radius: 7px; border: 1px solid rgba(74,130,204,0.35);"
             )
             ctx_layout = QVBoxLayout()
 
             ctx_title = QLabel("Card context:")
-            ctx_title.setStyleSheet("font-weight: bold; font-size: 11px;")
+            ctx_title.setStyleSheet(f"font-weight: 700; font-size: 11px; color: {COLORS.get('accent','#4a82cc')}; background: transparent; letter-spacing: 0.3px;")
             ctx_layout.addWidget(ctx_title)
 
             display_ctx = self.note_context[:300] + ("..." if len(self.note_context) > 300 else "")
             ctx_text = QLabel(display_ctx)
             ctx_text.setWordWrap(True)
-            ctx_text.setStyleSheet("font-size: 10px; color: #333;")
+            ctx_text.setStyleSheet("font-size: 11px; background: transparent;")
             ctx_layout.addWidget(ctx_text)
 
             ctx_frame.setLayout(ctx_layout)
-            layout.addWidget(ctx_frame)
+            content_layout.addWidget(ctx_frame)
 
         sep2 = QFrame()
         sep2.setFrameShape(QFrame.Shape.HLine)
         sep2.setFrameShadow(QFrame.Shadow.Sunken)
-        layout.addWidget(sep2)
+        content_layout.addWidget(sep2)
 
         # ── Search section ───────────────────────────────────────────
         search_group = QGroupBox("Suggest alternative page:")
         search_layout = QVBoxLayout()
+        search_layout.setSpacing(8)
 
         search_controls = QHBoxLayout()
 
@@ -132,7 +162,7 @@ class MissingPageDialog(QDialog):
         search_layout.addWidget(scroll)
 
         search_group.setLayout(search_layout)
-        layout.addWidget(search_group)
+        content_layout.addWidget(search_group)
 
         # Button group for radio buttons (created here so clear_results can reference it)
         self.button_group = QButtonGroup(self)
@@ -140,9 +170,19 @@ class MissingPageDialog(QDialog):
 
         # ── Action buttons ───────────────────────────────────────────
         btn_layout = QHBoxLayout()
+        btn_layout.setSpacing(8)
+
+        # Update database button (left-aligned, secondary style)
+        update_db_btn = QPushButton("↻  Update Database")
+        update_db_btn.setObjectName("secondary")
+        update_db_btn.setToolTip("Download the latest Malleus database cache")
+        update_db_btn.clicked.connect(lambda: perform_cache_update(self.notion_cache, mw))
+        btn_layout.addWidget(update_db_btn)
+
         btn_layout.addStretch()
 
         ignore_btn = QPushButton("Ignore and Remove Tag")
+        ignore_btn.setObjectName("danger")
         ignore_btn.clicked.connect(self.ignore_tag)
         btn_layout.addWidget(ignore_btn)
 
@@ -151,7 +191,8 @@ class MissingPageDialog(QDialog):
         replace_btn.clicked.connect(self.replace_tag)
         btn_layout.addWidget(replace_btn)
 
-        layout.addLayout(btn_layout)
+        content_layout.addLayout(btn_layout)
+        layout.addWidget(content_widget)
         self.setLayout(layout)
 
         # Trigger initial search after UI renders
