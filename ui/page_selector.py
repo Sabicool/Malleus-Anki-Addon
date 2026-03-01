@@ -374,7 +374,20 @@ class NotionPageSelector(QDialog):
         )
         button_layout.addWidget(guidelines_button)
 
-        layout.addLayout(button_layout)
+        # Donate button — unobtrusive, coffee-toned outline style
+        donate_button = QPushButton("🫶 Support")
+        donate_button.setObjectName("donate")
+        donate_button.setToolTip("Support Malleus on Paypal")
+        donate_button.clicked.connect(
+            lambda: QDesktopServices.openUrl(
+                QUrl("https://www.paypal.com/donate/?hosted_button_id=9VM7MHMMK5JJJ")
+            )
+        )
+        button_layout.addWidget(donate_button)
+
+        content_layout.addLayout(button_layout)
+
+        layout.addWidget(content_widget)
         self.setLayout(layout)
 
     def handle_yield_click(self, yield_option):
