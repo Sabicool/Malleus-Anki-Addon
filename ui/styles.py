@@ -457,7 +457,7 @@ def make_header(title: str = "Malleus Clinical Medicine",
                 logo_label.setAlignment(
                     Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
                 )
-                logo_label.setToolTip("Visit malleus.org.au")
+                # logo_label.setToolTip("Visit malleus.org.au")
                 logo_label.setCursor(Qt.CursorShape.PointingHandCursor)
                 # Make the logo clickable — open the Malleus website
                 def _open_malleus(event, _url="https://malleus.org.au"):
