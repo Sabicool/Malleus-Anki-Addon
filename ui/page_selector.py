@@ -297,6 +297,7 @@ class NotionPageSelector(QDialog):
         paeds_separator.setFrameShadow(QFrame.Shadow.Sunken)
         paeds_layout.addWidget(paeds_separator)
 
+        paeds_layout.addSpacing(6)
         paeds_question = QLabel("Is this a card on paediatrics?")
         paeds_question.setWordWrap(True)
         paeds_layout.addWidget(paeds_question)
@@ -375,7 +376,7 @@ class NotionPageSelector(QDialog):
         button_layout.addWidget(guidelines_button)
 
         # Donate button — unobtrusive, coffee-toned outline style
-        donate_button = QPushButton("☕ Support")
+        donate_button = QPushButton("🫶 Support")
         donate_button.setObjectName("donate")
         donate_button.setToolTip("Support Malleus on Buy Me a Coffee")
         donate_button.clicked.connect(
