@@ -1711,7 +1711,8 @@ class NotionPageSelector(QDialog):
         dialog = QDialog(self)
         dialog.setWindowTitle("Select Yield Level")
         dialog.setMinimumWidth(400)
-        
+        apply_malleus_style(dialog)
+
         layout = QVBoxLayout()
         
         # Info label

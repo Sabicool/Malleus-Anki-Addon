@@ -246,7 +246,7 @@ class MissingPageDialog(QDialog):
 
         if not self.pages_data:
             no_res = QLabel("No results found")
-            no_res.setStyleSheet("color: #666; font-style: italic; padding: 8px;")
+            no_res.setStyleSheet("font-style: italic; padding: 8px; color: palette(placeholderText);")
             self.results_layout.addWidget(no_res)
             return
 
@@ -436,6 +436,7 @@ def prompt_for_yield_selection(parent, note_context: str = None) -> Optional[str
     dialog = QDialog(parent)
     dialog.setWindowTitle("Select Yield Level")
     dialog.setMinimumWidth(400)
+    apply_malleus_style(dialog)
 
     layout = QVBoxLayout()
 
@@ -447,7 +448,7 @@ def prompt_for_yield_selection(parent, note_context: str = None) -> Optional[str
     if note_context:
         ctx_frame = QFrame()
         ctx_frame.setFrameShape(QFrame.Shape.StyledPanel)
-        ctx_frame.setStyleSheet("background-color: #f0f0f0; padding: 8px; border-radius: 4px;")
+        ctx_frame.setStyleSheet("background-color: palette(alternateBase); padding: 8px; border-radius: 6px; border: 1px solid rgba(74,130,204,0.30);")
         ctx_layout = QVBoxLayout()
 
         ctx_title = QLabel("Card context:")
@@ -456,7 +457,7 @@ def prompt_for_yield_selection(parent, note_context: str = None) -> Optional[str
 
         ctx_text = QLabel(note_context[:200] + ("..." if len(note_context) > 200 else ""))
         ctx_text.setWordWrap(True)
-        ctx_text.setStyleSheet("font-size: 10px; color: #333;")
+        ctx_text.setStyleSheet("font-size: 10px;")
         ctx_layout.addWidget(ctx_text)
 
         ctx_frame.setLayout(ctx_layout)
