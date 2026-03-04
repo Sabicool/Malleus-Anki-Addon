@@ -20,7 +20,7 @@ jobs:
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install requests python-dotenv tenacity
+        pip install requests tenacity
 
     - name: Create update_cache.py
       run: |
@@ -29,8 +29,9 @@ jobs:
         import json
         import time
         import requests
+        from requests.adapters import HTTPAdapter
+        from urllib3.util.retry import Retry
         from pathlib import Path
-        from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
         NOTION_TOKEN = os.environ.get('NOTION_TOKEN')
         if not NOTION_TOKEN:
@@ -44,7 +45,6 @@ jobs:
         GUIDELINES_DATABASE_ID   = '13d5964e68a48056b40de8148dd91a06'
         SYNCED_EXTRA_DATABASE_ID = '2dc5964e68a480909c4ac1dc169b16fb'
 
-        # Databases that have a "For Search" formula property
         USES_FOR_SEARCH = {
             SUBJECT_DATABASE_ID,
             PHARMACOLOGY_DATABASE_ID,
@@ -54,32 +54,41 @@ jobs:
             GUIDELINES_DATABASE_ID,
         }
 
+        TIMEOUT = 120  # seconds — large databases need time
+
+        def make_session():
+            """Create a requests session with built-in retry/backoff at the transport level."""
+            session = requests.Session()
+            session.headers.update({
+                "Authorization": f"Bearer {NOTION_TOKEN}",
+                "Notion-Version": "2022-06-28",
+                "Content-Type": "application/json",
+            })
+            retry = Retry(
+                total=5,
+                backoff_factor=2,          # 2, 4, 8, 16, 32 s between retries
+                status_forcelist=[429, 500, 502, 503, 504],
+                allowed_methods=["POST"],
+                raise_on_status=False,
+            )
+            adapter = HTTPAdapter(max_retries=retry)
+            session.mount("https://", adapter)
+            return session
+
         class NotionCache:
             def __init__(self):
                 self.cache_dir = Path("cache")
                 self.cache_dir.mkdir(exist_ok=True)
-                self.headers = {
-                    "Authorization": f"Bearer {NOTION_TOKEN}",
-                    "Notion-Version": "2022-06-28",
-                    "Content-Type": "application/json"
-                }
+                self.session = make_session()
 
-            @retry(
-                stop=stop_after_attempt(5),
-                wait=wait_exponential(multiplier=1, min=4, max=60),
-                retry=retry_if_exception_type((requests.exceptions.RequestException, requests.exceptions.Timeout))
-            )
             def fetch_pages_batch(self, database_id: str, start_cursor: str = None, use_for_search: bool = True) -> dict:
-                """Fetch a single batch of pages with retry logic"""
                 if use_for_search:
                     payload = {
                         "filter": {
                             "property": "For Search",
-                            "formula": {
-                                "checkbox": {"equals": True}
-                            }
+                            "formula": {"checkbox": {"equals": True}}
                         },
-                        "page_size": 100
+                        "page_size": 100,
                     }
                 else:
                     payload = {"page_size": 100}
@@ -87,41 +96,46 @@ jobs:
                 if start_cursor:
                     payload["start_cursor"] = start_cursor
 
-                response = requests.post(
-                    f"https://api.notion.com/v1/databases/{database_id}/query",
-                    headers=self.headers,
-                    json=payload,
-                    timeout=30
-                )
-                response.raise_for_status()
-                return response.json()
+                for attempt in range(1, 6):
+                    try:
+                        response = self.session.post(
+                            f"https://api.notion.com/v1/databases/{database_id}/query",
+                            json=payload,
+                            timeout=TIMEOUT,
+                        )
+                        response.raise_for_status()
+                        return response.json()
+                    except Exception as e:
+                        print(f"  Attempt {attempt}/5 failed: {type(e).__name__}: {e}")
+                        if attempt < 5:
+                            wait = 2 ** attempt
+                            print(f"  Waiting {wait}s before retry...")
+                            time.sleep(wait)
+                        else:
+                            raise
 
             def update_cache(self, database_id: str):
-                """Fetch and save all pages from a Notion database to the cache"""
                 use_for_search = database_id in USES_FOR_SEARCH
                 pages = []
                 has_more = True
                 start_cursor = None
+                batch = 0
 
                 while has_more:
-                    try:
-                        data = self.fetch_pages_batch(database_id, start_cursor, use_for_search)
-                        pages.extend(data['results'])
-                        has_more = data.get('has_more', False)
-                        start_cursor = data.get('next_cursor')
-                        print(f"Fetched batch of {len(data['results'])} pages (total so far: {len(pages)})")
-                    except Exception as e:
-                        print(f"Error fetching from Notion after all retries: {e}")
-                        raise Exception(f"Failed to fetch complete data for database {database_id}")
+                    batch += 1
+                    print(f"  Fetching batch {batch}...")
+                    data = self.fetch_pages_batch(database_id, start_cursor, use_for_search)
+                    pages.extend(data['results'])
+                    has_more = data.get('has_more', False)
+                    start_cursor = data.get('next_cursor')
+                    print(f"  Batch {batch}: {len(data['results'])} pages (total: {len(pages)})")
+                    if has_more:
+                        time.sleep(0.5)  # gentle rate-limit buffer between batches
 
                 cache_path = self.cache_dir / f"{database_id}.json"
                 with cache_path.open('w', encoding='utf-8') as f:
-                    json.dump({
-                        'version': 1,
-                        'timestamp': time.time(),
-                        'pages': pages
-                    }, f)
-                print(f"Saved {len(pages)} pages to {cache_path}")
+                    json.dump({'version': 1, 'timestamp': time.time(), 'pages': pages}, f)
+                print(f"  Saved {len(pages)} pages → {cache_path}")
 
         def update_notion_cache():
             notion_cache = NotionCache()
@@ -136,10 +150,10 @@ jobs:
             ]
 
             for database_id, name in databases:
-                print(f"\n--- Updating {name} ({database_id}) ---")
+                print(f"\n--- Updating {name} ---")
                 notion_cache.update_cache(database_id)
-                print(f"Done: {name}")
-                time.sleep(2)  # avoid rate limiting
+                print(f"--- Done: {name} ---")
+                time.sleep(3)
 
         if __name__ == "__main__":
             update_notion_cache()
