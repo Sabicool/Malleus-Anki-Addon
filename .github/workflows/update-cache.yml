@@ -32,19 +32,27 @@ jobs:
         from pathlib import Path
         from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
-        # Get token from environment variable
         NOTION_TOKEN = os.environ.get('NOTION_TOKEN')
         if not NOTION_TOKEN:
             raise ValueError("NOTION_TOKEN environment variable is required")
 
-        # Database IDs (these can remain public as they're not sensitive)
-        SUBJECT_DATABASE_ID = '2674b67cbdf84a11a057a29cc24c524f'
-        SYNCED_EXTRA_DATABASE_ID = '2dc5964e68a480909c4ac1dc169b16fb'
+        SUBJECT_DATABASE_ID      = '2674b67cbdf84a11a057a29cc24c524f'
         PHARMACOLOGY_DATABASE_ID = '9ff96451736d43909d49e3b9d60971f8'
-        ETG_DATABASE_ID = '22282971487f4f559dce199476709b03'
-        ROTATION_DATABASE_ID = '69b3e7fdce1548438b26849466d7c18e'
-        TEXTBOOKS_DATABASE_ID = '13d5964e68a480bfb07cf7e2f1786075'
-        GUIDELINES_DATABASE_ID = '13d5964e68a48056b40de8148dd91a06'
+        ETG_DATABASE_ID          = '22282971487f4f559dce199476709b03'
+        ROTATION_DATABASE_ID     = '69b3e7fdce1548438b26849466d7c18e'
+        TEXTBOOKS_DATABASE_ID    = '13d5964e68a480bfb07cf7e2f1786075'
+        GUIDELINES_DATABASE_ID   = '13d5964e68a48056b40de8148dd91a06'
+        SYNCED_EXTRA_DATABASE_ID = '2dc5964e68a480909c4ac1dc169b16fb'
+
+        # Databases that have a "For Search" formula property
+        USES_FOR_SEARCH = {
+            SUBJECT_DATABASE_ID,
+            PHARMACOLOGY_DATABASE_ID,
+            ETG_DATABASE_ID,
+            ROTATION_DATABASE_ID,
+            TEXTBOOKS_DATABASE_ID,
+            GUIDELINES_DATABASE_ID,
+        }
 
         class NotionCache:
             def __init__(self):
@@ -61,17 +69,21 @@ jobs:
                 wait=wait_exponential(multiplier=1, min=4, max=60),
                 retry=retry_if_exception_type((requests.exceptions.RequestException, requests.exceptions.Timeout))
             )
-            def fetch_pages_batch(self, database_id: str, start_cursor: str = None) -> dict:
+            def fetch_pages_batch(self, database_id: str, start_cursor: str = None, use_for_search: bool = True) -> dict:
                 """Fetch a single batch of pages with retry logic"""
-                payload = {
-                    "filter": {
-                        "property": "For Search",
-                        "checkbox": {
-                            "equals": True
-                        }
-                    },
-                    "page_size": 100
-                }
+                if use_for_search:
+                    payload = {
+                        "filter": {
+                            "property": "For Search",
+                            "formula": {
+                                "checkbox": {"equals": True}
+                            }
+                        },
+                        "page_size": 100
+                    }
+                else:
+                    payload = {"page_size": 100}
+
                 if start_cursor:
                     payload["start_cursor"] = start_cursor
 
@@ -79,65 +91,55 @@ jobs:
                     f"https://api.notion.com/v1/databases/{database_id}/query",
                     headers=self.headers,
                     json=payload,
-                    timeout=30  # Set explicit timeout
+                    timeout=30
                 )
                 response.raise_for_status()
                 return response.json()
 
             def update_cache(self, database_id: str):
                 """Fetch and save all pages from a Notion database to the cache"""
+                use_for_search = database_id in USES_FOR_SEARCH
                 pages = []
                 has_more = True
                 start_cursor = None
-                fetch_success = True
 
                 while has_more:
                     try:
-                        data = self.fetch_pages_batch(database_id, start_cursor)
+                        data = self.fetch_pages_batch(database_id, start_cursor, use_for_search)
                         pages.extend(data['results'])
                         has_more = data.get('has_more', False)
                         start_cursor = data.get('next_cursor')
-                        print(f"Successfully fetched batch of {len(data['results'])} pages")
+                        print(f"Fetched batch of {len(data['results'])} pages (total so far: {len(pages)})")
                     except Exception as e:
                         print(f"Error fetching from Notion after all retries: {e}")
-                        fetch_success = False
-                        break
-
-                if not fetch_success:
-                    # Raise exception to trigger GitHub Actions retry
-                    raise Exception(f"Failed to fetch complete data for database {database_id}")
+                        raise Exception(f"Failed to fetch complete data for database {database_id}")
 
                 cache_path = self.cache_dir / f"{database_id}.json"
-                try:
-                    with cache_path.open('w', encoding='utf-8') as f:
-                        json.dump({
-                            'version': 1,
-                            'timestamp': time.time(),
-                            'pages': pages
-                        }, f)
-                    print(f"Saved {len(pages)} pages to cache for database {database_id}")
-                except Exception as e:
-                    print(f"Error saving cache: {e}")
-                    raise  # Raise exception to trigger GitHub Actions retry
+                with cache_path.open('w', encoding='utf-8') as f:
+                    json.dump({
+                        'version': 1,
+                        'timestamp': time.time(),
+                        'pages': pages
+                    }, f)
+                print(f"Saved {len(pages)} pages to {cache_path}")
 
         def update_notion_cache():
-            """Update all Notion database caches"""
             notion_cache = NotionCache()
             databases = [
-                SUBJECT_DATABASE_ID,
-                SYNCED_EXTRA_DATABASE_ID,
-                PHARMACOLOGY_DATABASE_ID,
-                ETG_DATABASE_ID,
-                ROTATION_DATABASE_ID,
-                TEXTBOOKS_DATABASE_ID,
-                GUIDELINES_DATABASE_ID
+                (SUBJECT_DATABASE_ID,      "Subjects"),
+                (PHARMACOLOGY_DATABASE_ID, "Pharmacology"),
+                (ETG_DATABASE_ID,          "eTG"),
+                (ROTATION_DATABASE_ID,     "Rotation"),
+                (TEXTBOOKS_DATABASE_ID,    "Textbooks"),
+                (GUIDELINES_DATABASE_ID,   "Guidelines"),
+                (SYNCED_EXTRA_DATABASE_ID, "Synced Extra"),
             ]
 
-            for database_id in databases:
+            for database_id, name in databases:
+                print(f"\n--- Updating {name} ({database_id}) ---")
                 notion_cache.update_cache(database_id)
-                print(f"Successfully updated cache for database {database_id}")
-                # Add small delay between databases to avoid rate limiting
-                time.sleep(2)
+                print(f"Done: {name}")
+                time.sleep(2)  # avoid rate limiting
 
         if __name__ == "__main__":
             update_notion_cache()
@@ -153,7 +155,7 @@ jobs:
         command: python update_cache.py
         on_retry_command: |
           echo "Retry attempt in progress..."
-          sleep 10  # Add delay before retry
+          sleep 10
 
     - name: Commit and push if changes
       run: |
