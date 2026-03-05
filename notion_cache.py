@@ -263,13 +263,12 @@ class NotionCache:
         print(f"Found {len(pages)} updated pages")
         return pages
 
-    def fetch_blocks(self, page_id: str) -> List[Dict]:
-        """Fetch all block children for a page, handling pagination and table rows."""
+    def _fetch_block_children_flat(self, block_id: str) -> List[Dict]:
+        """Fetch direct children of a block, handling pagination. Returns flat list."""
         blocks = []
-        url = f"https://api.notion.com/v1/blocks/{page_id}/children"
         params = {"page_size": 100}
-
-        while url:
+        url = f"https://api.notion.com/v1/blocks/{block_id}/children"
+        while True:
             try:
                 response = requests.get(
                     url, headers=self.headers, params=params,
@@ -278,48 +277,30 @@ class NotionCache:
                 response.raise_for_status()
                 data = response.json()
             except Exception as e:
-                print(f"Error fetching blocks for {page_id}: {e}")
+                print(f"Error fetching block children for {block_id}: {e}")
                 break
-
-            for block in data.get("results", []):
-                blocks.append(block)
-                # Fetch table row children inline
-                if block.get("type") == "table" and block.get("has_children"):
-                    try:
-                        row_resp = requests.get(
-                            f"https://api.notion.com/v1/blocks/{block['id']}/children",
-                            headers=self.headers,
-                            params={"page_size": 100},
-                            timeout=self.REQUEST_TIMEOUT
-                        )
-                        row_resp.raise_for_status()
-                        blocks.extend(row_resp.json().get("results", []))
-                    except Exception as e:
-                        print(f"Error fetching table rows for {block['id']}: {e}")
-
+            blocks.extend(data.get("results", []))
             if data.get("has_more") and data.get("next_cursor"):
                 params = {"page_size": 100, "start_cursor": data["next_cursor"]}
             else:
                 break
+        return blocks
 
+    def fetch_blocks(self, page_id: str) -> List[Dict]:
+        """Fetch all blocks for a page recursively, embedding children as '_children' key."""
+        blocks = self._fetch_block_children_flat(page_id)
+        for block in blocks:
+            if block.get("has_children"):
+                block["_children"] = self.fetch_blocks(block["id"])
         return blocks
 
     def blocks_to_html(self, blocks: List[Dict]) -> str:
-        """Convert a flat list of Notion block dicts to HTML."""
-        parts = []
-        list_type = None
-
-        def close_list():
-            nonlocal list_type
-            if list_type:
-                parts.append(f"</{list_type}>")
-                list_type = None
+        """Convert a nested block tree (with _children keys) to HTML."""
 
         def rich_text_to_html(rich_texts):
             html = ""
             for rt in rich_texts:
                 rt_type = rt.get("type", "text")
-                # Inline equation: wrap in anki-mathjax
                 if rt_type == "equation":
                     expr = rt.get("equation", {}).get("expression", rt.get("plain_text", ""))
                     html += f"<anki-mathjax>{expr}</anki-mathjax>"
@@ -339,80 +320,84 @@ class NotionCache:
                 html += text
             return html
 
-        for block in blocks:
-            btype = block.get("type", "")
-            data  = block.get(btype, {})
-            rt    = data.get("rich_text", [])
+        def render_blocks(blocks):
+            """Recursively render a list of blocks (which may have _children) to HTML."""
+            parts = []
+            i = 0
+            while i < len(blocks):
+                block = blocks[i]
+                btype = block.get("type", "")
+                data  = block.get(btype, {})
+                rt    = data.get("rich_text", [])
+                children = block.get("_children", [])
 
-            if btype == "bulleted_list_item":
-                if list_type != "ul":
-                    close_list()
-                    parts.append("<ul>")
-                    list_type = "ul"
-                parts.append(f"<li>{rich_text_to_html(rt)}</li>")
+                # Collect consecutive list items of the same type into a single list tag
+                if btype in ("bulleted_list_item", "numbered_list_item"):
+                    tag = "ul" if btype == "bulleted_list_item" else "ol"
+                    items = []
+                    while i < len(blocks) and blocks[i].get("type") == btype:
+                        b = blocks[i]
+                        bd = b.get(btype, {})
+                        brt = bd.get("rich_text", [])
+                        bchildren = b.get("_children", [])
+                        item_html = rich_text_to_html(brt)
+                        if bchildren:
+                            item_html += render_blocks(bchildren)
+                        items.append(f"<li>{item_html}</li>")
+                        i += 1
+                    parts.append(f"<{tag}>{''.join(items)}</{tag}>")
+                    continue  # i already advanced
 
-            elif btype == "numbered_list_item":
-                if list_type != "ol":
-                    close_list()
-                    parts.append("<ol>")
-                    list_type = "ol"
-                parts.append(f"<li>{rich_text_to_html(rt)}</li>")
-
-            else:
-                close_list()
-                if btype == "paragraph":
+                elif btype == "paragraph":
                     inner = rich_text_to_html(rt)
                     if inner.strip():
                         parts.append(f"<p>{inner}</p>")
+
                 elif btype in ("heading_1", "heading_2", "heading_3"):
                     level = btype[-1]
                     parts.append(f"<h{level}>{rich_text_to_html(rt)}</h{level}>")
+
                 elif btype in ("callout", "quote"):
-                    parts.append(f"<blockquote>{rich_text_to_html(rt)}</blockquote>")
+                    inner = rich_text_to_html(rt)
+                    if children:
+                        inner += render_blocks(children)
+                    parts.append(f"<blockquote>{inner}</blockquote>")
+
                 elif btype == "code":
                     lang = data.get("language", "")
                     if lang.lower() == "html":
-                        # Raw HTML passthrough — write content verbatim
                         raw = "".join(seg.get("plain_text", "") for seg in rt)
                         parts.append(raw)
                     else:
                         parts.append(f'<pre><code class="{lang}">{rich_text_to_html(rt)}</code></pre>')
+
+                elif btype == "equation":
+                    expr = data.get("expression", "")
+                    if expr:
+                        parts.append(f'<div><anki-mathjax block="true">{expr}</anki-mathjax><br></div>')
+
                 elif btype == "divider":
                     parts.append("<hr>")
+
                 elif btype == "image":
                     url = (data.get("file") or data.get("external") or {}).get("url", "")
                     caption = rich_text_to_html(data.get("caption", []))
                     if url:
                         parts.append(f'<figure><img src="{url}"><figcaption>{caption}</figcaption></figure>')
+
+                elif btype == "table":
+                    rows = "".join(render_blocks(children))
+                    parts.append(f"<table><tbody>{rows}</tbody></table>")
+
                 elif btype == "table_row":
                     cells = data.get("cells", [])
                     row_html = "".join(f"<td>{rich_text_to_html(cell)}</td>" for cell in cells)
                     parts.append(f"<tr>{row_html}</tr>")
-                elif btype == "equation":
-                    expr = data.get("expression", "")
-                    if expr:
-                        parts.append(f'<div><anki-mathjax block="true">{expr}</anki-mathjax><br></div>')
-                elif btype == "table":
-                    parts.append("<table>")  # rows follow as subsequent blocks
 
-        close_list()
+                i += 1
+            return "\n".join(parts)
 
-        # Wrap table rows in tbody tags
-        result = []
-        in_table = False
-        for part in parts:
-            if part == "<table>":
-                in_table = True
-                result.append("<table><tbody>")
-            elif in_table and not part.startswith("<tr>"):
-                result.append("</tbody></table>")
-                in_table = False
-                result.append(part)
-            else:
-                result.append(part)
-        if in_table:
-            result.append("</tbody></table>")
-        return "\n".join(result)
+        return render_blocks(blocks)
 
     def fetch_and_embed_blocks(self, pages: List[Dict]) -> List[Dict]:
         """For each page in a Synced Extra result set, fetch blocks and embed as _block_html."""

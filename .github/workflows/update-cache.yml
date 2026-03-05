@@ -103,41 +103,35 @@ jobs:
             return html
 
         def blocks_to_html(blocks: list) -> str:
-            """Convert a flat list of Notion block dicts to HTML."""
-            parts = []
-            list_type = None   # "ul" or "ol" — track open list
+            """Convert a nested block tree (with _children keys) to HTML."""
 
-            def close_list():
-                nonlocal list_type
-                if list_type:
-                    parts.append(f"</{list_type}>")
-                    list_type = None
+            def render_blocks(blocks):
+                parts = []
+                i = 0
+                while i < len(blocks):
+                    block = blocks[i]
+                    btype = block.get("type", "")
+                    data  = block.get(btype, {})
+                    rt    = data.get("rich_text", [])
+                    children = block.get("_children", [])
 
-            for block in blocks:
-                btype = block.get("type", "")
-                data  = block.get(btype, {})
-                rt    = data.get("rich_text", [])
+                    if btype in ("bulleted_list_item", "numbered_list_item"):
+                        tag = "ul" if btype == "bulleted_list_item" else "ol"
+                        items = []
+                        while i < len(blocks) and blocks[i].get("type") == btype:
+                            b = blocks[i]
+                            bd = b.get(btype, {})
+                            brt = bd.get("rich_text", [])
+                            bchildren = b.get("_children", [])
+                            item_html = rich_text_to_html(brt)
+                            if bchildren:
+                                item_html += render_blocks(bchildren)
+                            items.append(f"<li>{item_html}</li>")
+                            i += 1
+                        parts.append(f"<{tag}>{''.join(items)}</{tag}>")
+                        continue
 
-                # Bullet list
-                if btype == "bulleted_list_item":
-                    if list_type != "ul":
-                        close_list()
-                        parts.append("<ul>")
-                        list_type = "ul"
-                    parts.append(f"<li>{rich_text_to_html(rt)}</li>")
-
-                # Numbered list
-                elif btype == "numbered_list_item":
-                    if list_type != "ol":
-                        close_list()
-                        parts.append("<ol>")
-                        list_type = "ol"
-                    parts.append(f"<li>{rich_text_to_html(rt)}</li>")
-
-                else:
-                    close_list()
-
-                    if btype == "paragraph":
+                    elif btype == "paragraph":
                         inner = rich_text_to_html(rt)
                         if inner.strip():
                             parts.append(f"<p>{inner}</p>")
@@ -146,20 +140,24 @@ jobs:
                         level = btype[-1]
                         parts.append(f"<h{level}>{rich_text_to_html(rt)}</h{level}>")
 
-                    elif btype == "callout":
-                        parts.append(f"<blockquote>{rich_text_to_html(rt)}</blockquote>")
-
-                    elif btype == "quote":
-                        parts.append(f"<blockquote>{rich_text_to_html(rt)}</blockquote>")
+                    elif btype in ("callout", "quote"):
+                        inner = rich_text_to_html(rt)
+                        if children:
+                            inner += render_blocks(children)
+                        parts.append(f"<blockquote>{inner}</blockquote>")
 
                     elif btype == "code":
                         lang = data.get("language", "")
                         if lang.lower() == "html":
-                            # Raw HTML passthrough — write content verbatim
                             raw = "".join(seg.get("plain_text", "") for seg in rt)
                             parts.append(raw)
                         else:
                             parts.append(f'<pre><code class="{lang}">{rich_text_to_html(rt)}</code></pre>')
+
+                    elif btype == "equation":
+                        expr = data.get("expression", "")
+                        if expr:
+                            parts.append(f'<div><anki-mathjax block="true">{expr}</anki-mathjax><br></div>')
 
                     elif btype == "divider":
                         parts.append("<hr>")
@@ -168,26 +166,21 @@ jobs:
                         url = (data.get("file") or data.get("external") or {}).get("url", "")
                         caption = rich_text_to_html(data.get("caption", []))
                         if url:
-                            parts.append(f'<figure><img src="{url}" alt="{caption}"><figcaption>{caption}</figcaption></figure>')
-
-                    elif btype == "equation":
-                        expr = data.get("expression", "")
-                        if expr:
-                            parts.append(f'<div><anki-mathjax block="true">{expr}</anki-mathjax><br></div>')
+                            parts.append(f'<figure><img src="{url}"><figcaption>{caption}</figcaption></figure>')
 
                     elif btype == "table":
-                        # Table rows are child blocks — handled inline below via has_children
-                        pass
+                        rows = render_blocks(children)
+                        parts.append(f"<table><tbody>{rows}</tbody></table>")
 
                     elif btype == "table_row":
                         cells = data.get("cells", [])
-                        row_html = "".join(
-                            f"<td>{rich_text_to_html(cell)}</td>" for cell in cells
-                        )
+                        row_html = "".join(f"<td>{rich_text_to_html(cell)}</td>" for cell in cells)
                         parts.append(f"<tr>{row_html}</tr>")
 
-            close_list()
-            return "\n".join(parts)
+                    i += 1
+                return "\n".join(parts)
+
+            return render_blocks(blocks)
 
         # ── NotionCache ───────────────────────────────────────────────────────
 
@@ -210,32 +203,26 @@ jobs:
                         else:
                             raise
 
-            def fetch_blocks(self, page_id: str) -> list:
-                """Fetch all block children for a page, handling pagination."""
+            def _fetch_children_flat(self, block_id: str) -> list:
+                """Fetch direct children of a block, handling pagination."""
                 blocks = []
-                url = f"https://api.notion.com/v1/blocks/{page_id}/children?page_size=100"
+                url = f"https://api.notion.com/v1/blocks/{block_id}/children?page_size=100"
                 while url:
                     data = self.get(url)
-                    results = data.get("results", [])
-
-                    # For table blocks, fetch their row children inline
-                    for block in results:
-                        if block.get("type") == "table" and block.get("has_children"):
-                            table_id = block["id"]
-                            row_url = f"https://api.notion.com/v1/blocks/{table_id}/children?page_size=100"
-                            row_data = self.get(row_url)
-                            results_with_rows = []
-                            results_with_rows.append(block)
-                            results_with_rows.extend(row_data.get("results", []))
-                            blocks.extend(results_with_rows)
-                        else:
-                            blocks.append(block)
-
+                    blocks.extend(data.get("results", []))
                     if data.get("has_more") and data.get("next_cursor"):
                         cursor = data["next_cursor"]
-                        url = f"https://api.notion.com/v1/blocks/{page_id}/children?page_size=100&start_cursor={cursor}"
+                        url = f"https://api.notion.com/v1/blocks/{block_id}/children?page_size=100&start_cursor={cursor}"
                     else:
                         url = None
+                return blocks
+
+            def fetch_blocks(self, page_id: str) -> list:
+                """Fetch all blocks for a page recursively, embedding children as '_children' key."""
+                blocks = self._fetch_children_flat(page_id)
+                for block in blocks:
+                    if block.get("has_children"):
+                        block["_children"] = self.fetch_blocks(block["id"])
                 return blocks
 
             def fetch_pages_batch(self, database_id: str, start_cursor: str = None, use_for_search: bool = True) -> dict:
