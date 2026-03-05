@@ -5,6 +5,7 @@ from aqt import mw
 
 # Hard coded environment variables
 SUBJECT_DATABASE_ID = '2674b67cbdf84a11a057a29cc24c524f'
+SYNCED_EXTRA_DATABASE_ID = '2dc5964e68a480909c4ac1dc169b16fb'
 PHARMACOLOGY_DATABASE_ID = '9ff96451736d43909d49e3b9d60971f8'
 ETG_DATABASE_ID = '22282971487f4f559dce199476709b03'
 ROTATION_DATABASE_ID = '69b3e7fdce1548438b26849466d7c18e'
@@ -18,7 +19,8 @@ DATABASES = [
     (ETG_DATABASE_ID, "eTG"),
     (ROTATION_DATABASE_ID, "Rotation"),
     (TEXTBOOKS_DATABASE_ID, "Textbooks"),
-    (GUIDELINES_DATABASE_ID, "Guidelines")
+    (GUIDELINES_DATABASE_ID, "Guidelines"),
+    (SYNCED_EXTRA_DATABASE_ID, "Synced Extra"),
 ]
 
 # Database properties for each database type

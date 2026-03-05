@@ -15,6 +15,7 @@ ETG_DATABASE_ID = os.getenv('ETG_DATABASE_ID')
 ROTATION_DATABASE_ID = os.getenv('ROTATION_DATABASE_ID')
 TEXTBOOKS_DATABASE_ID = os.getenv('TEXTBOOKS_DATABASE_ID')
 GUIDELINES_DATABASE_ID = os.getenv('GUIDELINES_DATABASE_ID')
+SYNCED_EXTRA_DATABASE_ID = '2dc5964e68a480909c4ac1dc169b16fb'
 
 class NotionCache:
     def __init__(self, addon_dir: str):
@@ -158,6 +159,8 @@ def update_notion_cache():
     # Uncomment the databases you want to update
 #    if SUBJECT_DATABASE_ID:
 #        notion_cache.update_cache(SUBJECT_DATABASE_ID)
+    if SYNCED_EXTRA_DATABASE_ID:
+        notion_cache.update_cache(SYNCED_EXTRA_DATABASE_ID)
 #    if PHARMACOLOGY_DATABASE_ID:
 #        notion_cache.update_cache(PHARMACOLOGY_DATABASE_ID)
 #    if ETG_DATABASE_ID:
@@ -166,8 +169,8 @@ def update_notion_cache():
 #        notion_cache.update_cache(ROTATION_DATABASE_ID)
 #    if TEXTBOOKS_DATABASE_ID:
 #        notion_cache.update_cache(TEXTBOOKS_DATABASE_ID)
-    if GUIDELINES_DATABASE_ID:
-        notion_cache.update_cache(GUIDELINES_DATABASE_ID)
+#    if GUIDELINES_DATABASE_ID:
+#        notion_cache.update_cache(GUIDELINES_DATABASE_ID)
 
 if __name__ == "__main__":
     update_notion_cache()

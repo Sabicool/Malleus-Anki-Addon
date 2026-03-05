@@ -11,7 +11,7 @@ from typing import List, Dict, Tuple
 from datetime import datetime
 from aqt import mw
 from aqt.utils import tooltip
-from .config import NOTION_TOKEN, get_database_name
+from .config import NOTION_TOKEN, get_database_name, SYNCED_EXTRA_DATABASE_ID
 
 class NotionCache:
     """Handles caching of Notion database content"""
@@ -169,7 +169,8 @@ class NotionCache:
                     return
 
                 cached_pages, last_sync_timestamp = self.load_from_cache(database_id, warn_if_expired=False)
-                pages = self.fetch_updated_pages(database_id, last_sync_timestamp)
+                use_fs = (database_id != SYNCED_EXTRA_DATABASE_ID)
+                pages = self.fetch_updated_pages(database_id, last_sync_timestamp, use_for_search=use_fs)
                 
                 if pages:
                     self.save_to_cache(database_id, pages)
@@ -193,7 +194,7 @@ class NotionCache:
         self._sync_thread = threading.Thread(target=sync_thread, daemon=True)
         self._sync_thread.start()
 
-    def fetch_updated_pages(self, database_id: str, last_sync_timestamp: float) -> List[Dict]:
+    def fetch_updated_pages(self, database_id: str, last_sync_timestamp: float, use_for_search: bool = True) -> List[Dict]:
         """Fetch all pages from Notion database that have been updated since last sync"""
         pages = []
         has_more = True
@@ -205,27 +206,28 @@ class NotionCache:
         last_sync_date = datetime.fromtimestamp(last_sync_timestamp).strftime('%Y-%m-%d')
 
         while has_more:
-            payload = {
-                "filter": {
-                    "and": [
-                        {
-                            "property": "For Search",
-                            "formula": {
-                                "checkbox": {
-                                    "equals": True
-                                }
-                            }
-                        },
-                        {
-                            "timestamp": "last_edited_time",
-                            "last_edited_time": {
-                                "on_or_after": last_sync_date
-                            }
-                        }
-                    ]
-                },
-                "page_size": 100
+            timestamp_filter = {
+                "timestamp": "last_edited_time",
+                "last_edited_time": {"on_or_after": last_sync_date}
             }
+            if use_for_search:
+                payload = {
+                    "filter": {
+                        "and": [
+                            {
+                                "property": "For Search",
+                                "formula": {"checkbox": {"equals": True}}
+                            },
+                            timestamp_filter
+                        ]
+                    },
+                    "page_size": 100
+                }
+            else:
+                payload = {
+                    "filter": timestamp_filter,
+                    "page_size": 100
+                }
 
             if start_cursor:
                 payload["start_cursor"] = start_cursor

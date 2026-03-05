@@ -14,3 +14,5 @@ readme for ankiweb.md
 
 # Optional: Ignore node_modules, if relevant to the project
 node_modules/
+
+test.py

@@ -12,6 +12,7 @@ from typing import List, Dict, Tuple, Optional
 import re
 from ..config import DATABASE_PROPERTIES, get_database_id
 from ..cache_updater import perform_cache_update
+from ..extra_sync import build_extra_synced_content
 from ..tag_utils import parse_tag, normalize_subtag_for_matching
 try:
     from ..ui.styles import apply_malleus_style, make_header, COLORS
@@ -640,7 +641,12 @@ def update_subject_tags_for_browser(browser, notion_cache, config):
             if yield_tag:
                 final_tags.append(yield_tag)
 
-        if set(final_tags) != set(current_tags):
+        # Always update Extra (Synced) — tags or SE content may have changed
+        _content = build_extra_synced_content(list(final_tags), notion_cache)
+        if _content and 'Extra (Synced)' in note:
+            note['Extra (Synced)'] = _content
+
+        if set(final_tags) != set(current_tags) or _content:
             note.tags = final_tags
             note.flush()
             notes_modified += 1

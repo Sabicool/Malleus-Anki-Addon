@@ -16,6 +16,7 @@ import anki.notes
 from ..config import DATABASE_PROPERTIES, get_database_id, get_database_name
 from ..utils import open_browser_with_search
 from ..cache_updater import perform_cache_update
+from ..extra_sync import build_extra_synced_content
 from .tag_selection_dialog import TagSelectionDialog
 try:
     from .styles import apply_malleus_style, make_header, COLORS
@@ -298,6 +299,7 @@ class NotionPageSelector(QDialog):
         paeds_layout.addWidget(paeds_separator)
 
         paeds_layout.addSpacing(6)
+        
         paeds_question = QLabel("Is this a card on paediatrics?")
         paeds_question.setWordWrap(True)
         paeds_layout.addWidget(paeds_question)
@@ -378,10 +380,10 @@ class NotionPageSelector(QDialog):
         # Donate button — unobtrusive, coffee-toned outline style
         donate_button = QPushButton("🫶 Support")
         donate_button.setObjectName("donate")
-        donate_button.setToolTip("Support Malleus on Buy Me a Coffee")
+        donate_button.setToolTip("Support Malleus on Paypal")
         donate_button.clicked.connect(
             lambda: QDesktopServices.openUrl(
-                QUrl("https://buymeacoffee.com/projectmalleus")
+                QUrl("https://www.paypal.com/donate/?hosted_button_id=9VM7MHMMK5JJJ")
             )
         )
         button_layout.addWidget(donate_button)
@@ -794,9 +796,35 @@ class NotionPageSelector(QDialog):
             if unique_sources:
                 note['fields']['Source'] = '<br>'.join(unique_sources)
 
-        # Open add cards dialog
+        # Open add cards dialog first, then async-populate Extra (Synced)
         self.guiAddCards(note)
+
+        # After dialog opens, populate Extra (Synced) in background (Subjects only)
+        if self.database_selector.currentText() == "Subjects":
+            self._async_update_extra_synced(all_tags)
         # self.accept()
+
+    def _schedule_extra_synced(self, anki_note, notion_cache):
+        """Update Extra (Synced) from local Synced Extra cache (instant, no network)."""
+        from ..extra_sync import set_extra_synced_on_note
+        set_extra_synced_on_note(anki_note, notion_cache)
+
+    def _async_update_extra_synced(self, tags):
+        """Update Extra (Synced) for a new AddCards note from local cache (instant)."""
+        from ..extra_sync import build_extra_synced_content
+        from aqt import dialogs
+        content = build_extra_synced_content(tags, self.notion_cache)
+        if not content:
+            return
+        try:
+            ac = dialogs._dialogs.get('AddCards', [None, None])[1]
+            if ac and hasattr(ac, 'editor') and ac.editor.note:
+                note = ac.editor.note
+                if 'Extra (Synced)' in note:
+                    note['Extra (Synced)'] = content
+                    ac.editor.loadNote()
+        except Exception as e:
+            print(f"[ExtraSync] Error applying content: {e}")
 
     def guiAddCards(self, note):
         collection = mw.col
@@ -812,6 +840,15 @@ class NotionPageSelector(QDialog):
                 current_tags = current_note.tags
                 current_tags.extend(note['tags'])
                 current_note.tags = list(set(current_tags))  # Remove duplicates
+
+            # Apply any pre-built fields (e.g. Extra (Synced), Source) from note dict
+            if 'fields' in note:
+                for name, value in note['fields'].items():
+                    try:
+                        if current_note[name] is not None:
+                            current_note[name] = value
+                    except Exception:
+                        pass
 
             # Refresh the editor to show the new tags
             try:
@@ -1060,6 +1097,9 @@ class NotionPageSelector(QDialog):
                 remaining_tags = [tag for tag in current_tags if tag not in tags_to_remove]
                 note.tags = remaining_tags
 
+                # Update Extra (Synced) to reflect removed tags
+                self._schedule_extra_synced(note, self.notion_cache)
+
                 # Only flush if not in AddCards dialog
                 if not is_add_cards:
                     note.flush()
@@ -1216,6 +1256,9 @@ class NotionPageSelector(QDialog):
             # Update the note
             note.tags = combined_tags
 
+            # Populate Extra (Synced) field from SE array (async)
+            self._schedule_extra_synced(note, self.notion_cache)
+
             # Only flush if not in AddCards dialog
             if not is_add_cards:
                 note.flush()
@@ -1275,6 +1318,9 @@ class NotionPageSelector(QDialog):
 
             # Update the note
             note.tags = final_tags
+
+            # Update Extra (Synced) to reflect new yield/tags
+            self._schedule_extra_synced(note, self.notion_cache)
 
             # Only flush if not in AddCards dialog
             if not is_add_cards:
@@ -1365,6 +1411,9 @@ class NotionPageSelector(QDialog):
 
         # Update the note
         note.tags = combined_tags
+
+        # Populate Extra (Synced) field from SE array (async)
+        self._schedule_extra_synced(note, self.notion_cache)
 
         # Only flush if not in AddCards dialog
         parent = self.parent()
@@ -1685,6 +1734,9 @@ class NotionPageSelector(QDialog):
 
         # Update note
         note.tags = final_tags
+
+        # Populate Extra (Synced) field from SE array (async)
+        self._schedule_extra_synced(note, self.notion_cache)
 
         # Only flush if not in AddCards dialog
         if not is_add_cards:
