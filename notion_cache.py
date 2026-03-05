@@ -171,7 +171,11 @@ class NotionCache:
                 cached_pages, last_sync_timestamp = self.load_from_cache(database_id, warn_if_expired=False)
                 use_fs = (database_id != SYNCED_EXTRA_DATABASE_ID)
                 pages = self.fetch_updated_pages(database_id, last_sync_timestamp, use_for_search=use_fs)
-                
+
+                # For Synced Extra, fetch block content and embed as _block_html
+                if pages and database_id == SYNCED_EXTRA_DATABASE_ID:
+                    pages = self.fetch_and_embed_blocks(pages)
+
                 if pages:
                     self.save_to_cache(database_id, pages)
                     mw.taskman.run_on_main(lambda: tooltip(f"{database_name} database updated"))
@@ -257,6 +261,158 @@ class NotionCache:
                 break
 
         print(f"Found {len(pages)} updated pages")
+        return pages
+
+    def fetch_blocks(self, page_id: str) -> List[Dict]:
+        """Fetch all block children for a page, handling pagination and table rows."""
+        blocks = []
+        url = f"https://api.notion.com/v1/blocks/{page_id}/children"
+        params = {"page_size": 100}
+
+        while url:
+            try:
+                response = requests.get(
+                    url, headers=self.headers, params=params,
+                    timeout=self.REQUEST_TIMEOUT
+                )
+                response.raise_for_status()
+                data = response.json()
+            except Exception as e:
+                print(f"Error fetching blocks for {page_id}: {e}")
+                break
+
+            for block in data.get("results", []):
+                blocks.append(block)
+                # Fetch table row children inline
+                if block.get("type") == "table" and block.get("has_children"):
+                    try:
+                        row_resp = requests.get(
+                            f"https://api.notion.com/v1/blocks/{block['id']}/children",
+                            headers=self.headers,
+                            params={"page_size": 100},
+                            timeout=self.REQUEST_TIMEOUT
+                        )
+                        row_resp.raise_for_status()
+                        blocks.extend(row_resp.json().get("results", []))
+                    except Exception as e:
+                        print(f"Error fetching table rows for {block['id']}: {e}")
+
+            if data.get("has_more") and data.get("next_cursor"):
+                params = {"page_size": 100, "start_cursor": data["next_cursor"]}
+            else:
+                break
+
+        return blocks
+
+    def blocks_to_html(self, blocks: List[Dict]) -> str:
+        """Convert a flat list of Notion block dicts to HTML."""
+        parts = []
+        list_type = None
+
+        def close_list():
+            nonlocal list_type
+            if list_type:
+                parts.append(f"</{list_type}>")
+                list_type = None
+
+        def rich_text_to_html(rich_texts):
+            html = ""
+            for rt in rich_texts:
+                text = rt.get("plain_text", "")
+                if not text:
+                    continue
+                ann = rt.get("annotations", {})
+                if ann.get("bold"):          text = f"<strong>{text}</strong>"
+                if ann.get("italic"):        text = f"<em>{text}</em>"
+                if ann.get("underline"):     text = f"<u>{text}</u>"
+                if ann.get("strikethrough"): text = f"<s>{text}</s>"
+                if ann.get("code"):          text = f"<code>{text}</code>"
+                link = (rt.get("href") or (rt.get("text") or {}).get("link") or {})
+                if isinstance(link, dict) and link.get("url"):
+                    text = f'<a href="{link["url"]}">{text}</a>'
+                html += text
+            return html
+
+        for block in blocks:
+            btype = block.get("type", "")
+            data  = block.get(btype, {})
+            rt    = data.get("rich_text", [])
+
+            if btype == "bulleted_list_item":
+                if list_type != "ul":
+                    close_list()
+                    parts.append("<ul>")
+                    list_type = "ul"
+                parts.append(f"<li>{rich_text_to_html(rt)}</li>")
+
+            elif btype == "numbered_list_item":
+                if list_type != "ol":
+                    close_list()
+                    parts.append("<ol>")
+                    list_type = "ol"
+                parts.append(f"<li>{rich_text_to_html(rt)}</li>")
+
+            else:
+                close_list()
+                if btype == "paragraph":
+                    inner = rich_text_to_html(rt)
+                    if inner.strip():
+                        parts.append(f"<p>{inner}</p>")
+                elif btype in ("heading_1", "heading_2", "heading_3"):
+                    level = btype[-1]
+                    parts.append(f"<h{level}>{rich_text_to_html(rt)}</h{level}>")
+                elif btype in ("callout", "quote"):
+                    parts.append(f"<blockquote>{rich_text_to_html(rt)}</blockquote>")
+                elif btype == "code":
+                    lang = data.get("language", "")
+                    parts.append(f'<pre><code class="{lang}">{rich_text_to_html(rt)}</code></pre>')
+                elif btype == "divider":
+                    parts.append("<hr>")
+                elif btype == "image":
+                    url = (data.get("file") or data.get("external") or {}).get("url", "")
+                    caption = rich_text_to_html(data.get("caption", []))
+                    if url:
+                        parts.append(f'<figure><img src="{url}"><figcaption>{caption}</figcaption></figure>')
+                elif btype == "table_row":
+                    cells = data.get("cells", [])
+                    row_html = "".join(f"<td>{rich_text_to_html(cell)}</td>" for cell in cells)
+                    parts.append(f"<tr>{row_html}</tr>")
+                elif btype == "table":
+                    parts.append("<table>")  # rows follow as subsequent blocks
+
+        close_list()
+
+        # Wrap table rows in tbody tags
+        result = []
+        in_table = False
+        for part in parts:
+            if part == "<table>":
+                in_table = True
+                result.append("<table><tbody>")
+            elif in_table and not part.startswith("<tr>"):
+                result.append("</tbody></table>")
+                in_table = False
+                result.append(part)
+            else:
+                result.append(part)
+        if in_table:
+            result.append("</tbody></table>")
+        return "\n".join(result)
+
+    def fetch_and_embed_blocks(self, pages: List[Dict]) -> List[Dict]:
+        """For each page in a Synced Extra result set, fetch blocks and embed as _block_html."""
+        for page in pages:
+            page_id = page.get("id")
+            if not page_id:
+                continue
+            try:
+                blocks = self.fetch_blocks(page_id)
+                html = self.blocks_to_html(blocks).strip()
+                if html:
+                    page["_block_html"] = html
+                    print(f"[NotionCache] Embedded block HTML for {page_id} ({len(html)} chars)")
+            except Exception as e:
+                print(f"[NotionCache] Error fetching blocks for {page_id}: {e}")
         return pages
 
     def filter_pages(self, pages: List[Dict], search_term: str) -> List[Dict]:

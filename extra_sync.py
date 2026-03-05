@@ -106,9 +106,11 @@ def _find_content_in_cache(se_pages: List[Dict], subject_page_id: str, raw_subta
             if nl not in subtag_name and subtag_name not in nl:
                 continue
 
-        # Extract Content
-        content_segs = props.get('Content', {}).get('rich_text', [])
-        content = ''.join(seg.get('plain_text', '') for seg in content_segs).strip()
+        # Prefer block HTML (WYSIWYG page body) over Content property
+        content = page.get('_block_html', '').strip()
+        if not content:
+            content_segs = props.get('Content', {}).get('rich_text', [])
+            content = ''.join(seg.get('plain_text', '') for seg in content_segs).strip()
         if content:
             return content
 
