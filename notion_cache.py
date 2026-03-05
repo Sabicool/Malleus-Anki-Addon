@@ -318,6 +318,12 @@ class NotionCache:
         def rich_text_to_html(rich_texts):
             html = ""
             for rt in rich_texts:
+                rt_type = rt.get("type", "text")
+                # Inline equation: wrap in anki-mathjax
+                if rt_type == "equation":
+                    expr = rt.get("equation", {}).get("expression", rt.get("plain_text", ""))
+                    html += f"<anki-mathjax>{expr}</anki-mathjax>"
+                    continue
                 text = rt.get("plain_text", "")
                 if not text:
                     continue
@@ -365,7 +371,12 @@ class NotionCache:
                     parts.append(f"<blockquote>{rich_text_to_html(rt)}</blockquote>")
                 elif btype == "code":
                     lang = data.get("language", "")
-                    parts.append(f'<pre><code class="{lang}">{rich_text_to_html(rt)}</code></pre>')
+                    if lang.lower() == "html":
+                        # Raw HTML passthrough — write content verbatim
+                        raw = "".join(seg.get("plain_text", "") for seg in rt)
+                        parts.append(raw)
+                    else:
+                        parts.append(f'<pre><code class="{lang}">{rich_text_to_html(rt)}</code></pre>')
                 elif btype == "divider":
                     parts.append("<hr>")
                 elif btype == "image":
@@ -377,6 +388,10 @@ class NotionCache:
                     cells = data.get("cells", [])
                     row_html = "".join(f"<td>{rich_text_to_html(cell)}</td>" for cell in cells)
                     parts.append(f"<tr>{row_html}</tr>")
+                elif btype == "equation":
+                    expr = data.get("expression", "")
+                    if expr:
+                        parts.append(f'<div><anki-mathjax block="true">{expr}</anki-mathjax><br></div>')
                 elif btype == "table":
                     parts.append("<table>")  # rows follow as subsequent blocks
 

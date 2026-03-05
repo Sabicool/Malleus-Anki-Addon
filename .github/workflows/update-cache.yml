@@ -81,6 +81,12 @@ jobs:
             """Convert a Notion rich_text array to an HTML string."""
             html = ""
             for rt in rich_texts:
+                rt_type = rt.get("type", "text")
+                # Inline equation: wrap in anki-mathjax
+                if rt_type == "equation":
+                    expr = rt.get("equation", {}).get("expression", rt.get("plain_text", ""))
+                    html += f"<anki-mathjax>{expr}</anki-mathjax>"
+                    continue
                 text = rt.get("plain_text", "")
                 if not text:
                     continue
@@ -148,7 +154,12 @@ jobs:
 
                     elif btype == "code":
                         lang = data.get("language", "")
-                        parts.append(f'<pre><code class="{lang}">{rich_text_to_html(rt)}</code></pre>')
+                        if lang.lower() == "html":
+                            # Raw HTML passthrough — write content verbatim
+                            raw = "".join(seg.get("plain_text", "") for seg in rt)
+                            parts.append(raw)
+                        else:
+                            parts.append(f'<pre><code class="{lang}">{rich_text_to_html(rt)}</code></pre>')
 
                     elif btype == "divider":
                         parts.append("<hr>")
@@ -158,6 +169,11 @@ jobs:
                         caption = rich_text_to_html(data.get("caption", []))
                         if url:
                             parts.append(f'<figure><img src="{url}" alt="{caption}"><figcaption>{caption}</figcaption></figure>')
+
+                    elif btype == "equation":
+                        expr = data.get("expression", "")
+                        if expr:
+                            parts.append(f'<div><anki-mathjax block="true">{expr}</anki-mathjax><br></div>')
 
                     elif btype == "table":
                         # Table rows are child blocks — handled inline below via has_children
