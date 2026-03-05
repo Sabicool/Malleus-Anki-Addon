@@ -73,10 +73,45 @@ def _load_synced_extra_cache(notion_cache) -> List[Dict]:
         return []
 
 
+def _parse_compound_subtag(compound: str) -> List[str]:
+    """
+    Parse a compound SE Subtag value like "Clinical Features Management"
+    into individual known subtag names by greedily matching against _SUBJECTS_SUBTAGS.
+
+    Examples:
+        "Clinical Features Management"  → ["Clinical Features", "Management"]
+        "Clinical Features"             → ["Clinical Features"]
+        "Diagnosis/Investigations"      → ["Diagnosis/Investigations"]
+    """
+    remaining = compound.strip()
+    found = []
+
+    # Sort longest first so "Diagnosis/Investigations" matches before "Diagnosis"
+    candidates = sorted(_SUBJECTS_SUBTAGS, key=len, reverse=True)
+
+    while remaining:
+        matched = False
+        for candidate in candidates:
+            if remaining.lower().startswith(candidate.lower()):
+                found.append(candidate)
+                remaining = remaining[len(candidate):].strip()
+                matched = True
+                break
+        if not matched:
+            # Skip one word and keep trying (handles unknown words)
+            parts = remaining.split(' ', 1)
+            remaining = parts[1].strip() if len(parts) > 1 else ''
+
+    return found if found else [compound]
+
+
 def _find_content_in_cache(se_pages: List[Dict], subject_page_id: str, raw_subtag: str) -> Optional[str]:
     """
     Find matching Content from Synced Extra cache pages.
-    Matches on Subject relation containing subject_page_id AND Subtag == raw_subtag.
+    Matches on Subject relation containing subject_page_id AND Subtag covers raw_subtag.
+
+    The SE Subtag field may be a compound value like "Clinical Features Management"
+    meaning the entry applies to cards with either subtag.
     """
     if not raw_subtag or raw_subtag.startswith('*'):
         normalised_subtag = "Main Tag"
@@ -99,12 +134,12 @@ def _find_content_in_cache(se_pages: List[Dict], subject_page_id: str, raw_subta
         if target_id not in relation_ids:
             continue
 
-        # Check Subtag match
-        subtag_name = (props.get('Subtag', {}).get('select') or {}).get('name', '').lower().strip()
-        if subtag_name != nl:
-            # Partial fallback
-            if nl not in subtag_name and subtag_name not in nl:
-                continue
+        # Check Subtag match — supports compound subtags like "Clinical Features Management"
+        raw_se_subtag = (props.get('Subtag', {}).get('select') or {}).get('name', '').strip()
+        parsed_subtags = [s.lower() for s in _parse_compound_subtag(raw_se_subtag)]
+
+        if nl not in parsed_subtags:
+            continue
 
         # Prefer block HTML (WYSIWYG page body) over Content property
         content = page.get('_block_html', '').strip()
