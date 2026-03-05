@@ -66,20 +66,161 @@ jobs:
             })
             retry = Retry(
                 total=5,
-                backoff_factor=2,          # 2, 4, 8, 16, 32 s between retries
+                backoff_factor=2,
                 status_forcelist=[429, 500, 502, 503, 504],
-                allowed_methods=["POST"],
+                allowed_methods=["POST", "GET"],
                 raise_on_status=False,
             )
             adapter = HTTPAdapter(max_retries=retry)
             session.mount("https://", adapter)
             return session
 
+        # ── Block → HTML converter ────────────────────────────────────────────
+
+        def rich_text_to_html(rich_texts: list) -> str:
+            """Convert a Notion rich_text array to an HTML string."""
+            html = ""
+            for rt in rich_texts:
+                text = rt.get("plain_text", "")
+                if not text:
+                    continue
+                ann = rt.get("annotations", {})
+                if ann.get("bold"):        text = f"<strong>{text}</strong>"
+                if ann.get("italic"):      text = f"<em>{text}</em>"
+                if ann.get("underline"):   text = f"<u>{text}</u>"
+                if ann.get("strikethrough"): text = f"<s>{text}</s>"
+                if ann.get("code"):        text = f"<code>{text}</code>"
+                link = (rt.get("href") or (rt.get("text") or {}).get("link") or {})
+                if isinstance(link, dict) and link.get("url"):
+                    text = f'<a href="{link["url"]}">{text}</a>'
+                html += text
+            return html
+
+        def blocks_to_html(blocks: list) -> str:
+            """Convert a flat list of Notion block dicts to HTML."""
+            parts = []
+            list_type = None   # "ul" or "ol" — track open list
+
+            def close_list():
+                nonlocal list_type
+                if list_type:
+                    parts.append(f"</{list_type}>")
+                    list_type = None
+
+            for block in blocks:
+                btype = block.get("type", "")
+                data  = block.get(btype, {})
+                rt    = data.get("rich_text", [])
+
+                # Bullet list
+                if btype == "bulleted_list_item":
+                    if list_type != "ul":
+                        close_list()
+                        parts.append("<ul>")
+                        list_type = "ul"
+                    parts.append(f"<li>{rich_text_to_html(rt)}</li>")
+
+                # Numbered list
+                elif btype == "numbered_list_item":
+                    if list_type != "ol":
+                        close_list()
+                        parts.append("<ol>")
+                        list_type = "ol"
+                    parts.append(f"<li>{rich_text_to_html(rt)}</li>")
+
+                else:
+                    close_list()
+
+                    if btype == "paragraph":
+                        inner = rich_text_to_html(rt)
+                        if inner.strip():
+                            parts.append(f"<p>{inner}</p>")
+
+                    elif btype in ("heading_1", "heading_2", "heading_3"):
+                        level = btype[-1]
+                        parts.append(f"<h{level}>{rich_text_to_html(rt)}</h{level}>")
+
+                    elif btype == "callout":
+                        parts.append(f"<blockquote>{rich_text_to_html(rt)}</blockquote>")
+
+                    elif btype == "quote":
+                        parts.append(f"<blockquote>{rich_text_to_html(rt)}</blockquote>")
+
+                    elif btype == "code":
+                        lang = data.get("language", "")
+                        parts.append(f'<pre><code class="{lang}">{rich_text_to_html(rt)}</code></pre>')
+
+                    elif btype == "divider":
+                        parts.append("<hr>")
+
+                    elif btype == "image":
+                        url = (data.get("file") or data.get("external") or {}).get("url", "")
+                        caption = rich_text_to_html(data.get("caption", []))
+                        if url:
+                            parts.append(f'<figure><img src="{url}" alt="{caption}"><figcaption>{caption}</figcaption></figure>')
+
+                    elif btype == "table":
+                        # Table rows are child blocks — handled inline below via has_children
+                        pass
+
+                    elif btype == "table_row":
+                        cells = data.get("cells", [])
+                        row_html = "".join(
+                            f"<td>{rich_text_to_html(cell)}</td>" for cell in cells
+                        )
+                        parts.append(f"<tr>{row_html}</tr>")
+
+            close_list()
+            return "\n".join(parts)
+
+        # ── NotionCache ───────────────────────────────────────────────────────
+
         class NotionCache:
             def __init__(self):
                 self.cache_dir = Path("cache")
                 self.cache_dir.mkdir(exist_ok=True)
                 self.session = make_session()
+
+            def get(self, url: str) -> dict:
+                for attempt in range(1, 6):
+                    try:
+                        r = self.session.get(url, timeout=TIMEOUT)
+                        r.raise_for_status()
+                        return r.json()
+                    except Exception as e:
+                        print(f"  GET attempt {attempt}/5 failed: {type(e).__name__}: {e}")
+                        if attempt < 5:
+                            time.sleep(2 ** attempt)
+                        else:
+                            raise
+
+            def fetch_blocks(self, page_id: str) -> list:
+                """Fetch all block children for a page, handling pagination."""
+                blocks = []
+                url = f"https://api.notion.com/v1/blocks/{page_id}/children?page_size=100"
+                while url:
+                    data = self.get(url)
+                    results = data.get("results", [])
+
+                    # For table blocks, fetch their row children inline
+                    for block in results:
+                        if block.get("type") == "table" and block.get("has_children"):
+                            table_id = block["id"]
+                            row_url = f"https://api.notion.com/v1/blocks/{table_id}/children?page_size=100"
+                            row_data = self.get(row_url)
+                            results_with_rows = []
+                            results_with_rows.append(block)
+                            results_with_rows.extend(row_data.get("results", []))
+                            blocks.extend(results_with_rows)
+                        else:
+                            blocks.append(block)
+
+                    if data.get("has_more") and data.get("next_cursor"):
+                        cursor = data["next_cursor"]
+                        url = f"https://api.notion.com/v1/blocks/{page_id}/children?page_size=100&start_cursor={cursor}"
+                    else:
+                        url = None
+                return blocks
 
             def fetch_pages_batch(self, database_id: str, start_cursor: str = None, use_for_search: bool = True) -> dict:
                 if use_for_search:
@@ -116,6 +257,7 @@ jobs:
 
             def update_cache(self, database_id: str):
                 use_for_search = database_id in USES_FOR_SEARCH
+                is_synced_extra = (database_id == SYNCED_EXTRA_DATABASE_ID)
                 pages = []
                 has_more = True
                 start_cursor = None
@@ -130,7 +272,23 @@ jobs:
                     start_cursor = data.get('next_cursor')
                     print(f"  Batch {batch}: {len(data['results'])} pages (total: {len(pages)})")
                     if has_more:
-                        time.sleep(0.5)  # gentle rate-limit buffer between batches
+                        time.sleep(0.5)
+
+                # For Synced Extra, fetch block content and embed as HTML
+                if is_synced_extra:
+                    print(f"  Fetching block content for {len(pages)} Synced Extra pages...")
+                    for page in pages:
+                        page_id = page["id"]
+                        try:
+                            blocks = self.fetch_blocks(page_id)
+                            html = blocks_to_html(blocks).strip()
+                            if html:
+                                # Store alongside properties for easy retrieval
+                                page["_block_html"] = html
+                                print(f"    {page_id}: {len(blocks)} blocks → {len(html)} chars HTML")
+                            time.sleep(0.3)  # gentle rate limiting
+                        except Exception as e:
+                            print(f"    Warning: could not fetch blocks for {page_id}: {e}")
 
                 cache_path = self.cache_dir / f"{database_id}.json"
                 with cache_path.open('w', encoding='utf-8') as f:
