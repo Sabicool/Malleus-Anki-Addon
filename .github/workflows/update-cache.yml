@@ -44,6 +44,7 @@ jobs:
         TEXTBOOKS_DATABASE_ID    = '13d5964e68a480bfb07cf7e2f1786075'
         GUIDELINES_DATABASE_ID   = '13d5964e68a48056b40de8148dd91a06'
         SYNCED_EXTRA_DATABASE_ID = '2dc5964e68a480909c4ac1dc169b16fb'
+        SYNCED_ADDITIONAL_RESOURCES_DATABASE_ID = '31b5964e68a48023b1c1c7b23fbdec64'
 
         USES_FOR_SEARCH = {
             SUBJECT_DATABASE_ID,
@@ -77,12 +78,27 @@ jobs:
 
         # ── Block → HTML converter ────────────────────────────────────────────
 
+        _NOTION_COLORS = {
+            "gray": "color:#9b9a97", "brown": "color:#9f6b53",
+            "orange": "color:#d9730d", "yellow": "color:#cb912f",
+            "green": "color:#448361", "blue": "color:#337ea9",
+            "purple": "color:#9065b0", "pink": "color:#c14c8a", "red": "color:#d44c47",
+            "gray_background": "background-color:#f1f1ef",
+            "brown_background": "background-color:#f4eeee",
+            "orange_background": "background-color:#fbecdd",
+            "yellow_background": "background-color:#fbf3db",
+            "green_background": "background-color:#edf3ec",
+            "blue_background": "background-color:#e7f3f8",
+            "purple_background": "background-color:#f4f0f9",
+            "pink_background": "background-color:#fbe8f1",
+            "red_background": "background-color:#fde8e8",
+        }
+
         def rich_text_to_html(rich_texts: list) -> str:
             """Convert a Notion rich_text array to an HTML string."""
             html = ""
             for rt in rich_texts:
                 rt_type = rt.get("type", "text")
-                # Inline equation: wrap in anki-mathjax
                 if rt_type == "equation":
                     expr = rt.get("equation", {}).get("expression", rt.get("plain_text", ""))
                     html += f"<anki-mathjax>{expr}</anki-mathjax>"
@@ -96,6 +112,11 @@ jobs:
                 if ann.get("underline"):   text = f"<u>{text}</u>"
                 if ann.get("strikethrough"): text = f"<s>{text}</s>"
                 if ann.get("code"):        text = f"<code>{text}</code>"
+                color = ann.get("color", "default")
+                if color and color != "default":
+                    style = _NOTION_COLORS.get(color, "")
+                    if style:
+                        text = f'<span style="{style}">{text}</span>'
                 link = (rt.get("href") or (rt.get("text") or {}).get("link") or {})
                 if isinstance(link, dict) and link.get("url"):
                     text = f'<a href="{link["url"]}">{text}</a>'
@@ -134,17 +155,23 @@ jobs:
                     elif btype == "paragraph":
                         inner = rich_text_to_html(rt)
                         if inner.strip():
-                            parts.append(f"<p>{inner}</p>")
+                            color = data.get("color", "default")
+                            style = f' style="{_NOTION_COLORS[color]}"' if color != "default" and color in _NOTION_COLORS else ""
+                            parts.append(f"<p{style}>{inner}</p>")
 
                     elif btype in ("heading_1", "heading_2", "heading_3"):
                         level = btype[-1]
-                        parts.append(f"<h{level}>{rich_text_to_html(rt)}</h{level}>")
+                        color = data.get("color", "default")
+                        style = f' style="{_NOTION_COLORS[color]}"' if color != "default" and color in _NOTION_COLORS else ""
+                        parts.append(f"<h{level}{style}>{rich_text_to_html(rt)}</h{level}>")
 
                     elif btype in ("callout", "quote"):
                         inner = rich_text_to_html(rt)
                         if children:
                             inner += render_blocks(children)
-                        parts.append(f"<blockquote>{inner}</blockquote>")
+                        color = data.get("color", "default")
+                        style = f' style="{_NOTION_COLORS[color]}"' if color != "default" and color in _NOTION_COLORS else ""
+                        parts.append(f"<blockquote{style}>{inner}</blockquote>")
 
                     elif btype == "code":
                         lang = data.get("language", "")
@@ -260,7 +287,7 @@ jobs:
 
             def update_cache(self, database_id: str):
                 use_for_search = database_id in USES_FOR_SEARCH
-                is_synced_extra = (database_id == SYNCED_EXTRA_DATABASE_ID)
+                is_synced_extra = database_id in (SYNCED_EXTRA_DATABASE_ID, SYNCED_ADDITIONAL_RESOURCES_DATABASE_ID)
                 pages = []
                 has_more = True
                 start_cursor = None
@@ -279,7 +306,7 @@ jobs:
 
                 # For Synced Extra, fetch block content and embed as HTML
                 if is_synced_extra:
-                    print(f"  Fetching block content for {len(pages)} Synced Extra pages...")
+                    print(f"  Fetching block content for {len(pages)} synced pages in {database_id}...")
                     for page in pages:
                         page_id = page["id"]
                         try:
@@ -308,6 +335,7 @@ jobs:
                 (TEXTBOOKS_DATABASE_ID,    "Textbooks"),
                 (GUIDELINES_DATABASE_ID,   "Guidelines"),
                 (SYNCED_EXTRA_DATABASE_ID, "Synced Extra"),
+                (SYNCED_ADDITIONAL_RESOURCES_DATABASE_ID, "Synced Additional Resources"),
             ]
 
             for database_id, name in databases:

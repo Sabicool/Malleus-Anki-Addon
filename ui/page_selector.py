@@ -16,7 +16,7 @@ import anki.notes
 from ..config import DATABASE_PROPERTIES, get_database_id, get_database_name
 from ..utils import open_browser_with_search
 from ..cache_updater import perform_cache_update
-from ..extra_sync import build_extra_synced_content
+from ..extra_sync import build_extra_synced_content, build_additional_resources_content, set_all_synced_fields_on_note
 from .tag_selection_dialog import TagSelectionDialog
 try:
     from .styles import apply_malleus_style, make_header, COLORS
@@ -298,8 +298,6 @@ class NotionPageSelector(QDialog):
         paeds_separator.setFrameShadow(QFrame.Shadow.Sunken)
         paeds_layout.addWidget(paeds_separator)
 
-        paeds_layout.addSpacing(6)
-        
         paeds_question = QLabel("Is this a card on paediatrics?")
         paeds_question.setWordWrap(True)
         paeds_layout.addWidget(paeds_question)
@@ -378,12 +376,12 @@ class NotionPageSelector(QDialog):
         button_layout.addWidget(guidelines_button)
 
         # Donate button — unobtrusive, coffee-toned outline style
-        donate_button = QPushButton("🫶 Support")
+        donate_button = QPushButton("☕ Support")
         donate_button.setObjectName("donate")
-        donate_button.setToolTip("Support Malleus on Paypal")
+        donate_button.setToolTip("Support Malleus on Buy Me a Coffee")
         donate_button.clicked.connect(
             lambda: QDesktopServices.openUrl(
-                QUrl("https://www.paypal.com/donate/?hosted_button_id=9VM7MHMMK5JJJ")
+                QUrl("https://buymeacoffee.com/projectmalleus")
             )
         )
         button_layout.addWidget(donate_button)
@@ -805,23 +803,28 @@ class NotionPageSelector(QDialog):
         # self.accept()
 
     def _schedule_extra_synced(self, anki_note, notion_cache):
-        """Update Extra (Synced) from local Synced Extra cache (instant, no network)."""
-        from ..extra_sync import set_extra_synced_on_note
-        set_extra_synced_on_note(anki_note, notion_cache)
+        """Update all synced fields from local caches (instant, no network)."""
+        set_all_synced_fields_on_note(anki_note, notion_cache)
 
     def _async_update_extra_synced(self, tags):
-        """Update Extra (Synced) for a new AddCards note from local cache (instant)."""
-        from ..extra_sync import build_extra_synced_content
+        """Update all synced fields for a new AddCards note from local cache (instant)."""
         from aqt import dialogs
-        content = build_extra_synced_content(tags, self.notion_cache)
-        if not content:
+        extra_content      = build_extra_synced_content(tags, self.notion_cache)
+        additional_content = build_additional_resources_content(tags, self.notion_cache)
+        if not extra_content and not additional_content:
             return
         try:
             ac = dialogs._dialogs.get('AddCards', [None, None])[1]
             if ac and hasattr(ac, 'editor') and ac.editor.note:
                 note = ac.editor.note
-                if 'Extra (Synced)' in note:
-                    note['Extra (Synced)'] = content
+                changed = False
+                if extra_content and 'Extra (Synced)' in note:
+                    note['Extra (Synced)'] = extra_content
+                    changed = True
+                if additional_content and 'Additional Resources (Synced)' in note:
+                    note['Additional Resources (Synced)'] = additional_content
+                    changed = True
+                if changed:
                     ac.editor.loadNote()
         except Exception as e:
             print(f"[ExtraSync] Error applying content: {e}")

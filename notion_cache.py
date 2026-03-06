@@ -297,6 +297,23 @@ class NotionCache:
     def blocks_to_html(self, blocks: List[Dict]) -> str:
         """Convert a nested block tree (with _children keys) to HTML."""
 
+        # Notion color → CSS style mapping
+        _NOTION_COLORS = {
+            "gray": "color:#9b9a97", "brown": "color:#9f6b53",
+            "orange": "color:#d9730d", "yellow": "color:#cb912f",
+            "green": "color:#448361", "blue": "color:#337ea9",
+            "purple": "color:#9065b0", "pink": "color:#c14c8a", "red": "color:#d44c47",
+            "gray_background": "background-color:#f1f1ef",
+            "brown_background": "background-color:#f4eeee",
+            "orange_background": "background-color:#fbecdd",
+            "yellow_background": "background-color:#fbf3db",
+            "green_background": "background-color:#edf3ec",
+            "blue_background": "background-color:#e7f3f8",
+            "purple_background": "background-color:#f4f0f9",
+            "pink_background": "background-color:#fbe8f1",
+            "red_background": "background-color:#fde8e8",
+        }
+
         def rich_text_to_html(rich_texts):
             html = ""
             for rt in rich_texts:
@@ -314,6 +331,11 @@ class NotionCache:
                 if ann.get("underline"):     text = f"<u>{text}</u>"
                 if ann.get("strikethrough"): text = f"<s>{text}</s>"
                 if ann.get("code"):          text = f"<code>{text}</code>"
+                color = ann.get("color", "default")
+                if color and color != "default":
+                    style = _NOTION_COLORS.get(color, "")
+                    if style:
+                        text = f'<span style="{style}">{text}</span>'
                 link = (rt.get("href") or (rt.get("text") or {}).get("link") or {})
                 if isinstance(link, dict) and link.get("url"):
                     text = f'<a href="{link["url"]}">{text}</a>'
@@ -351,17 +373,23 @@ class NotionCache:
                 elif btype == "paragraph":
                     inner = rich_text_to_html(rt)
                     if inner.strip():
-                        parts.append(f"<p>{inner}</p>")
+                        color = data.get("color", "default")
+                        style = f' style="{_NOTION_COLORS[color]}"' if color != "default" and color in _NOTION_COLORS else ""
+                        parts.append(f"<p{style}>{inner}</p>")
 
                 elif btype in ("heading_1", "heading_2", "heading_3"):
                     level = btype[-1]
-                    parts.append(f"<h{level}>{rich_text_to_html(rt)}</h{level}>")
+                    color = data.get("color", "default")
+                    style = f' style="{_NOTION_COLORS[color]}"' if color != "default" and color in _NOTION_COLORS else ""
+                    parts.append(f"<h{level}{style}>{rich_text_to_html(rt)}</h{level}>")
 
                 elif btype in ("callout", "quote"):
                     inner = rich_text_to_html(rt)
                     if children:
                         inner += render_blocks(children)
-                    parts.append(f"<blockquote>{inner}</blockquote>")
+                    color = data.get("color", "default")
+                    style = f' style="{_NOTION_COLORS[color]}"' if color != "default" and color in _NOTION_COLORS else ""
+                    parts.append(f"<blockquote{style}>{inner}</blockquote>")
 
                 elif btype == "code":
                     lang = data.get("language", "")
