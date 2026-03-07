@@ -16,7 +16,13 @@ import anki.notes
 from ..config import DATABASE_PROPERTIES, get_database_id, get_database_name
 from ..utils import open_browser_with_search
 from ..cache_updater import perform_cache_update
-from ..extra_sync import build_extra_synced_content, build_additional_resources_content, set_all_synced_fields_on_note
+from ..extra_sync import (
+    build_additional_resources_content, set_additional_resources_on_note,
+    get_matching_se_entries, get_existing_se_ids_from_field,
+    build_field_from_selected_entries, SE_EXTRA_TAG_PREFIX,
+    SYNCED_EXTRA_DATABASE_ID, EXTRA_FIELD
+)
+from .synced_extra_dialog import SyncedExtraSelectionDialog
 from .tag_selection_dialog import TagSelectionDialog
 try:
     from .styles import apply_malleus_style, make_header, COLORS
@@ -298,6 +304,8 @@ class NotionPageSelector(QDialog):
         paeds_separator.setFrameShadow(QFrame.Shadow.Sunken)
         paeds_layout.addWidget(paeds_separator)
 
+        paeds_layout.addSpacing(6)
+
         paeds_question = QLabel("Is this a card on paediatrics?")
         paeds_question.setWordWrap(True)
         paeds_layout.addWidget(paeds_question)
@@ -376,12 +384,12 @@ class NotionPageSelector(QDialog):
         button_layout.addWidget(guidelines_button)
 
         # Donate button — unobtrusive, coffee-toned outline style
-        donate_button = QPushButton("☕ Support")
+        donate_button = QPushButton("🫶 Support")
         donate_button.setObjectName("donate")
-        donate_button.setToolTip("Support Malleus on Buy Me a Coffee")
+        donate_button.setToolTip("Support Malleus on Paypal")
         donate_button.clicked.connect(
             lambda: QDesktopServices.openUrl(
-                QUrl("https://buymeacoffee.com/projectmalleus")
+                QUrl("https://www.paypal.com/donate/?hosted_button_id=9VM7MHMMK5JJJ")
             )
         )
         button_layout.addWidget(donate_button)
@@ -802,32 +810,128 @@ class NotionPageSelector(QDialog):
             self._async_update_extra_synced(all_tags)
         # self.accept()
 
-    def _schedule_extra_synced(self, anki_note, notion_cache):
-        """Update all synced fields from local caches (instant, no network)."""
-        set_all_synced_fields_on_note(anki_note, notion_cache)
+    def _apply_extra_synced_dialog(self, anki_note, notion_cache, parent_widget=None, note_context=None):
+        """
+        Show the SE selection dialog for Extra (Synced) and update the note in place.
+        - Finds all matching SE entries for the note's current tags.
+        - Pre-checks entries already present in the field (by <!-- se:N --> marker).
+        - Builds new field content + updates SE Anki tags from user selection.
+        - If no matches exist, clears the field and removes SE tags silently.
+        Does NOT flush the note.
+        """
+        from aqt.qt import QDialog
+        if parent_widget is None:
+            parent_widget = self
+
+        # 1. Check field exists
+        try:
+            current_field = anki_note[EXTRA_FIELD]
+        except Exception:
+            return  # field not in note type
+
+        # 2. Find all matching entries
+        entries = get_matching_se_entries(list(anki_note.tags), notion_cache, SYNCED_EXTRA_DATABASE_ID)
+
+        # 3. No matches — clear field and remove SE tags
+        if not entries:
+            existing_se_ids = get_existing_se_ids_from_field(current_field)
+            if existing_se_ids or current_field.strip():
+                anki_note[EXTRA_FIELD] = ""
+                anki_note.tags = [t for t in anki_note.tags
+                                  if not t.startswith(SE_EXTRA_TAG_PREFIX)]
+            return
+
+        # 4. Determine which entries are already in the field
+        existing_se_ids = get_existing_se_ids_from_field(current_field)
+
+        # 5. Show dialog
+        dialog = SyncedExtraSelectionDialog(
+            parent_widget, entries, existing_se_ids, note_context=note_context
+        )
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return  # user cancelled — leave field unchanged
+
+        selected = dialog.get_selected_entries()
+
+        # 6. Build new field content
+        anki_note[EXTRA_FIELD] = build_field_from_selected_entries(selected)
+
+        # 7. Sync SE Anki tags: strip all, re-add for selected entries only
+        base_tags = [t for t in anki_note.tags if not t.startswith(SE_EXTRA_TAG_PREFIX)]
+        for entry in selected:
+            if entry.get("tag"):
+                base_tags.append(entry["tag"])
+        anki_note.tags = list(set(base_tags))
+
+    def _schedule_extra_synced(self, anki_note, notion_cache, subjects_db=True):
+        """
+        Update both synced fields:
+        - Extra (Synced): dialog-driven when subjects_db=True, skipped otherwise.
+        - Additional Resources (Synced): always auto-populated silently.
+        Does NOT flush the note.
+        """
+        # Additional Resources always auto-populates without a dialog
+        set_additional_resources_on_note(anki_note, notion_cache)
+
+        # Extra (Synced) only when we're operating on the Subjects database
+        if subjects_db:
+            # Extract note context for display in the dialog (helps in batch operations)
+            note_context = None
+            try:
+                note_context = anki_note['Text'] or None
+            except Exception:
+                pass
+            self._apply_extra_synced_dialog(
+                anki_note, notion_cache,
+                parent_widget=self,
+                note_context=note_context
+            )
 
     def _async_update_extra_synced(self, tags):
-        """Update all synced fields for a new AddCards note from local cache (instant)."""
+        """
+        Called after Create Cards opens the AddCards dialog.
+        Shows the SE selection dialog for Extra (Synced) and auto-fills
+        Additional Resources (Synced). Runs synchronously on the main thread.
+        """
         from aqt import dialogs
-        extra_content      = build_extra_synced_content(tags, self.notion_cache)
-        additional_content = build_additional_resources_content(tags, self.notion_cache)
-        if not extra_content and not additional_content:
-            return
+        from aqt.qt import QDialog
         try:
             ac = dialogs._dialogs.get('AddCards', [None, None])[1]
-            if ac and hasattr(ac, 'editor') and ac.editor.note:
-                note = ac.editor.note
-                changed = False
-                if extra_content and 'Extra (Synced)' in note:
-                    note['Extra (Synced)'] = extra_content
+            if not (ac and hasattr(ac, 'editor') and ac.editor.note):
+                return
+            note = ac.editor.note
+            changed = False
+
+            # Additional Resources — auto
+            additional = build_additional_resources_content(tags, self.notion_cache)
+            if additional and 'Additional Resources (Synced)' in note:
+                note['Additional Resources (Synced)'] = additional
+                changed = True
+
+            # Extra (Synced) — dialog
+            entries = get_matching_se_entries(tags, self.notion_cache, SYNCED_EXTRA_DATABASE_ID)
+            if entries:
+                try:
+                    current_field = note[EXTRA_FIELD]
+                except Exception:
+                    current_field = ''
+                existing_se_ids = get_existing_se_ids_from_field(current_field)
+                dlg = SyncedExtraSelectionDialog(ac, entries, existing_se_ids)
+                if dlg.exec() == QDialog.DialogCode.Accepted:
+                    selected = dlg.get_selected_entries()
+                    if 'Extra (Synced)' in note:
+                        note[EXTRA_FIELD] = build_field_from_selected_entries(selected)
+                    base_tags = [t for t in note.tags if not t.startswith(SE_EXTRA_TAG_PREFIX)]
+                    for entry in selected:
+                        if entry.get('tag'):
+                            base_tags.append(entry['tag'])
+                    note.tags = list(set(base_tags))
                     changed = True
-                if additional_content and 'Additional Resources (Synced)' in note:
-                    note['Additional Resources (Synced)'] = additional_content
-                    changed = True
-                if changed:
-                    ac.editor.loadNote()
+
+            if changed:
+                ac.editor.loadNote()
         except Exception as e:
-            print(f"[ExtraSync] Error applying content: {e}")
+            print(f"[ExtraSync] Error in _async_update_extra_synced: {e}")
 
     def guiAddCards(self, note):
         collection = mw.col
@@ -1101,7 +1205,10 @@ class NotionPageSelector(QDialog):
                 note.tags = remaining_tags
 
                 # Update Extra (Synced) to reflect removed tags
-                self._schedule_extra_synced(note, self.notion_cache)
+                self._schedule_extra_synced(
+                    note, self.notion_cache,
+                    subjects_db=(database_name == "Subjects")
+                )
 
                 # Only flush if not in AddCards dialog
                 if not is_add_cards:
@@ -1259,8 +1366,11 @@ class NotionPageSelector(QDialog):
             # Update the note
             note.tags = combined_tags
 
-            # Populate Extra (Synced) field from SE array (async)
-            self._schedule_extra_synced(note, self.notion_cache)
+            # Populate Extra (Synced) field from SE array
+            self._schedule_extra_synced(
+                note, self.notion_cache,
+                subjects_db=(self.database_selector.currentText() == "Subjects")
+            )
 
             # Only flush if not in AddCards dialog
             if not is_add_cards:
@@ -1322,8 +1432,8 @@ class NotionPageSelector(QDialog):
             # Update the note
             note.tags = final_tags
 
-            # Update Extra (Synced) to reflect new yield/tags
-            self._schedule_extra_synced(note, self.notion_cache)
+            # Update Additional Resources only (yield change doesn't affect SE matching)
+            self._schedule_extra_synced(note, self.notion_cache, subjects_db=False)
 
             # Only flush if not in AddCards dialog
             if not is_add_cards:
@@ -1415,8 +1525,11 @@ class NotionPageSelector(QDialog):
         # Update the note
         note.tags = combined_tags
 
-        # Populate Extra (Synced) field from SE array (async)
-        self._schedule_extra_synced(note, self.notion_cache)
+        # Populate Extra (Synced) field from SE array
+        self._schedule_extra_synced(
+            note, self.notion_cache,
+            subjects_db=(self.database_selector.currentText() == "Subjects")
+        )
 
         # Only flush if not in AddCards dialog
         parent = self.parent()
@@ -1738,8 +1851,11 @@ class NotionPageSelector(QDialog):
         # Update note
         note.tags = final_tags
 
-        # Populate Extra (Synced) field from SE array (async)
-        self._schedule_extra_synced(note, self.notion_cache)
+        # Populate Extra (Synced) field from SE array
+        self._schedule_extra_synced(
+            note, self.notion_cache,
+            subjects_db=(self.database_selector.currentText() == "Subjects")
+        )
 
         # Only flush if not in AddCards dialog
         if not is_add_cards:

@@ -3,27 +3,32 @@ Extra Sync
 Populates synced note fields from locally cached Notion databases.
 
 Currently handles two fields/databases:
-  - 'Extra (Synced)'                 ← Synced Extra database
-  - 'Additional Resources (Synced)'  ← Synced Additional Resources database
+  - 'Extra (Synced)'                 ← Synced Extra database (dialog-driven)
+  - 'Additional Resources (Synced)'  ← Synced Additional Resources database (auto)
 
 Both databases share the same schema:
   - Subject  (relation)  → one or more Subjects page IDs
   - Subtag   (select)    → e.g. "Clinical Features"
   - Content  (rich_text) → fallback HTML/text (block body is preferred)
   - ID       (unique_id) → stable numeric ID for deduplication
+  - Tag      (formula)   → Anki tag to attach when entry is selected (Extra only)
 
 No live API calls — everything reads from the local JSON cache files.
 """
 
 import re
 import unicodedata
-from typing import List, Optional, Dict, Tuple
+from typing import List, Optional, Dict, Tuple, Set
 
-from .config import get_database_id, SYNCED_EXTRA_DATABASE_ID, SYNCED_ADDITIONAL_RESOURCES_DATABASE_ID, DATABASE_PROPERTIES
+from .config import (get_database_id, SYNCED_EXTRA_DATABASE_ID,
+                     SYNCED_ADDITIONAL_RESOURCES_DATABASE_ID, DATABASE_PROPERTIES)
 from .tag_utils import parse_tag, normalize_subtag_for_matching
 
-EXTRA_FIELD               = "Extra (Synced)"
+EXTRA_FIELD                = "Extra (Synced)"
 ADDITIONAL_RESOURCES_FIELD = "Additional Resources (Synced)"
+
+# Prefix used by all SE Anki tags — used to strip/add them cleanly
+SE_EXTRA_TAG_PREFIX = "#Malleus_CM::#Card_Feature::Synced::Extra::"
 
 _SUBJECTS_SUBTAGS = [s for s in DATABASE_PROPERTIES.get("Subjects", []) if s]
 
@@ -74,12 +79,7 @@ def _load_db_cache(notion_cache, database_id: str) -> List[Dict]:
 def _parse_compound_subtag(compound: str) -> List[str]:
     """
     Parse a compound SE Subtag value like "Clinical Features Management"
-    into individual known subtag names by greedily matching against _SUBJECTS_SUBTAGS.
-
-    Examples:
-        "Clinical Features Management"  → ["Clinical Features", "Management"]
-        "Clinical Features"             → ["Clinical Features"]
-        "Diagnosis/Investigations"      → ["Diagnosis/Investigations"]
+    into individual known subtag names.
     """
     remaining = compound.strip()
     found = []
@@ -98,73 +98,90 @@ def _parse_compound_subtag(compound: str) -> List[str]:
     return found if found else [compound]
 
 
-def _find_content_in_cache(
-    se_pages: List[Dict],
-    subject_page_id: str,
-    raw_subtag: str
-) -> Optional[Tuple[str, str]]:
-    """
-    Find matching content from a synced database cache.
-    Returns (html_content, se_id_str) or None.
-
-    Matches on Subject relation containing subject_page_id AND Subtag covers
-    raw_subtag (supports compound subtags like "Clinical Features Management").
-    """
+def _normalised_subtag_label(raw_subtag: str) -> str:
+    """Convert a raw tag subtag to a normalised lowercase label for matching."""
     if not raw_subtag or raw_subtag.startswith('*'):
-        normalised_subtag = "Main Tag"
-    else:
-        normalised_subtag = normalize_subtag_for_matching(raw_subtag, _SUBJECTS_SUBTAGS) or raw_subtag
+        return "main tag"
+    ns = normalize_subtag_for_matching(raw_subtag, _SUBJECTS_SUBTAGS) or raw_subtag
+    return ns.lower().strip()
 
-    nl = normalised_subtag.lower().strip()
-    target_id = subject_page_id.replace('-', '')
 
+def _find_matching_se_pages(se_pages: List[Dict], target_id: str, nl: str) -> List[Dict]:
+    """Return all SE pages matching the given subject ID and normalised subtag label."""
+    results = []
     for page in se_pages:
         props = page.get('properties', {})
-
         relation_ids = [
             r.get('id', '').replace('-', '')
             for r in props.get('Subject', {}).get('relation', [])
         ]
         if target_id not in relation_ids:
             continue
-
         raw_se_subtag = (props.get('Subtag', {}).get('select') or {}).get('name', '').strip()
-        parsed_subtags = [s.lower() for s in _parse_compound_subtag(raw_se_subtag)]
-        if nl not in parsed_subtags:
+        parsed = [s.lower() for s in _parse_compound_subtag(raw_se_subtag)]
+        if nl not in parsed:
             continue
-
-        content = page.get('_block_html', '').strip()
-        if not content:
-            content_segs = props.get('Content', {}).get('rich_text', [])
-            content = ''.join(seg.get('plain_text', '') for seg in content_segs).strip()
-        if content:
-            se_id = props.get('ID', {}).get('unique_id', {})
-            se_id_str = str(se_id.get('number', '')) if se_id else ''
-            return (content, se_id_str)
-
-    return None
+        results.append(page)
+    return results
 
 
-# ── Generic builder ───────────────────────────────────────────────────────────
+def _page_to_entry(page: Dict) -> Optional[Dict]:
+    """Convert a raw SE cache page dict to a clean entry dict."""
+    props = page.get('properties', {})
+    content = page.get('_block_html', '').strip()
+    if not content:
+        segs = props.get('Content', {}).get('rich_text', [])
+        content = ''.join(s.get('plain_text', '') for s in segs).strip()
+    if not content:
+        return None
+    se_id_raw = props.get('ID', {}).get('unique_id', {})
+    se_id_str = str(se_id_raw.get('number', '')) if se_id_raw else ''
+    try:
+        title_list = props.get('Name', {}).get('title', [])
+        title = title_list[0]['text']['content'] if title_list else 'Untitled'
+    except Exception:
+        title = 'Untitled'
+    tag_val = props.get('Tag', {}).get('formula', {}).get('string', '')
+    return {'title': title, 'content': content, 'se_id': se_id_str, 'tag': tag_val}
 
-def _build_synced_content(tags: List[str], notion_cache, database_id: str, label: str) -> str:
+
+# ── Field helpers ─────────────────────────────────────────────────────────────
+
+def get_existing_se_ids_from_field(field_content: str) -> Set[str]:
+    """Parse <!-- se:N --> markers from a field and return the set of se_id strings."""
+    return set(re.findall(r'<!-- se:(\d+) -->', field_content or ''))
+
+
+def build_field_from_selected_entries(selected: List[Dict]) -> str:
+    """Build Extra (Synced) field HTML from a list of selected entry dicts."""
+    parts = []
+    for entry in selected:
+        se_id   = entry.get('se_id', '')
+        content = entry.get('content', '')
+        marker  = f'<!-- se:{se_id} -->' if se_id else ''
+        parts.append(marker + content)
+    return '<br>\n'.join(parts)
+
+
+# ── Public: matching entries for Extra (Synced) dialog ───────────────────────
+
+def get_matching_se_entries(tags: List[str], notion_cache, database_id: str) -> List[Dict]:
     """
-    Generic builder for any synced field backed by a database with the same schema.
-    Reads entirely from local cache — no network calls.
-    Deduplicates by ID property, falling back to content equality.
+    Return all matching SE entries for the given note tags as a list of dicts:
+      {title, content, se_id, tag}
+    Deduplicates by se_id. Used to populate the SyncedExtraSelectionDialog.
     """
     subject_tags = [t for t in tags if t.startswith("#Malleus_CM::#Subjects::")]
     if not subject_tags:
-        return ""
+        return []
 
     se_pages = _load_db_cache(notion_cache, database_id)
     if not se_pages:
-        print(f"[ExtraSync] {label} cache is empty — run 'Update Database Cache'")
-        return ""
+        return []
 
     seen_se_ids    = set()
-    seen_content   = []
-    seen_subject_ids = {}
+    results        = []
+    seen_subj_ids  = {}
 
     for tag in subject_tags:
         parsed = parse_tag(tag)
@@ -175,20 +192,81 @@ def _build_synced_content(tags: List[str], notion_cache, database_id: str, label
         if not page_name:
             continue
 
-        if page_name not in seen_subject_ids:
-            seen_subject_ids[page_name] = _find_subject_page_id(notion_cache, page_name)
-        page_id = seen_subject_ids[page_name]
-
+        if page_name not in seen_subj_ids:
+            seen_subj_ids[page_name] = _find_subject_page_id(notion_cache, page_name)
+        page_id = seen_subj_ids[page_name]
         if not page_id:
-            print(f"[ExtraSync] Subject page not found in cache: {page_name!r}")
             continue
 
-        print(f"[ExtraSync:{label}] {page_name!r} ({page_id}) subtag={raw_subtag!r}")
+        nl        = _normalised_subtag_label(raw_subtag)
+        target_id = page_id.replace('-', '')
+
+        for page in _find_matching_se_pages(se_pages, target_id, nl):
+            entry = _page_to_entry(page)
+            if not entry:
+                continue
+            se_id = entry['se_id']
+            if se_id:
+                if se_id in seen_se_ids:
+                    continue
+                seen_se_ids.add(se_id)
+            results.append(entry)
+
+    return results
+
+
+# ── Internal: auto-populate for Additional Resources ─────────────────────────
+
+def _find_content_in_cache(
+    se_pages: List[Dict], subject_page_id: str, raw_subtag: str
+) -> Optional[Tuple[str, str]]:
+    """Return (html_content, se_id_str) for the first matching SE page, or None."""
+    nl        = _normalised_subtag_label(raw_subtag)
+    target_id = subject_page_id.replace('-', '')
+    for page in _find_matching_se_pages(se_pages, target_id, nl):
+        entry = _page_to_entry(page)
+        if entry:
+            return (entry['content'], entry['se_id'])
+    return None
+
+
+def _build_synced_content(tags: List[str], notion_cache, database_id: str, label: str) -> str:
+    """
+    Auto-populate builder for databases that don't use the selection dialog
+    (currently used only for Additional Resources (Synced)).
+    """
+    subject_tags = [t for t in tags if t.startswith("#Malleus_CM::#Subjects::")]
+    if not subject_tags:
+        return ""
+
+    se_pages = _load_db_cache(notion_cache, database_id)
+    if not se_pages:
+        print(f"[ExtraSync] {label} cache is empty — run 'Update Database Cache'")
+        return ""
+
+    seen_se_ids   = set()
+    seen_content  = []
+    seen_subj_ids = {}
+
+    for tag in subject_tags:
+        parsed = parse_tag(tag)
+        if not parsed:
+            continue
+        page_name  = parsed.get('page_name')
+        raw_subtag = parsed.get('subtag')
+        if not page_name:
+            continue
+
+        if page_name not in seen_subj_ids:
+            seen_subj_ids[page_name] = _find_subject_page_id(notion_cache, page_name)
+        page_id = seen_subj_ids[page_name]
+        if not page_id:
+            continue
+
         result = _find_content_in_cache(se_pages, page_id, raw_subtag)
         if not result:
             continue
         content, se_id = result
-        print(f"[ExtraSync:{label}] matched se_id={se_id!r} ({len(content)} chars)")
 
         if se_id:
             if se_id in seen_se_ids:
@@ -206,44 +284,24 @@ def _build_synced_content(tags: List[str], notion_cache, database_id: str, label
 
 # ── Public API ────────────────────────────────────────────────────────────────
 
-def build_extra_synced_content(tags: List[str], notion_cache) -> str:
-    """Build content for 'Extra (Synced)' field."""
-    return _build_synced_content(tags, notion_cache, SYNCED_EXTRA_DATABASE_ID, "Synced Extra")
-
-
 def build_additional_resources_content(tags: List[str], notion_cache) -> str:
-    """Build content for 'Additional Resources (Synced)' field."""
-    return _build_synced_content(tags, notion_cache, SYNCED_ADDITIONAL_RESOURCES_DATABASE_ID, "Synced Additional Resources")
-
-
-def set_extra_synced_on_note(anki_note, notion_cache) -> bool:
-    """Set anki_note['Extra (Synced)'] from its current .tags."""
-    return _set_field_on_note(anki_note, notion_cache, EXTRA_FIELD, build_extra_synced_content)
+    """Build content for 'Additional Resources (Synced)' field (auto, no dialog)."""
+    return _build_synced_content(
+        tags, notion_cache,
+        SYNCED_ADDITIONAL_RESOURCES_DATABASE_ID,
+        "Synced Additional Resources"
+    )
 
 
 def set_additional_resources_on_note(anki_note, notion_cache) -> bool:
     """Set anki_note['Additional Resources (Synced)'] from its current .tags."""
-    return _set_field_on_note(anki_note, notion_cache, ADDITIONAL_RESOURCES_FIELD, build_additional_resources_content)
-
-
-def set_all_synced_fields_on_note(anki_note, notion_cache) -> None:
-    """Convenience: update both synced fields at once."""
-    set_extra_synced_on_note(anki_note, notion_cache)
-    set_additional_resources_on_note(anki_note, notion_cache)
-
-
-def _set_field_on_note(anki_note, notion_cache, field_name: str, builder_fn) -> bool:
-    """Internal: populate a single named field using the given builder function."""
     try:
-        _ = anki_note[field_name]
+        _ = anki_note[ADDITIONAL_RESOURCES_FIELD]
     except Exception:
-        print(f"[ExtraSync] Field '{field_name}' not found on note type — skipping")
+        print(f"[ExtraSync] Field '{ADDITIONAL_RESOURCES_FIELD}' not found — skipping")
         return False
-
-    new_content = builder_fn(list(anki_note.tags), notion_cache)
-    print(f"[ExtraSync] {field_name} → {new_content!r}")
-    if anki_note[field_name] == new_content:
+    new_content = build_additional_resources_content(list(anki_note.tags), notion_cache)
+    if anki_note[ADDITIONAL_RESOURCES_FIELD] == new_content:
         return False
-
-    anki_note[field_name] = new_content
+    anki_note[ADDITIONAL_RESOURCES_FIELD] = new_content
     return True

@@ -12,7 +12,13 @@ from typing import List, Dict, Tuple, Optional
 import re
 from ..config import DATABASE_PROPERTIES, get_database_id
 from ..cache_updater import perform_cache_update
-from ..extra_sync import build_extra_synced_content, build_additional_resources_content
+from ..extra_sync import (
+    build_additional_resources_content,
+    get_matching_se_entries, get_existing_se_ids_from_field,
+    build_field_from_selected_entries, SE_EXTRA_TAG_PREFIX,
+    SYNCED_EXTRA_DATABASE_ID, EXTRA_FIELD
+)
+from .synced_extra_dialog import SyncedExtraSelectionDialog
 from ..tag_utils import parse_tag, normalize_subtag_for_matching
 try:
     from ..ui.styles import apply_malleus_style, make_header, COLORS
@@ -641,15 +647,50 @@ def update_subject_tags_for_browser(browser, notion_cache, config):
             if yield_tag:
                 final_tags.append(yield_tag)
 
-        # Always update both synced fields — tags or SE content may have changed
-        _extra = build_extra_synced_content(list(final_tags), notion_cache)
-        if _extra and 'Extra (Synced)' in note:
-            note['Extra (Synced)'] = _extra
+        # ── Additional Resources (Synced) — auto-populate ───────────────────
         _additional = build_additional_resources_content(list(final_tags), notion_cache)
         if _additional and 'Additional Resources (Synced)' in note:
             note['Additional Resources (Synced)'] = _additional
 
-        if set(final_tags) != set(current_tags) or _extra or _additional:
+        # ── Extra (Synced) — selection dialog ────────────────────────────────
+        _se_changed = False
+        entries = get_matching_se_entries(list(final_tags), notion_cache, SYNCED_EXTRA_DATABASE_ID)
+        if entries:
+            try:
+                current_extra = note[EXTRA_FIELD]
+            except Exception:
+                current_extra = ''
+            existing_se_ids = get_existing_se_ids_from_field(current_extra)
+
+            se_dlg = SyncedExtraSelectionDialog(
+                browser, entries, existing_se_ids, note_context=note_context
+            )
+            from aqt.qt import QDialog
+            if se_dlg.exec() == QDialog.DialogCode.Accepted:
+                selected = se_dlg.get_selected_entries()
+                try:
+                    note[EXTRA_FIELD] = build_field_from_selected_entries(selected)
+                except Exception:
+                    pass
+                # Sync SE Anki tags
+                final_tags = [t for t in final_tags if not t.startswith(SE_EXTRA_TAG_PREFIX)]
+                for entry in selected:
+                    if entry.get('tag'):
+                        final_tags.append(entry['tag'])
+                final_tags = list(set(final_tags))
+                _se_changed = True
+            # If cancelled, leave existing Extra (Synced) content untouched
+        else:
+            # No matches — clear field and strip SE tags
+            try:
+                if note[EXTRA_FIELD].strip():
+                    note[EXTRA_FIELD] = ''
+                    _se_changed = True
+            except Exception:
+                pass
+            final_tags = [t for t in final_tags if not t.startswith(SE_EXTRA_TAG_PREFIX)]
+
+        if set(final_tags) != set(current_tags) or _additional or _se_changed:
             note.tags = final_tags
             note.flush()
             notes_modified += 1
