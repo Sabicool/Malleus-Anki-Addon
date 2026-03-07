@@ -66,7 +66,7 @@ class SyncedExtraSelectionDialog(QDialog):
         # Branded header
         header = make_header(
             title="Synced Extra Content",
-            subtitle="Select entries to include in Extra (Synced)"
+            subtitle="There is pre-filled content that can be inserted into the Extra (Synced) field. Please select the entries you think are relevant to the card to be included."
         )
         layout.addWidget(header)
 

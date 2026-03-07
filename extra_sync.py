@@ -13,6 +13,19 @@ Both databases share the same schema:
   - ID       (unique_id) → stable numeric ID for deduplication
   - Tag      (formula)   → Anki tag to attach when entry is selected (Extra only)
 
+Lookup strategy (fastest first)
+--------------------------------
+1. PRIMARY — Relation-based:  the Subjects page has a "Synced Extra" (or
+   "Synced Additional Resources") relation property pointing directly at the
+   relevant SE/AR page IDs.  We resolve those IDs against an in-memory
+   O(1) index of the SE cache.  No subtag matching needed; the author has
+   already encoded the correct links in Notion.
+
+2. FALLBACK — Tag-based:  if a subject page has no relation entries set
+   (e.g. older pages that haven't been linked yet), we fall back to the
+   original approach: scan the SE cache for entries whose Subject relation
+   contains this page's ID and whose Subtag matches the tag's subtag.
+
 No live API calls — everything reads from the local JSON cache files.
 """
 
@@ -30,6 +43,11 @@ ADDITIONAL_RESOURCES_FIELD = "Additional Resources (Synced)"
 # Prefix used by all SE Anki tags — used to strip/add them cleanly
 SE_EXTRA_TAG_PREFIX = "#Malleus_CM::#Card_Feature::Synced::Extra::"
 
+# Relation property names on the Subjects pages that point to SE/AR entries.
+# Confirmed present via probe_relations.py — update here if Notion renames them.
+SUBJECTS_SE_RELATION_PROP  = "Synced Extra"
+SUBJECTS_AR_RELATION_PROP  = "Synced Additional Resource"
+
 _SUBJECTS_SUBTAGS = [s for s in DATABASE_PROPERTIES.get("Subjects", []) if s]
 
 
@@ -44,27 +62,7 @@ def _norm(text: str) -> str:
     return text.replace('_', ' ').lower().strip()
 
 
-# ── Cache lookups ─────────────────────────────────────────────────────────────
-
-def _find_subject_page_id(notion_cache, page_name: str) -> Optional[str]:
-    """Return the Notion page ID for a Subjects page matched by title."""
-    database_id = get_database_id("Subjects")
-    try:
-        cached_pages, _ = notion_cache.load_from_cache(database_id, warn_if_expired=False)
-        if not cached_pages:
-            return None
-        target = _norm(page_name)
-        for page in cached_pages:
-            try:
-                title_list = page['properties']['Name']['title']
-                if title_list and _norm(title_list[0]['text']['content']) == target:
-                    return page.get('id')
-            except Exception:
-                continue
-    except Exception as e:
-        print(f"[ExtraSync] Subjects cache error: {e}")
-    return None
-
+# ── Cache loading & indexing ──────────────────────────────────────────────────
 
 def _load_db_cache(notion_cache, database_id: str) -> List[Dict]:
     """Load all pages from a local cache by database ID."""
@@ -75,6 +73,56 @@ def _load_db_cache(notion_cache, database_id: str) -> List[Dict]:
         print(f"[ExtraSync] Cache load error for {database_id}: {e}")
         return []
 
+
+def _build_id_index(pages: List[Dict]) -> Dict[str, Dict]:
+    """
+    Build a dict mapping normalised Notion page ID → page dict.
+    Allows O(1) lookup when we have an ID from a relation property.
+    """
+    return {p.get('id', '').replace('-', ''): p for p in pages if p.get('id')}
+
+
+def _find_subject_page(notion_cache, page_name: str) -> Optional[Dict]:
+    """
+    Return the full cached Subjects page dict matched by title.
+    We return the full page so callers can read any property from it
+    (including the Synced Extra / Synced Additional Resources relations).
+    """
+    database_id = get_database_id("Subjects")
+    try:
+        cached_pages, _ = notion_cache.load_from_cache(database_id, warn_if_expired=False)
+        if not cached_pages:
+            return None
+        target = _norm(page_name)
+        for page in cached_pages:
+            try:
+                title_list = page['properties']['Name']['title']
+                if title_list and _norm(title_list[0]['text']['content']) == target:
+                    return page
+            except Exception:
+                continue
+    except Exception as e:
+        print(f"[ExtraSync] Subjects cache error: {e}")
+    return None
+
+
+# ── Relation-based lookup (primary path) ─────────────────────────────────────
+
+def _relation_ids_from_subject(subject_page: Dict, relation_prop: str) -> List[str]:
+    """
+    Read the named relation property from a Subjects page and return
+    a list of normalised (no-hyphens) Notion page IDs.
+    """
+    relation = (
+        subject_page
+        .get('properties', {})
+        .get(relation_prop, {})
+        .get('relation', [])
+    )
+    return [r.get('id', '').replace('-', '') for r in relation if r.get('id')]
+
+
+# ── Tag/subtag matching (fallback path) ──────────────────────────────────────
 
 def _parse_compound_subtag(compound: str) -> List[str]:
     """
@@ -106,8 +154,15 @@ def _normalised_subtag_label(raw_subtag: str) -> str:
     return ns.lower().strip()
 
 
-def _find_matching_se_pages(se_pages: List[Dict], target_id: str, nl: str) -> List[Dict]:
-    """Return all SE pages matching the given subject ID and normalised subtag label."""
+def _fallback_se_pages(
+    se_pages: List[Dict],
+    target_id: str,
+    nl: str,
+) -> List[Dict]:
+    """
+    Fallback: scan se_pages for entries whose Subject relation contains
+    target_id AND whose Subtag matches the normalised subtag label nl.
+    """
     results = []
     for page in se_pages:
         props = page.get('properties', {})
@@ -124,6 +179,8 @@ def _find_matching_se_pages(se_pages: List[Dict], target_id: str, nl: str) -> Li
         results.append(page)
     return results
 
+
+# ── Entry conversion ──────────────────────────────────────────────────────────
 
 def _page_to_entry(page: Dict) -> Optional[Dict]:
     """Convert a raw SE cache page dict to a clean entry dict."""
@@ -163,13 +220,64 @@ def build_field_from_selected_entries(selected: List[Dict]) -> str:
     return '<br>\n'.join(parts)
 
 
+# ── Core lookup: one subject page → matching SE/AR entries ───────────────────
+
+def _entries_for_subject_page(
+    subject_page: Dict,
+    se_id_index: Dict[str, Dict],   # id → page dict for the SE/AR database
+    all_se_pages: List[Dict],       # flat list, for fallback scan
+    relation_prop: str,             # "Synced Extra" or "Synced Additional Resources"
+    raw_subtag: str,                # from the Anki tag, used only in fallback
+) -> List[Dict]:
+    """
+    Return entry dicts for a single subject page, preferring the relation
+    property over the legacy tag-scan fallback.
+    """
+    entries = []
+
+    # ── Primary: relation IDs ─────────────────────────────────────────────────
+    relation_ids = _relation_ids_from_subject(subject_page, relation_prop)
+    if relation_ids:
+        for rid in relation_ids:
+            se_page = se_id_index.get(rid)
+            if se_page:
+                entry = _page_to_entry(se_page)
+                if entry:
+                    entries.append(entry)
+            else:
+                print(f"[ExtraSync] Relation ID {rid!r} not found in SE cache "
+                      f"(stale cache?)")
+        # If we got at least one result from the relation, return it.
+        # Only fall through to the fallback if the relation was entirely
+        # unresolvable (all IDs missing from local cache).
+        if entries:
+            return entries
+
+    # ── Fallback: scan by subject ID + subtag ────────────────────────────────
+    page_id   = subject_page.get('id', '').replace('-', '')
+    nl        = _normalised_subtag_label(raw_subtag)
+    for page in _fallback_se_pages(all_se_pages, page_id, nl):
+        entry = _page_to_entry(page)
+        if entry:
+            entries.append(entry)
+
+    return entries
+
+
 # ── Public: matching entries for Extra (Synced) dialog ───────────────────────
 
-def get_matching_se_entries(tags: List[str], notion_cache, database_id: str) -> List[Dict]:
+def get_matching_se_entries(
+    tags: List[str],
+    notion_cache,
+    database_id: str,
+) -> List[Dict]:
     """
     Return all matching SE entries for the given note tags as a list of dicts:
       {title, content, se_id, tag}
-    Deduplicates by se_id. Used to populate the SyncedExtraSelectionDialog.
+
+    Uses the Subjects page's "Synced Extra" relation property (fast, O(1) per ID)
+    with a fallback to the legacy subtag-scan approach for unlinked pages.
+    Deduplicates by se_id.
     """
     subject_tags = [t for t in tags if t.startswith("#Malleus_CM::#Subjects::")]
     if not subject_tags:
@@ -179,32 +287,29 @@ def get_matching_se_entries(tags: List[str], notion_cache, database_id: str) -> 
     if not se_pages:
         return []
 
-    seen_se_ids    = set()
-    results        = []
-    seen_subj_ids  = {}
+    se_id_index   = _build_id_index(se_pages)
+    seen_se_ids   = set()
+    seen_page_names = set()
+    results       = []
 
     for tag in subject_tags:
         parsed = parse_tag(tag)
         if not parsed:
             continue
         page_name  = parsed.get('page_name')
-        raw_subtag = parsed.get('subtag')
-        if not page_name:
+        raw_subtag = parsed.get('subtag') or ''
+        if not page_name or page_name in seen_page_names:
+            continue
+        seen_page_names.add(page_name)
+
+        subject_page = _find_subject_page(notion_cache, page_name)
+        if not subject_page:
             continue
 
-        if page_name not in seen_subj_ids:
-            seen_subj_ids[page_name] = _find_subject_page_id(notion_cache, page_name)
-        page_id = seen_subj_ids[page_name]
-        if not page_id:
-            continue
-
-        nl        = _normalised_subtag_label(raw_subtag)
-        target_id = page_id.replace('-', '')
-
-        for page in _find_matching_se_pages(se_pages, target_id, nl):
-            entry = _page_to_entry(page)
-            if not entry:
-                continue
+        for entry in _entries_for_subject_page(
+            subject_page, se_id_index, se_pages,
+            SUBJECTS_SE_RELATION_PROP, raw_subtag
+        ):
             se_id = entry['se_id']
             if se_id:
                 if se_id in seen_se_ids:
@@ -215,25 +320,20 @@ def get_matching_se_entries(tags: List[str], notion_cache, database_id: str) -> 
     return results
 
 
-# ── Internal: auto-populate for Additional Resources ─────────────────────────
+# ── Public: auto-build for Additional Resources (Synced) ─────────────────────
 
-def _find_content_in_cache(
-    se_pages: List[Dict], subject_page_id: str, raw_subtag: str
-) -> Optional[Tuple[str, str]]:
-    """Return (html_content, se_id_str) for the first matching SE page, or None."""
-    nl        = _normalised_subtag_label(raw_subtag)
-    target_id = subject_page_id.replace('-', '')
-    for page in _find_matching_se_pages(se_pages, target_id, nl):
-        entry = _page_to_entry(page)
-        if entry:
-            return (entry['content'], entry['se_id'])
-    return None
-
-
-def _build_synced_content(tags: List[str], notion_cache, database_id: str, label: str) -> str:
+def _build_synced_content(
+    tags: List[str],
+    notion_cache,
+    database_id: str,
+    relation_prop: str,
+    label: str,
+) -> str:
     """
-    Auto-populate builder for databases that don't use the selection dialog
-    (currently used only for Additional Resources (Synced)).
+    Auto-populate builder used for fields that don't show a selection dialog
+    (currently Additional Resources (Synced)).
+
+    Uses the same primary/fallback strategy as get_matching_se_entries.
     """
     subject_tags = [t for t in tags if t.startswith("#Malleus_CM::#Subjects::")]
     if not subject_tags:
@@ -244,52 +344,55 @@ def _build_synced_content(tags: List[str], notion_cache, database_id: str, label
         print(f"[ExtraSync] {label} cache is empty — run 'Update Database Cache'")
         return ""
 
-    seen_se_ids   = set()
-    seen_content  = []
-    seen_subj_ids = {}
+    se_id_index     = _build_id_index(se_pages)
+    seen_se_ids     = set()
+    seen_content    = set()
+    seen_page_names = set()
+    parts           = []
 
     for tag in subject_tags:
         parsed = parse_tag(tag)
         if not parsed:
             continue
         page_name  = parsed.get('page_name')
-        raw_subtag = parsed.get('subtag')
-        if not page_name:
+        raw_subtag = parsed.get('subtag') or ''
+        if not page_name or page_name in seen_page_names:
+            continue
+        seen_page_names.add(page_name)
+
+        subject_page = _find_subject_page(notion_cache, page_name)
+        if not subject_page:
             continue
 
-        if page_name not in seen_subj_ids:
-            seen_subj_ids[page_name] = _find_subject_page_id(notion_cache, page_name)
-        page_id = seen_subj_ids[page_name]
-        if not page_id:
-            continue
+        for entry in _entries_for_subject_page(
+            subject_page, se_id_index, se_pages,
+            relation_prop, raw_subtag
+        ):
+            se_id   = entry['se_id']
+            content = entry['content']
 
-        result = _find_content_in_cache(se_pages, page_id, raw_subtag)
-        if not result:
-            continue
-        content, se_id = result
+            if se_id:
+                if se_id in seen_se_ids:
+                    continue
+                seen_se_ids.add(se_id)
+            else:
+                if content in seen_content:
+                    continue
+                seen_content.add(content)
 
-        if se_id:
-            if se_id in seen_se_ids:
-                continue
-            seen_se_ids.add(se_id)
-        else:
-            if content in seen_content:
-                continue
+            marker = f'<!-- se:{se_id} -->' if se_id else ''
+            parts.append(marker + content)
 
-        marker = f'<!-- se:{se_id} -->' if se_id else ""
-        seen_content.append(marker + content)
+    return "<br>\n".join(parts)
 
-    return "<br>\n".join(seen_content)
-
-
-# ── Public API ────────────────────────────────────────────────────────────────
 
 def build_additional_resources_content(tags: List[str], notion_cache) -> str:
     """Build content for 'Additional Resources (Synced)' field (auto, no dialog)."""
     return _build_synced_content(
         tags, notion_cache,
         SYNCED_ADDITIONAL_RESOURCES_DATABASE_ID,
-        "Synced Additional Resources"
+        SUBJECTS_AR_RELATION_PROP,
+        "Synced Additional Resources",
     )
 
 

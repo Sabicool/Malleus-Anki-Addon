@@ -422,23 +422,23 @@ def make_header(title: str = "Malleus Clinical Medicine",
     from aqt.qt import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,
                         Qt, QPixmap, QSize)
 
-    height = 62 if subtitle else 48
+    # ── Header container — no fixed height so subtitle can wrap ────────────
     header = QWidget()
-    header.setFixedHeight(height)
-    header.setStyleSheet("""
-        QWidget {
-            border-bottom: 2px solid rgba(74, 130, 204, 0.55);
-            background: transparent;
-        }
-    """)
+    header.setStyleSheet("QWidget { background: transparent; }")
 
-    h_layout = QHBoxLayout(header)
-    h_layout.setContentsMargins(16, 6, 12, 6)
+    outer_layout = QVBoxLayout(header)
+    outer_layout.setContentsMargins(0, 0, 0, 0)
+    outer_layout.setSpacing(0)
+
+    inner = QWidget()
+    inner.setStyleSheet("background: transparent;")
+    h_layout = QHBoxLayout(inner)
+    h_layout.setContentsMargins(16, 8, 12, 8)
     h_layout.setSpacing(10)
 
     # ── Text ────────────────────────────────────────────────────────────────
     text_layout = QVBoxLayout()
-    text_layout.setSpacing(2)
+    text_layout.setSpacing(3)
 
     title_label = QLabel(title)
     title_label.setStyleSheet(f"""
@@ -455,6 +455,7 @@ def make_header(title: str = "Malleus Clinical Medicine",
 
     if subtitle:
         sub_label = QLabel(subtitle)
+        sub_label.setWordWrap(True)
         sub_label.setStyleSheet("""
             QLabel {
                 font-size: 11px;
@@ -472,7 +473,7 @@ def make_header(title: str = "Malleus Clinical Medicine",
     logo_shown = False
     if logo_path:
         try:
-            logo_size = height - 10   # tight fit with small vertical margin
+            logo_size = 42
             pixmap = QPixmap(logo_path)
             if not pixmap.isNull():
                 pixmap = pixmap.scaled(
@@ -516,5 +517,15 @@ def make_header(title: str = "Malleus Clinical Medicine",
         """)
         dots.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         h_layout.addWidget(dots)
+
+    # Assemble: inner content + bottom accent border
+    outer_layout.addWidget(inner)
+
+    from aqt.qt import QFrame
+    separator = QFrame()
+    separator.setFrameShape(QFrame.Shape.HLine)
+    separator.setFixedHeight(2)
+    separator.setStyleSheet("background-color: rgba(74, 130, 204, 0.55); border: none;")
+    outer_layout.addWidget(separator)
 
     return header

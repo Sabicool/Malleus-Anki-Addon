@@ -305,7 +305,7 @@ class NotionPageSelector(QDialog):
         paeds_layout.addWidget(paeds_separator)
 
         paeds_layout.addSpacing(6)
-
+        
         paeds_question = QLabel("Is this a card on paediatrics?")
         paeds_question.setWordWrap(True)
         paeds_layout.addWidget(paeds_question)
@@ -844,6 +844,17 @@ class NotionPageSelector(QDialog):
         # 4. Determine which entries are already in the field
         existing_se_ids = get_existing_se_ids_from_field(current_field)
 
+        # 4b. Skip the dialog if every matched entry is already in the field —
+        #     there is nothing new to show.  But if even one entry is new
+        #     (its se_id is absent from existing_se_ids) we show the dialog so
+        #     the user can decide whether to include it.
+        all_already_present = all(
+            e.get('se_id') and e['se_id'] in existing_se_ids
+            for e in entries
+        )
+        if all_already_present:
+            return
+
         # 5. Show dialog
         dialog = SyncedExtraSelectionDialog(
             parent_widget, entries, existing_se_ids, note_context=note_context
@@ -866,16 +877,18 @@ class NotionPageSelector(QDialog):
     def _schedule_extra_synced(self, anki_note, notion_cache, subjects_db=True):
         """
         Update both synced fields:
-        - Extra (Synced): dialog-driven when subjects_db=True, skipped otherwise.
         - Additional Resources (Synced): always auto-populated silently.
+        - Extra (Synced): shows the selection dialog when subjects_db=True,
+          but only if there is at least one SE entry not already in the field.
+          _apply_extra_synced_dialog handles that check internally, so this
+          method simply delegates whenever the Subjects database is active.
         Does NOT flush the note.
         """
         # Additional Resources always auto-populates without a dialog
         set_additional_resources_on_note(anki_note, notion_cache)
 
-        # Extra (Synced) only when we're operating on the Subjects database
+        # Extra (Synced) — delegate; internal guard skips if nothing is new
         if subjects_db:
-            # Extract note context for display in the dialog (helps in batch operations)
             note_context = None
             try:
                 note_context = anki_note['Text'] or None
@@ -908,14 +921,22 @@ class NotionPageSelector(QDialog):
                 note['Additional Resources (Synced)'] = additional
                 changed = True
 
-            # Extra (Synced) — dialog
+            # Extra (Synced) — dialog only when the field is currently empty
             entries = get_matching_se_entries(tags, self.notion_cache, SYNCED_EXTRA_DATABASE_ID)
             if entries:
                 try:
                     current_field = note[EXTRA_FIELD]
                 except Exception:
                     current_field = ''
+                # Skip only when every entry is already in the field
                 existing_se_ids = get_existing_se_ids_from_field(current_field)
+                all_present = all(
+                    e.get('se_id') and e['se_id'] in existing_se_ids
+                    for e in entries
+                )
+                if all_present:
+                    entries = []
+            if entries:
                 dlg = SyncedExtraSelectionDialog(ac, entries, existing_se_ids)
                 if dlg.exec() == QDialog.DialogCode.Accepted:
                     selected = dlg.get_selected_entries()
