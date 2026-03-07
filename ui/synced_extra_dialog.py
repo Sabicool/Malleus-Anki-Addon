@@ -149,30 +149,38 @@ class SyncedExtraSelectionDialog(QDialog):
         scroll.setWidget(scroll_widget)
         layout.addWidget(scroll)
 
-        # All four buttons on a single row: [Select All] [Deselect All]  ·  [Cancel] [OK]
+        # ── Single-row button bar ─────────────────────────────────────────────
+        # All four buttons share the same fixed height and sit on one line.
+        # [Select All] [Deselect All]  ────stretch────  [Cancel] [OK]
         btn_row = QHBoxLayout()
         btn_row.setSpacing(8)
+        btn_row.setContentsMargins(0, 4, 0, 0)
 
-        select_all_btn = QPushButton("Select All")
-        select_all_btn.setObjectName("secondary")
+        BTN_H = 32   # fixed height keeps all four buttons vertically aligned
+
+        def _make_btn(label, obj_name=None, default=False):
+            b = QPushButton(label)
+            b.setFixedHeight(BTN_H)
+            if obj_name:
+                b.setObjectName(obj_name)
+            if default:
+                b.setDefault(True)
+            return b
+
+        select_all_btn   = _make_btn("Select All",   "secondary")
+        deselect_all_btn = _make_btn("Deselect All", "secondary")
+        cancel_btn       = _make_btn("Cancel",       "secondary")
+        ok_btn           = _make_btn("OK",            default=True)
+
         select_all_btn.clicked.connect(self._select_all)
-        btn_row.addWidget(select_all_btn)
-
-        deselect_all_btn = QPushButton("Deselect All")
-        deselect_all_btn.setObjectName("secondary")
         deselect_all_btn.clicked.connect(self._deselect_all)
-        btn_row.addWidget(deselect_all_btn)
-
-        btn_row.addStretch()
-
-        cancel_btn = QPushButton("Cancel")
-        cancel_btn.setObjectName("secondary")
         cancel_btn.clicked.connect(self._on_cancel)
-        btn_row.addWidget(cancel_btn)
-
-        ok_btn = QPushButton("OK")
-        ok_btn.setDefault(True)
         ok_btn.clicked.connect(self.accept)
+
+        btn_row.addWidget(select_all_btn)
+        btn_row.addWidget(deselect_all_btn)
+        btn_row.addStretch()
+        btn_row.addWidget(cancel_btn)
         btn_row.addWidget(ok_btn)
 
         layout.addLayout(btn_row)

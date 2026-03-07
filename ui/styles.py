@@ -318,13 +318,17 @@ QFrame[frameShape="5"] {{
 }}
 
 /* ── Tool Tips ───────────────────────────────────────── */
+/* palette(toolTipBase) / palette(toolTipText) are the dedicated system   */
+/* tooltip colours — they resolve correctly in Anki's light AND dark mode */
+/* and are never transparent, unlike palette(window) on some platforms.   */
 QToolTip {{
-    background-color: palette(window);
-    color: palette(window-text);
+    background-color: palette(toolTipBase);
+    color: palette(toolTipText);
     border: 1px solid {C['border_medium']};
     border-radius: 6px;
     padding: 6px 10px;
     font-size: 12px;
+    opacity: 255;
 }}
 
 /* ── Progress Bar ────────────────────────────────────── */
@@ -366,8 +370,36 @@ QDialogButtonBox QPushButton {{
 
 
 def apply_malleus_style(widget):
-    """Apply the Malleus stylesheet to a widget and all its children."""
-    widget.setStyleSheet(MALLEUS_STYLE)
+    """
+    Apply the Malleus stylesheet to a widget and all its children.
+
+    QToolTip background is resolved to a concrete hex colour at call time
+    because ``palette(toolTipBase)`` is unreliable on macOS / some Qt builds
+    and renders as fully transparent.  We sample the current app palette and
+    pick appropriate light / dark colours ourselves.
+    """
+    try:
+        from aqt.qt import QApplication, QPalette
+        pal  = QApplication.instance().palette()
+        dark = pal.color(QPalette.ColorRole.Window).lightness() < 128
+        tt_bg   = "#2b2b2b" if dark else "#fffde7"
+        tt_text = "#e6e6e6" if dark else "#1a1a1a"
+        tt_border = "rgba(120,120,120,0.55)" if dark else "rgba(160,140,80,0.55)"
+    except Exception:
+        tt_bg, tt_text, tt_border = "#fffde7", "#1a1a1a", "rgba(160,140,80,0.55)"
+
+    tooltip_override = f"""
+QToolTip {{
+    background-color: {tt_bg};
+    color: {tt_text};
+    border: 1px solid {tt_border};
+    border-radius: 6px;
+    padding: 6px 10px;
+    font-size: 12px;
+    opacity: 255;
+}}
+"""
+    widget.setStyleSheet(MALLEUS_STYLE + tooltip_override)
 
 
 # ── Reusable header widget ────────────────────────────────────────────────────
@@ -457,7 +489,7 @@ def make_header(title: str = "Malleus Clinical Medicine",
                 logo_label.setAlignment(
                     Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
                 )
-                # logo_label.setToolTip("Visit malleus.org.au")
+                logo_label.setToolTip("Visit malleus.org.au")
                 logo_label.setCursor(Qt.CursorShape.PointingHandCursor)
                 # Make the logo clickable — open the Malleus website
                 def _open_malleus(event, _url="https://malleus.org.au"):
