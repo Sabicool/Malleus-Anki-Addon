@@ -100,6 +100,7 @@ class _MalleusProgressDialog(QDialog):
         layout.addWidget(self._bar)
 
         self._maximum = maximum
+
         self.setLayout(layout)
         apply_malleus_style(self)
 
@@ -107,8 +108,7 @@ class _MalleusProgressDialog(QDialog):
 
     def setValue(self, value: int):
         """Set a concrete progress value and update the percentage label."""
-        if self._bar.maximum() == 0:
-            # Snap out of indeterminate mode
+        if self._bar.maximum() == 0:          # snap out of indeterminate mode
             self._bar.setMaximum(self._maximum)
         self._bar.setValue(value)
         pct = int(round(value / self._maximum * 100)) if self._maximum else 0
@@ -117,10 +117,15 @@ class _MalleusProgressDialog(QDialog):
     def setLabelText(self, text: str):
         self._label.setText(text)
 
-    def pulse(self):
-        """Switch to indeterminate (animated busy) mode."""
+    def pulse(self, pct_text: str = ""):
+        """
+        Switch to indeterminate (animated busy) mode.
+
+        pct_text — short string shown in the percentage column while busy,
+                   e.g. "9/16 · 56 %".  Pass empty to clear it.
+        """
         self._bar.setMaximum(0)
-        self._pct.setText("…")
+        self._pct.setText(pct_text)
 
     def unset_pulse(self, value: int):
         """Leave indeterminate mode and show a concrete value."""
@@ -158,12 +163,16 @@ def perform_cache_update(notion_cache, main_window):
             progress[0].setLabelText(message)
         main_window.taskman.run_on_main(_update)
 
-    def start_pulse(message: str):
-        """Go indeterminate while an async Notion request is in-flight."""
+    def start_pulse(notion_idx: int, message: str):
+        """Go indeterminate while an async Notion request is in-flight.
+        Shows 'DB x/n · y%' in the percentage label so the user can see progress."""
+        step     = n + notion_idx          # absolute step at start of this DB sync
+        pct      = int(round(step / total_steps * 100))
+        pct_text = f"DB {notion_idx + 1}/{n} · {pct} %"
         def _pulse():
             if progress[0] is None:
                 return
-            progress[0].pulse()
+            progress[0].pulse(pct_text)
             progress[0].setLabelText(message)
         main_window.taskman.run_on_main(_pulse)
 
@@ -185,7 +194,7 @@ def perform_cache_update(notion_cache, main_window):
             # Phase-2 step = n + idx  (picks up right after all GitHub downloads)
             notion_step = n + idx
             if db_id:
-                start_pulse(f"Syncing new {name} pages from Notion…")
+                start_pulse(idx, f"Syncing new {name} pages from Notion…")
                 notion_cache.update_cache_async(
                     db_id, force=True, callback=on_notion_update_complete
                 )

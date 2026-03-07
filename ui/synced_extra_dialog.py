@@ -5,7 +5,7 @@ Styled with the Malleus design system; adapts to Anki's light and dark themes.
 """
 from aqt.qt import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QCheckBox,
-    QScrollArea, QWidget, QPushButton, QDialogButtonBox, QFrame, Qt
+    QScrollArea, QWidget, QPushButton, QFrame, Qt
 )
 from aqt.utils import showInfo
 from typing import List, Dict, Set
@@ -149,32 +149,33 @@ class SyncedExtraSelectionDialog(QDialog):
         scroll.setWidget(scroll_widget)
         layout.addWidget(scroll)
 
-        # Select All / Deselect All
-        sel_layout = QHBoxLayout()
-        sel_layout.setSpacing(8)
+        # All four buttons on a single row: [Select All] [Deselect All]  ·  [Cancel] [OK]
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(8)
 
         select_all_btn = QPushButton("Select All")
         select_all_btn.setObjectName("secondary")
         select_all_btn.clicked.connect(self._select_all)
-        sel_layout.addWidget(select_all_btn)
+        btn_row.addWidget(select_all_btn)
 
         deselect_all_btn = QPushButton("Deselect All")
         deselect_all_btn.setObjectName("secondary")
         deselect_all_btn.clicked.connect(self._deselect_all)
-        sel_layout.addWidget(deselect_all_btn)
+        btn_row.addWidget(deselect_all_btn)
 
-        sel_layout.addStretch()
-        layout.addLayout(sel_layout)
+        btn_row.addStretch()
 
-        # OK / Cancel
-        buttons = QDialogButtonBox()
-        ok_btn = buttons.addButton(QDialogButtonBox.StandardButton.Ok)
-        ok_btn.setDefault(True)
-        cancel_btn = buttons.addButton(QDialogButtonBox.StandardButton.Cancel)
+        cancel_btn = QPushButton("Cancel")
         cancel_btn.setObjectName("secondary")
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self._on_cancel)
-        layout.addWidget(buttons)
+        cancel_btn.clicked.connect(self._on_cancel)
+        btn_row.addWidget(cancel_btn)
+
+        ok_btn = QPushButton("OK")
+        ok_btn.setDefault(True)
+        ok_btn.clicked.connect(self.accept)
+        btn_row.addWidget(ok_btn)
+
+        layout.addLayout(btn_row)
 
         self.setLayout(layout)
 
