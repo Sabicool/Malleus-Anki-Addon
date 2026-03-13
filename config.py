@@ -111,6 +111,10 @@ def load_config():
     if 'request_timeout' not in config:
         config['request_timeout'] = 30  # seconds - increased from 10
         mw.addonManager.writeConfig(__name__.split('.')[0], config)
+
+    if 'card_count_threshold' not in config:
+        config['card_count_threshold'] = 10  # show card counts only when results ≤ this
+        mw.addonManager.writeConfig(__name__.split('.')[0], config)
     
     return config
 

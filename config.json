@@ -4,5 +4,6 @@
   "autosearch": true,
   "search_delay": 300,
   "deck_name": "Default",
-  "request_timeout": 30
+  "request_timeout": 30,
+  "card_count_threshold": 10
 }

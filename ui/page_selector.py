@@ -531,14 +531,15 @@ class NotionPageSelector(QDialog):
         return '●' * filled + '○' * (5 - filled)
 
     def _make_result_row(self, display_text: str, page: dict,
-                         score: float = None) -> tuple:
+                         score: float = None,
+                         show_count: bool = True) -> tuple:
         """
         Build a single result row widget.
 
         Returns (row_widget, checkbox) where row_widget is a QWidget
         containing a QHBoxLayout with:
           - QCheckBox (the display text)
-          - card count pill  (always shown)
+          - card count pill  (only when show_count=True)
           - confidence dots  (only when score is provided, i.e. suggestions)
 
         The checkbox is also returned separately so callers can wire it
@@ -552,19 +553,20 @@ class NotionPageSelector(QDialog):
         cb = QCheckBox(display_text)
         row_layout.addWidget(cb, stretch=1)
 
-        # Card count pill
-        card_count = self._get_card_count_for_page(page)
-        count_label = QLabel(f"{card_count} {'card' if card_count == 1 else 'cards'}")
-        count_label.setToolTip("Number of cards in your collection tagged with this page")
-        if card_count == 0:
-            count_label.setStyleSheet(
-                "color: rgba(128,128,128,0.6); font-size: 11px; padding: 1px 6px;"
-            )
-        else:
-            count_label.setStyleSheet(
-                "color: #58a6ff; font-size: 11px; font-weight: 600; padding: 1px 6px;"
-            )
-        row_layout.addWidget(count_label, stretch=0)
+        # Card count pill — omitted when the result set is large
+        if show_count:
+            card_count = self._get_card_count_for_page(page)
+            count_label = QLabel(f"{card_count} {'card' if card_count == 1 else 'cards'}")
+            count_label.setToolTip("Number of cards in your collection tagged with this page")
+            if card_count == 0:
+                count_label.setStyleSheet(
+                    "color: rgba(128,128,128,0.6); font-size: 11px; padding: 1px 6px;"
+                )
+            else:
+                count_label.setStyleSheet(
+                    "color: #58a6ff; font-size: 11px; font-weight: 600; padding: 1px 6px;"
+                )
+            row_layout.addWidget(count_label, stretch=0)
 
         # Confidence dots (suggestions only)
         if score is not None:
@@ -894,10 +896,16 @@ class NotionPageSelector(QDialog):
             tooltip("No results found. Try a different search term")
             return
 
-        # Load note tag cache once for all rows (avoids N per-row DB queries)
-        self._load_note_tag_strings()
+        # Only show card counts when the result set is small enough to be useful.
+        # The threshold is configurable (config key: card_count_threshold, default 10).
+        threshold = self.config.get('card_count_threshold', 10)
+        show_count = len(self.pages_data) <= threshold
 
-        # Create result rows (checkbox + card count pill)
+        # Load note tag cache once (one DB query) — only needed when showing counts
+        if show_count:
+            self._load_note_tag_strings()
+
+        # Create result rows (checkbox + optional card count pill)
         for page in self.pages_data:
             try:
                 if self.database_selector.currentText() == "Textbooks":
@@ -913,7 +921,7 @@ class NotionPageSelector(QDialog):
                 else:
                     display_text = f"{title} {search_suffix}"
 
-                row, _cb = self._make_result_row(display_text, page)
+                row, _cb = self._make_result_row(display_text, page, show_count=show_count)
                 self.checkbox_layout.addWidget(row)
             except Exception as e:
                 showInfo(f"Error processing page: {e}")
