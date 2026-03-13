@@ -168,17 +168,74 @@ def setup_browser_menu(browser):
     except:
         pass
 
+def _set_yield_for_cards(browser, yield_tag: str):
+    """Set a specific yield tag on all selected cards, replacing any existing yield."""
+    selected_card_ids = browser.selectedCards()
+    if not selected_card_ids:
+        return
+
+    yield_prefix = "#Malleus_CM::#Yield::"
+
+    notes_seen = set()
+    modified = 0
+    for card_id in selected_card_ids:
+        card = mw.col.get_card(card_id)
+        note = card.note()
+        if note.id in notes_seen:
+            continue
+        notes_seen.add(note.id)
+
+        current_tags = [t for t in note.tags if not t.startswith(yield_prefix)]
+        current_tags.append(yield_tag)
+        note.tags = current_tags
+        note.flush()
+        modified += 1
+
+    browser.model.reset()
+    from aqt.utils import tooltip
+    label = yield_tag.replace(yield_prefix, '').replace('_', ' ')
+    tooltip(f"Set yield to '{label}' on {modified} note(s)")
+
+
 def setup_browser_context_menu(browser, menu):
     """Setup browser context menu (right-click menu)"""
-    # Only show if cards are selected
     selected_cards = browser.selectedCards()
     if not selected_cards:
         return
-    
-    # Add separator before our menu item
+
     menu.addSeparator()
-    
-    # Add "Update Malleus Subject Tags" action
+
+    # ── Quick Yield Change submenu ────────────────────────────────────────────
+    yield_menu = QMenu("Set Yield Level", browser)
+
+    yield_options = [
+        ("High Yield",                   "#Malleus_CM::#Yield::High"),
+        ("Medium Yield",                 "#Malleus_CM::#Yield::Medium"),
+        ("Low Yield",                    "#Malleus_CM::#Yield::Low"),
+        ("Beyond Medical Student Level", "#Malleus_CM::#Yield::Beyond_medical_student_level"),
+    ]
+
+    # Mark the current yield of the first selected card
+    try:
+        first_note = mw.col.get_card(selected_cards[0]).note()
+        current_yields = [t for t in first_note.tags if t.startswith("#Malleus_CM::#Yield::")]
+        current_yield = current_yields[0] if current_yields else None
+    except Exception:
+        current_yield = None
+
+    for label, tag in yield_options:
+        action = QAction(label, browser)
+        # Checkmark on the currently active yield
+        action.setCheckable(True)
+        action.setChecked(tag == current_yield)
+        action.triggered.connect(
+            lambda checked, t=tag: _set_yield_for_cards(browser, t)
+        )
+        yield_menu.addAction(action)
+
+    menu.addMenu(yield_menu)
+
+    # ── Update Malleus Subject Tags ───────────────────────────────────────────
     update_tags_action = QAction("Update Malleus Subject Tags", browser)
     update_tags_action.triggered.connect(
         lambda: update_subject_tags_for_browser(browser, notion_cache, config)
