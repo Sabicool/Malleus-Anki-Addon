@@ -23,6 +23,7 @@ from ..extra_sync import (
     SYNCED_EXTRA_DATABASE_ID, EXTRA_FIELD
 )
 from .synced_extra_dialog import SyncedExtraSelectionDialog
+from ..suggest_tags import suggest_subject_tags, invalidate_index
 from .tag_selection_dialog import TagSelectionDialog
 try:
     from .styles import apply_malleus_style, make_header, COLORS
@@ -330,50 +331,19 @@ class NotionPageSelector(QDialog):
         )
         content_layout.addWidget(yield_paeds_widget, stretch=0)
 
-        # Buttons
-        button_layout = QHBoxLayout()
-        button_layout.setSpacing(6)
-        select_all_button = QPushButton("Select All")
-        select_all_button.setObjectName("secondary")
-        select_all_button.clicked.connect(self.select_all_pages)
-        button_layout.addWidget(select_all_button)
+        # ── Buttons — two rows ────────────────────────────────────────────────
+        # Buttons: two rows when a note is open (extra action buttons present),
+        # single row otherwise (just Select All / Find / Create / utilities).
+        has_notes = self.has_notes_to_process()
+        buttons_vbox = QVBoxLayout()
+        buttons_vbox.setSpacing(6)
 
-        find_cards_button = QPushButton("Find Cards")
-        find_cards_button.clicked.connect(self.search_cards)
-        button_layout.addWidget(find_cards_button)
-        
-        if isinstance(self.parent(), AddCards):
-            add_tags_button = QPushButton("Add Tags")
-            add_tags_button.clicked.connect(self.add_tags)
-            button_layout.addWidget(add_tags_button)
-        else:
-            create_cards_button = QPushButton("Create Cards")
-            create_cards_button.clicked.connect(self.create_cards)
-            button_layout.addWidget(create_cards_button)
-            # Show Add Tags button if we have notes to process
-            if self.has_notes_to_process():
-                add_tags_button = QPushButton("Add Tags")
-                add_tags_button.clicked.connect(self.add_tags)
-                button_layout.addWidget(add_tags_button)
-
-        # Show these buttons when editing an existing note OR when in browser with selected cards
-        if self.has_notes_to_process():
-            replace_tags_button = QPushButton("Replace Tags")
-            replace_tags_button.clicked.connect(self.replace_tags)
-            button_layout.addWidget(replace_tags_button)
-
-            remove_tags_button = QPushButton("Remove Tags")
-            remove_tags_button.setObjectName("danger")
-            remove_tags_button.clicked.connect(self.remove_tags)
-            button_layout.addWidget(remove_tags_button)
-
+        # Shared utility buttons (always present)
         update_database_button = QPushButton("↻  Update Database")
         update_database_button.setObjectName("secondary")
         update_database_button.clicked.connect(
-            lambda: perform_cache_update(self.notion_cache, mw)
+            lambda: (perform_cache_update(self.notion_cache, mw), invalidate_index())
         )
-        button_layout.addWidget(update_database_button)
-
         guidelines_button = QPushButton("Guidelines ↗")
         guidelines_button.setObjectName("secondary")
         guidelines_button.clicked.connect(
@@ -381,9 +351,6 @@ class NotionPageSelector(QDialog):
                 QUrl("https://malleuscm.notion.site/submission-guidelines")
             )
         )
-        button_layout.addWidget(guidelines_button)
-
-        # Donate button — unobtrusive, coffee-toned outline style
         donate_button = QPushButton("🫶 Support")
         donate_button.setObjectName("donate")
         donate_button.setToolTip("Support Malleus on Paypal")
@@ -392,10 +359,95 @@ class NotionPageSelector(QDialog):
                 QUrl("https://www.paypal.com/donate/?hosted_button_id=9VM7MHMMK5JJJ")
             )
         )
-        button_layout.addWidget(donate_button)
+        # button_layout.addWidget(donate_button)
+
+        if has_notes:
+            # ── Row 1: primary card actions ───────────────────────────────────
+            row1 = QHBoxLayout()
+            row1.setSpacing(6)
+
+            select_all_button = QPushButton("Select All")
+            select_all_button.setObjectName("secondary")
+            select_all_button.clicked.connect(self.select_all_pages)
+            row1.addWidget(select_all_button)
+
+            find_cards_button = QPushButton("Find Cards")
+            find_cards_button.clicked.connect(self.search_cards)
+            row1.addWidget(find_cards_button)
+
+            if isinstance(self.parent(), AddCards):
+                add_tags_button = QPushButton("Add Tags")
+                add_tags_button.clicked.connect(self.add_tags)
+                row1.addWidget(add_tags_button)
+            else:
+                create_cards_button = QPushButton("Create Cards")
+                create_cards_button.clicked.connect(self.create_cards)
+                row1.addWidget(create_cards_button)
+                add_tags_button = QPushButton("Add Tags")
+                add_tags_button.clicked.connect(self.add_tags)
+                row1.addWidget(add_tags_button)
+
+            replace_tags_button = QPushButton("Replace Tags")
+            replace_tags_button.clicked.connect(self.replace_tags)
+            row1.addWidget(replace_tags_button)
+
+            remove_tags_button = QPushButton("Remove Tags")
+            remove_tags_button.setObjectName("danger")
+            remove_tags_button.clicked.connect(self.remove_tags)
+            row1.addWidget(remove_tags_button)
+
+            row1.addStretch()
+            buttons_vbox.addLayout(row1)
+
+            # ── Row 2: utilities + suggest ────────────────────────────────────
+            row2 = QHBoxLayout()
+            row2.setSpacing(6)
+
+            suggest_button = QPushButton("✦ Suggest Tags")
+            suggest_button.setObjectName("secondary")
+            suggest_button.setToolTip(
+                "Automatically suggest subject tags based on the card's text content"
+            )
+            suggest_button.clicked.connect(self.suggest_tags_from_card)
+            row2.addWidget(suggest_button)
+
+            row2.addWidget(update_database_button)
+            row2.addWidget(guidelines_button)
+            row2.addWidget(donate_button)
+            row2.addStretch()
+            buttons_vbox.addLayout(row2)
+
+        else:
+            # ── Single row: no note open ──────────────────────────────────────
+            row1 = QHBoxLayout()
+            row1.setSpacing(6)
+
+            select_all_button = QPushButton("Select All")
+            select_all_button.setObjectName("secondary")
+            select_all_button.clicked.connect(self.select_all_pages)
+            row1.addWidget(select_all_button)
+
+            find_cards_button = QPushButton("Find Cards")
+            find_cards_button.clicked.connect(self.search_cards)
+            row1.addWidget(find_cards_button)
+
+            if isinstance(self.parent(), AddCards):
+                add_tags_button = QPushButton("Add Tags")
+                add_tags_button.clicked.connect(self.add_tags)
+                row1.addWidget(add_tags_button)
+            else:
+                create_cards_button = QPushButton("Create Cards")
+                create_cards_button.clicked.connect(self.create_cards)
+                row1.addWidget(create_cards_button)
+
+            row1.addWidget(update_database_button)
+            row1.addWidget(guidelines_button)
+            row1.addWidget(donate_button)
+            row1.addStretch()
+            buttons_vbox.addLayout(row1)
 
         button_widget = QWidget()
-        button_widget.setLayout(button_layout)
+        button_widget.setLayout(buttons_vbox)
         button_widget.setSizePolicy(
             QSizePolicy.Policy.Expanding,
             QSizePolicy.Policy.Fixed
@@ -404,6 +456,105 @@ class NotionPageSelector(QDialog):
 
         layout.addWidget(content_widget)
         self.setLayout(layout)
+
+    def suggest_tags_from_card(self):
+        """
+        Run the local tag suggester against the current note's Text field,
+        then show the results so the user can select which ones to apply.
+
+        How results are displayed
+        -------------------------
+        1. The database selector is switched to "Subjects".
+        2. The search box is cleared and the results area is populated
+           directly with the suggested pages — same checkbox UI as a normal
+           search, so the existing Select All / Create Cards / Add Tags
+           buttons all work without any changes.
+        3. A tooltip on each checkbox shows the confidence score so the
+           user can judge quality at a glance.
+        """
+        # 1. Get the card text to analyse
+        notes = self.get_notes_to_process()
+        if not notes:
+            showInfo("No note found — open a card in the editor first.")
+            return
+
+        note = notes[0]
+        try:
+            card_text = note['Text']
+        except Exception:
+            card_text = ''
+
+        if not card_text or not card_text.strip():
+            showInfo("The card's Text field is empty — nothing to analyse.")
+            return
+
+        # 2. Run the suggester
+        tooltip("Analysing card text…")
+        suggestions = suggest_subject_tags(card_text, self.notion_cache)
+
+        if not suggestions:
+            showInfo(
+                "No matching subject pages found for this card's content.\n\n"
+                "Try searching manually using the search box."
+            )
+            return
+
+        # 3. Switch UI to Subjects database
+        subjects_index = self.database_selector.findText("Subjects")
+        if subjects_index >= 0:
+            self.database_selector.setCurrentIndex(subjects_index)
+
+        # 4. Populate the results area with suggestion checkboxes
+        #    (mirrors what perform_search does, reusing the same layout)
+        self.pages_data = [s['page'] for s in suggestions]
+
+        # Clear existing checkboxes
+        for i in reversed(range(self.checkbox_layout.count())):
+            widget = self.checkbox_layout.itemAt(i).widget()
+            if widget:
+                widget.setParent(None)
+
+        for suggestion in suggestions:
+            page    = suggestion['page']
+            title   = suggestion['title']
+            score   = suggestion['score']
+
+            # Build the same display text as perform_search
+            try:
+                suffix = (
+                    page['properties']
+                    .get('Search Suffix', {})
+                    .get('formula', {})
+                    .get('string', '')
+                )
+                prefix = (
+                    page['properties']
+                    .get('Search Prefix', {})
+                    .get('formula', {})
+                    .get('string', '')
+                )
+                display_text = f"{prefix} {title} {suffix}".strip()
+            except Exception:
+                display_text = title
+
+            cb = QCheckBox(display_text)
+            cb.setToolTip(f"Confidence score: {score}")
+            self.checkbox_layout.addWidget(cb)
+
+        # Pre-select the suggested subtag in the property selector.
+        # All suggestions share the same subtag (the card tests one concept).
+        subtag = suggestions[0].get('suggested_subtag')
+        if subtag:
+            idx = self.property_selector.findText(subtag)
+            if idx >= 0:
+                self.property_selector.setCurrentIndex(idx)
+
+        # Update the group box title so the user knows these are suggestions
+        subtag_label = f" · subtag: {subtag}" if subtag else ""
+        self.results_group.setTitle(
+            f"Suggested Tags ({len(suggestions)} found{subtag_label})"
+        )
+        tooltip(f"Found {len(suggestions)} suggested tag(s)")
 
     def handle_yield_click(self, yield_option):
         """Handle yield radio button clicks - allow deselection of selected button"""
