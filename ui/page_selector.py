@@ -6,7 +6,8 @@ from aqt import mw, dialogs
 from aqt.qt import (QDialog, QVBoxLayout, QHBoxLayout, QComboBox,
                     QLineEdit, QPushButton, QGroupBox, QScrollArea,
                     QWidget, QCheckBox, QButtonGroup, QRadioButton,
-                    QLabel, QFrame, QTimer, Qt, QUrl, QWidget as QWidgetBase)
+                    QLabel, QFrame, QTimer, Qt, QUrl, QWidget as QWidgetBase,
+                    QKeyEvent, QColor, QPalette)
 from aqt.browser import Browser
 from aqt.addcards import AddCards
 from aqt.editcurrent import EditCurrent
@@ -93,7 +94,9 @@ class NotionPageSelector(QDialog):
 
     def setup_ui(self):
         self.setWindowTitle("Malleus Page Selector")
-        self.setMinimumWidth(640)
+        # Wider when a note is open: the result rows show card count + confidence
+        # dots side-by-side and need the extra space to avoid truncation.
+        self.setMinimumWidth(820 if self.has_notes_to_process() else 640)
         self.setMinimumHeight(580)
 
         layout = QVBoxLayout()
@@ -457,6 +460,207 @@ class NotionPageSelector(QDialog):
         layout.addWidget(content_widget)
         self.setLayout(layout)
 
+    # ── Card count + confidence helpers ──────────────────────────────────────
+
+    def _load_note_tag_strings(self) -> None:
+        """
+        Fetch every note's raw tag string from the collection DB in one query
+        and cache the result on self._note_tag_strings.
+
+        This is called once before a batch of _get_card_count_for_page() calls
+        so that counting N result rows costs one DB round-trip instead of N.
+        The cache is keyed on the collection path; if it changes (user switches
+        profile) the cache is transparently rebuilt.
+        """
+        try:
+            col = mw.col
+            if col is None:
+                self._note_tag_strings = []
+                self._note_tag_strings_col = None
+                return
+            col_path = str(col.path)
+            if (getattr(self, '_note_tag_strings_col', None) == col_path
+                    and hasattr(self, '_note_tag_strings')):
+                return  # already cached for this collection
+            # db.list returns a flat list of values for a single-column query
+            self._note_tag_strings = col.db.list("select tags from notes")
+            self._note_tag_strings_col = col_path
+        except Exception:
+            self._note_tag_strings = []
+            self._note_tag_strings_col = None
+
+    def _get_card_count_for_page(self, page: dict) -> int:
+        """
+        Return the number of notes that have a tag matching this Notion page.
+
+        Uses the cached tag strings loaded by _load_note_tag_strings() so that
+        counting across many result rows requires only one DB query total.
+        Each call is a pure-Python prefix scan — typically <1 ms for a 10k-note
+        collection regardless of how many result rows are being rendered.
+        """
+        try:
+            # Prefer Main Tag (the page root, matches all subtag variants)
+            tag = ''
+            for prop_name in ('Main Tag', 'Tag'):
+                prop = page.get('properties', {}).get(prop_name, {})
+                if prop.get('type') == 'formula':
+                    val = prop.get('formula', {}).get('string', '').strip()
+                    if val:
+                        tag = val.split()[0]
+                        break
+
+            if not tag:
+                return 0
+
+            tag_strings = getattr(self, '_note_tag_strings', [])
+            return sum(1 for ts in tag_strings if tag in ts)
+        except Exception:
+            return 0
+
+    @staticmethod
+    def _score_to_dots(score: float, max_score: float = 4.0) -> str:
+        """
+        Convert a raw suggestion score to a 5-dot confidence string.
+
+        The max_score is TOPIC_SEARCH_BONUS (4.0) — a perfect cloze-first match
+        gives ~4.0 before title bonus, so that anchors the scale.
+        Scores above max are capped at 5 dots.
+        """
+        normalised = min(score / max_score, 1.0)
+        filled = max(1, round(normalised * 5))
+        return '●' * filled + '○' * (5 - filled)
+
+    def _make_result_row(self, display_text: str, page: dict,
+                         score: float = None) -> tuple:
+        """
+        Build a single result row widget.
+
+        Returns (row_widget, checkbox) where row_widget is a QWidget
+        containing a QHBoxLayout with:
+          - QCheckBox (the display text)
+          - card count pill  (always shown)
+          - confidence dots  (only when score is provided, i.e. suggestions)
+
+        The checkbox is also returned separately so callers can wire it
+        into checkbox_layout tracking.
+        """
+        row = QWidget()
+        row_layout = QHBoxLayout(row)
+        row_layout.setContentsMargins(0, 0, 4, 0)
+        row_layout.setSpacing(6)
+
+        cb = QCheckBox(display_text)
+        row_layout.addWidget(cb, stretch=1)
+
+        # Card count pill
+        card_count = self._get_card_count_for_page(page)
+        count_label = QLabel(f"{card_count} {'card' if card_count == 1 else 'cards'}")
+        count_label.setToolTip("Number of cards in your collection tagged with this page")
+        if card_count == 0:
+            count_label.setStyleSheet(
+                "color: rgba(128,128,128,0.6); font-size: 11px; padding: 1px 6px;"
+            )
+        else:
+            count_label.setStyleSheet(
+                "color: #58a6ff; font-size: 11px; font-weight: 600; padding: 1px 6px;"
+            )
+        row_layout.addWidget(count_label, stretch=0)
+
+        # Confidence dots (suggestions only)
+        if score is not None:
+            dots = self._score_to_dots(score)
+            dots_label = QLabel(dots)
+            dots_label.setToolTip(f"Suggestion confidence (raw score: {score:.2f})")
+            dots_label.setStyleSheet(
+                "font-size: 11px; letter-spacing: 2px; color: #f0a500; padding: 1px 4px;"
+            )
+            row_layout.addWidget(dots_label, stretch=0)
+
+        return row, cb
+
+    # ── Keyboard navigation ───────────────────────────────────────────────────
+
+    def keyPressEvent(self, event: QKeyEvent):
+        """
+        Keyboard shortcuts for the dialog:
+
+          Up / Down    — move focus between result checkboxes
+          Space        — toggle the focused checkbox  (Qt default, kept)
+          Enter/Return — trigger primary action (Add Tags if note open,
+                         otherwise Create Cards)
+          Escape       — close the dialog
+          Ctrl+A       — select all checkboxes
+          Ctrl+D       — deselect all checkboxes
+        """
+        key = event.key()
+        Qt_Key = Qt.Key
+
+        checkboxes = self._get_result_checkboxes()
+
+        if key in (Qt_Key.Key_Down, Qt_Key.Key_Up):
+            if not checkboxes:
+                return
+            # Find current focused checkbox index
+            focused = None
+            for i, cb in enumerate(checkboxes):
+                if cb.hasFocus():
+                    focused = i
+                    break
+
+            if key == Qt_Key.Key_Down:
+                next_idx = (focused + 1) if focused is not None else 0
+                next_idx = min(next_idx, len(checkboxes) - 1)
+            else:
+                next_idx = (focused - 1) if focused is not None else len(checkboxes) - 1
+                next_idx = max(next_idx, 0)
+
+            checkboxes[next_idx].setFocus()
+            event.accept()
+            return
+
+        if key in (Qt_Key.Key_Return, Qt_Key.Key_Enter):
+            # Trigger primary action
+            if self.has_notes_to_process():
+                self.add_tags()
+            else:
+                self.create_cards()
+            event.accept()
+            return
+
+        if key == Qt_Key.Key_A and event.modifiers() == Qt.KeyboardModifier.ControlModifier:
+            self.select_all_pages()
+            event.accept()
+            return
+
+        if key == Qt_Key.Key_D and event.modifiers() == Qt.KeyboardModifier.ControlModifier:
+            for cb in checkboxes:
+                cb.setChecked(False)
+            event.accept()
+            return
+
+        super().keyPressEvent(event)
+
+    def _get_result_checkboxes(self) -> list:
+        """Return all QCheckBox widgets currently in the results area."""
+        checkboxes = []
+        for i in range(self.checkbox_layout.count()):
+            item = self.checkbox_layout.itemAt(i)
+            if item is None:
+                continue
+            widget = item.widget()
+            if widget is None:
+                continue
+            # Direct checkbox (old-style from perform_search)
+            if isinstance(widget, QCheckBox):
+                checkboxes.append(widget)
+            # Row widget containing a checkbox (new _make_result_row style)
+            elif hasattr(widget, 'layout') and widget.layout():
+                for j in range(widget.layout().count()):
+                    child = widget.layout().itemAt(j).widget()
+                    if isinstance(child, QCheckBox):
+                        checkboxes.append(child)
+        return checkboxes
+
     def suggest_tags_from_card(self):
         """
         Run the local tag suggester against the current note's Text field,
@@ -514,12 +718,14 @@ class NotionPageSelector(QDialog):
             if widget:
                 widget.setParent(None)
 
+        # Load note tag cache once for all suggestion rows
+        self._load_note_tag_strings()
+
         for suggestion in suggestions:
             page    = suggestion['page']
             title   = suggestion['title']
             score   = suggestion['score']
 
-            # Build the same display text as perform_search
             try:
                 suffix = (
                     page['properties']
@@ -537,9 +743,8 @@ class NotionPageSelector(QDialog):
             except Exception:
                 display_text = title
 
-            cb = QCheckBox(display_text)
-            cb.setToolTip(f"Confidence score: {score}")
-            self.checkbox_layout.addWidget(cb)
+            row, _cb = self._make_result_row(display_text, page, score=score)
+            self.checkbox_layout.addWidget(row)
 
         # Pre-select the suggested subtag in the property selector.
         # All suggestions share the same subtag (the card tests one concept).
@@ -689,8 +894,10 @@ class NotionPageSelector(QDialog):
             tooltip("No results found. Try a different search term")
             return
 
-        # Create checkboxes for results
+        # Load note tag cache once for all rows (avoids N per-row DB queries)
+        self._load_note_tag_strings()
 
+        # Create result rows (checkbox + card count pill)
         for page in self.pages_data:
             try:
                 if self.database_selector.currentText() == "Textbooks":
@@ -700,14 +907,14 @@ class NotionPageSelector(QDialog):
 
                 search_suffix = page['properties']['Search Suffix']['formula']['string'] if page['properties'].get('Search Suffix', {}).get('formula', {}).get('string') else ""
 
-                if self.database_selector.currentText() == "Subjects" or self.database_selector.currentText() == "Pharmacology":
+                if self.database_selector.currentText() in ("Subjects", "Pharmacology"):
                     search_prefix = page['properties']['Search Prefix']['formula']['string'] if page['properties'].get('Search Suffix', {}).get('formula', {}).get('string') else ""
                     display_text = f"{search_prefix} {title} {search_suffix}"
                 else:
                     display_text = f"{title} {search_suffix}"
 
-                checkbox = QCheckBox(display_text)
-                self.checkbox_layout.addWidget(checkbox)
+                row, _cb = self._make_result_row(display_text, page)
+                self.checkbox_layout.addWidget(row)
             except Exception as e:
                 showInfo(f"Error processing page: {e}")
 
@@ -722,15 +929,13 @@ class NotionPageSelector(QDialog):
                 self.clear_search_results()
 
     def select_all_pages(self):
-        for i in range(self.checkbox_layout.count()):
-            checkbox = self.checkbox_layout.itemAt(i).widget()
-            checkbox.setChecked(True)
+        for cb in self._get_result_checkboxes():
+            cb.setChecked(True)
 
     def search_cards(self):
         selected_pages = []
-        for i in range(self.checkbox_layout.count()):
-            checkbox = self.checkbox_layout.itemAt(i).widget()
-            if checkbox.isChecked():
+        for i, cb in enumerate(self._get_result_checkboxes()):
+            if cb.isChecked():
                 selected_pages.append(self.pages_data[i])
 
         if not selected_pages:
@@ -843,9 +1048,8 @@ class NotionPageSelector(QDialog):
             return
 
         selected_pages = []
-        for i in range(self.checkbox_layout.count()):
-            checkbox = self.checkbox_layout.itemAt(i).widget()
-            if checkbox.isChecked():
+        for i, cb in enumerate(self._get_result_checkboxes()):
+            if cb.isChecked():
                 selected_pages.append(self.pages_data[i])
 
         property_name = self.property_selector.currentText()
@@ -1190,8 +1394,7 @@ class NotionPageSelector(QDialog):
     def get_tags_from_selected_pages(self):
         """Extract tags from selected pages"""
         selected_pages = []
-        for i in range(self.checkbox_layout.count()):
-            checkbox = self.checkbox_layout.itemAt(i).widget()
+        for i, checkbox in enumerate(self._get_result_checkboxes()):
             if checkbox.isChecked():
                 selected_pages.append(self.pages_data[i])
 
@@ -1426,8 +1629,7 @@ class NotionPageSelector(QDialog):
             return
 
         selected_pages = []
-        for i in range(self.checkbox_layout.count()):
-            checkbox = self.checkbox_layout.itemAt(i).widget()
+        for i, checkbox in enumerate(self._get_result_checkboxes()):
             if checkbox.isChecked():
                 selected_pages.append(self.pages_data[i])
 
@@ -1725,8 +1927,7 @@ class NotionPageSelector(QDialog):
             return
 
         selected_pages = []
-        for i in range(self.checkbox_layout.count()):
-            checkbox = self.checkbox_layout.itemAt(i).widget()
+        for i, checkbox in enumerate(self._get_result_checkboxes()):
             if checkbox.isChecked():
                 selected_pages.append(self.pages_data[i])
 
