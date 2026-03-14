@@ -19,7 +19,7 @@ import threading
 from aqt.qt import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QProgressBar, Qt, QTimer
 )
-from aqt.utils import tooltip
+from .utils import malleus_tooltip
 from .config import DATABASES
 
 try:
@@ -208,7 +208,7 @@ def perform_cache_update(notion_cache, main_window):
                 progress[0].setLabelText("Done!")
                 # Brief pause so the user sees 100 % before the window closes
                 QTimer.singleShot(600, progress[0].close)
-                QTimer.singleShot(700, lambda: tooltip(
+                QTimer.singleShot(700, lambda: malleus_tooltip(
                     "Cache successfully downloaded and updated"
                 ))
             main_window.taskman.run_on_main(complete)
@@ -230,7 +230,7 @@ def perform_cache_update(notion_cache, main_window):
             if progress[0] is None:
                 return
             progress[0].close()
-            tooltip(msg)
+            malleus_tooltip(msg)
         main_window.taskman.run_on_main(_err)
 
     def download_thread():

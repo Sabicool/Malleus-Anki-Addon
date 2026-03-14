@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import List, Dict, Tuple
 from datetime import datetime
 from aqt import mw
-from aqt.utils import tooltip
+from .utils import malleus_tooltip
 from .config import NOTION_TOKEN, get_database_name
 
 class NotionCache:
@@ -65,7 +65,7 @@ class NotionCache:
             # Only warn if expired and online (can update)
             if is_expired and warn_if_expired and self.is_online():
                 mw.taskman.run_on_main(
-                    lambda: tooltip("Newer database version available. Click 'Update Database' to update.")
+                    lambda: malleus_tooltip("Newer database version available. Click 'Update Database' to update.")
                 )
 
             # Return cached data even if expired (better than crashing)
@@ -173,7 +173,7 @@ class NotionCache:
                 
                 if pages:
                     self.save_to_cache(database_id, pages)
-                    mw.taskman.run_on_main(lambda: tooltip(f"{database_name} database updated"))
+                    mw.taskman.run_on_main(lambda: malleus_tooltip(f"{database_name} database updated"))
                 
                 if callback:
                     mw.taskman.run_on_main(callback)
@@ -181,7 +181,7 @@ class NotionCache:
             except requests.exceptions.RequestException as e:
                 print(f"Network error during {database_name} sync: {e}")
                 mw.taskman.run_on_main(
-                    lambda: tooltip(f"Offline: Using cached {database_name} data")
+                    lambda: malleus_tooltip(f"Offline: Using cached {database_name} data")
                 )
                 if callback:
                     mw.taskman.run_on_main(callback)

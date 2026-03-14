@@ -6,7 +6,8 @@ from aqt.qt import (QDialog, QVBoxLayout, QHBoxLayout, QLineEdit,
                     QPushButton, QLabel, QScrollArea, QWidget,
                     QFrame, QComboBox, QRadioButton,
                     QButtonGroup, QGroupBox, QTimer)
-from aqt.utils import showInfo, tooltip
+from aqt.utils import showInfo
+from ..utils import malleus_tooltip
 from aqt import mw
 from typing import List, Dict, Tuple, Optional
 import re
@@ -705,5 +706,5 @@ def update_subject_tags_for_browser(browser, notion_cache, config):
         f"Tags successfully updated: {total_tags_updated}\n"
         f"Tags removed: {total_tags_removed}\n"
     )
-    tooltip(f"Updated {notes_modified} notes")
+    malleus_tooltip(f"Updated {notes_modified} notes")
     showInfo(summary)

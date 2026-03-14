@@ -11,7 +11,8 @@ from aqt.qt import (QDialog, QVBoxLayout, QHBoxLayout, QComboBox,
 from aqt.browser import Browser
 from aqt.addcards import AddCards
 from aqt.editcurrent import EditCurrent
-from aqt.utils import showInfo, tooltip
+from aqt.utils import showInfo
+from ..utils import malleus_tooltip
 from PyQt6.QtGui import QDesktopServices
 import anki.notes
 from ..config import DATABASE_PROPERTIES, get_database_id, get_database_name
@@ -714,7 +715,7 @@ class NotionPageSelector(QDialog):
         source_text         = _field('Source')
 
         # 2. Run the suggester
-        tooltip("Analysing card text…")
+        malleus_tooltip("Analysing card text…")
         suggestions = suggest_subject_tags(
             card_text, self.notion_cache,
             extra=extra_text,
@@ -785,7 +786,7 @@ class NotionPageSelector(QDialog):
         self.results_group.setTitle(
             f"Suggested Tags ({len(suggestions)} found{subtag_label})"
         )
-        tooltip(f"Found {len(suggestions)} suggested tag(s)")
+        malleus_tooltip(f"Found {len(suggestions)} suggested tag(s)")
 
     def handle_yield_click(self, yield_option):
         """Handle yield radio button clicks - allow deselection of selected button"""
@@ -917,7 +918,7 @@ class NotionPageSelector(QDialog):
             self.checkbox_layout.itemAt(i).widget().setParent(None)
 
         if not self.pages_data and not self.config['autosearch']:
-            tooltip("No results found. Try a different search term")
+            malleus_tooltip("No results found. Try a different search term")
             return
 
         # Only show card counts when the result set is small enough to be useful.

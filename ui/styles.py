@@ -382,9 +382,9 @@ def apply_malleus_style(widget):
         from aqt.qt import QApplication, QPalette
         pal  = QApplication.instance().palette()
         dark = pal.color(QPalette.ColorRole.Window).lightness() < 128
-        tt_bg   = "#2b2b2b" if dark else "#fffde7"
+        tt_bg   = "#2b2b2b" if dark else "#f5f5f5"
         tt_text = "#e6e6e6" if dark else "#1a1a1a"
-        tt_border = "rgba(120,120,120,0.55)" if dark else "rgba(160,140,80,0.55)"
+        tt_border = "rgba(120,120,120,0.55)" if dark else "rgba(120,120,120,0.40)"
     except Exception:
         tt_bg, tt_text, tt_border = "#fffde7", "#1a1a1a", "rgba(160,140,80,0.55)"
 
