@@ -54,6 +54,17 @@ WEIGHT_CLOZE_BODY   = 1.5
 BONUS_FULL_PHRASE   = 3.0
 BONUS_MOST_WORDS    = 2.0
 BONUS_HALF_WORDS    = 1.3
+# Per-field weights for supplementary signals (fraction of primary weight).
+# Extra:                stages 1–4  — rich clinical prose, high value
+# Source:               stages 1–3  — URL titles/slugs, strong topic signal
+# Additional Resources: stages 2–3  — reference list, weaker topic signal
+EXTRA_WEIGHT        = 0.6
+SOURCE_WEIGHT       = 0.5
+ADDL_WEIGHT         = 0.2
+# Cloze answers as Stage 1 topic queries: slightly lower than stem-extracted
+# phrases.  Cards like "What effects are caused by ethylene glycol poisoning?
+# → AKI" should rank the disease (stem) above the effect (cloze answer).
+CLOZE_TOPIC_WEIGHT  = 0.65
 
 
 # ── Stopwords ──────────────────────────────────────────────────────────────────
@@ -212,6 +223,70 @@ def _is_useful_cloze_query(answer: str) -> bool:
     return True
 
 
+# ── Source field preprocessing ────────────────────────────────────────────────
+
+def _extract_source_topics(source_text: str) -> str:
+    """
+    Extract useful topic text from a Source field that may contain raw URLs.
+
+    Two complementary signals:
+    1. Non-URL descriptive text (the label the author typed next to the link).
+    2. URL query-param values and path segments that look like page title slugs
+       (hyphens/underscores converted to spaces).
+
+    Example input:
+        "eTG - Acute management of seizures and status epilepticus
+         https://...viewTopic?guidelinePage=Neurology&topicfile=acute-management-...
+         Published/Amended May 2022, Accessed 21 August 2025"
+
+    Example output (roughly):
+        "Neurology acute management of seizures and status epilepticus
+         eTG - Acute management of seizures and status epilepticus"
+
+    Noise stripped: bare domains, protocol prefixes, date strings.
+    """
+    from urllib.parse import urlparse, parse_qs
+
+    URL_RE = re.compile(r'https?://\S+')
+    DATE_RE = re.compile(
+        r'\b(?:published|amended|accessed|updated|reviewed|cited)'
+        r'[^,.\n]*(?:,\s*|\s+)(?:\d{1,2}\s+)?'
+        r'(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\w*\s*\d{4}\b',
+        re.I
+    )
+
+    parts: list = []
+
+    for m in URL_RE.finditer(source_text):
+        url = m.group()
+        try:
+            parsed = urlparse(url)
+            # Query-param values often carry page titles as slugs
+            qs = parse_qs(parsed.query)
+            for vals in qs.values():
+                for val in vals:
+                    words = re.sub(r'[-_]', ' ', val).strip()
+                    if len(words) >= 5 and not re.match(r'^(true|false|\d+)$', words):
+                        parts.append(words)
+            # Path segments: only keep obvious slugs (contain hyphens, long enough)
+            for seg in parsed.path.split('/'):
+                if '-' in seg and len(seg) > 8:
+                    parts.append(re.sub(r'[-_]', ' ', seg))
+        except Exception:
+            pass
+
+    # Non-URL text after stripping URLs and date noise
+    non_url = URL_RE.sub(' ', source_text)
+    non_url = DATE_RE.sub(' ', non_url)
+    non_url = re.sub(r'\b\d{4}\b', ' ', non_url)
+    non_url = re.sub(r'[|/\\]', ' ', non_url)
+    non_url = re.sub(r'\s+', ' ', non_url).strip()
+    if non_url:
+        parts.append(non_url)
+
+    return ' '.join(parts)
+
+
 # ── Stage 1: Topic extraction and search ──────────────────────────────────────
 
 def _extract_cloze_answers(text: str) -> List[str]:
@@ -227,28 +302,43 @@ def _extract_topic_phrases(question_stem: str) -> List[str]:
     """
     Extract disease/condition phrases from the question stem.
 
-    Patterns:
-      "of [topic]" — capped at 4 words to avoid matching entire sentences
-      "diagnose [topic]"
+    Patterns (all capped at 4 words to avoid matching whole sentences):
+      "of [X]"                             — "management of heart failure"
+      "caused by [X]" / "due to [X]"       — "caused by ethylene glycol poisoning"
+      "secondary to [X]" / "following [X]" — "secondary to rhabdomyolysis"
+      "resulting from [X]" / "from [X]"    — "resulting from liver failure"
+      "in [X] poisoning/toxicity/…"        — "in carbon monoxide poisoning"
+      "diagnose/diagnosis [X]"
 
     Leading modifier words (nonsevere, acute, chronic…) are stripped to
     produce a cleaner search query alongside the original.
     """
     phrases: List[str] = []
+    PHRASE_CAP = r'(?:\w+)(?:\s+\w+){0,3}?'
+    PHRASE_END  = r'(?=\s+in\b|\s+for\b|\s+with\b|\s+at\b|\s+are\b|\s+is\b|\?|$)'
 
-    # "of X" — limit to 4 words to prevent matching whole sentences
-    m1 = re.findall(
-        r'\bof\s+((?:\w+)(?:\s+\w+){0,3}?)(?=\s+in\b|\s+for\b|\s+with\b|\s+at\b|\?|$)',
-        question_stem, re.I
-    )
-    phrases.extend(m1)
+    # "of X"
+    phrases.extend(re.findall(
+        rf'\bof\s+({PHRASE_CAP}){PHRASE_END}', question_stem, re.I))
+
+    # Causal / relational triggers
+    for trigger in (
+        r'caused\s+by', r'due\s+to', r'secondary\s+to',
+        r'following', r'resulting\s+from', r'from',
+    ):
+        phrases.extend(re.findall(
+            rf'\b{trigger}\s+({PHRASE_CAP}){PHRASE_END}', question_stem, re.I))
+
+    # "in X poisoning/toxicity/overdose/disease/syndrome/infection/injury"
+    phrases.extend(re.findall(
+        r'\bin\s+((?:\w+\s+){0,2}\w+)\s+'
+        r'(?:poisoning|toxicity|overdose|disease|syndrome|infection|injury)',
+        question_stem, re.I))
 
     # "diagnose/diagnosis [topic]"
-    m2 = re.findall(
+    phrases.extend(re.findall(
         r'\bdiagnos\w*\s+([\w\s]{3,40}?)(?:\?|$|\s+in\b|\s+with\b)',
-        question_stem, re.I
-    )
-    phrases.extend(m2)
+        question_stem, re.I))
 
     MODIFIERS = {
         'nonsevere', 'severe', 'mild', 'moderate', 'acute', 'chronic',
@@ -308,42 +398,88 @@ def _topic_search_scores(
     card_text: str,
     all_pages: List[Dict],
     notion_cache,
+    extra: str = '',
+    source: str = '',
 ) -> Dict[str, float]:
     """
-    Stage 1: search for the card topic using:
-      (a) topic phrases extracted from the question stem
-      (b) high-frequency and medical-suffix words in the stem
-      (c) cloze answers that pass the quality filter
+    Stage 1: search for the card topic using topic phrases, stem-frequency
+    words, useful cloze answers, plus signals from the Extra and Source fields.
 
-    Runs filter_pages on ALL pages for maximum precision.
-    Scores are multiplied by TOPIC_SEARCH_BONUS.
+    Weight hierarchy (fraction of TOPIC_SEARCH_BONUS):
+      Text field     1.0×  — primary signal
+      Extra          EXTRA_WEIGHT (0.6×) — rich clinical prose
+      Source         SOURCE_WEIGHT (0.5×) — URL titles / slugs (very precise)
+
+    Scores are combined with max(), so a strong primary hit is never downgraded
+    by a weaker supplementary one.
     """
     scores: Dict[str, float] = {}
-    queries: List[str] = []
 
+    # Each entry: (query_list, weight_multiplier)
+    query_groups: List[Tuple[List[str], float]] = []
+
+    # ── Primary: stem-extracted topics (full weight) ────────────────────────
+    # These come from the question frame ("caused by X", "of X", etc.) and
+    # reliably name the disease/condition being asked about.
     stem = _extract_question_stem(card_text)
-    queries.extend(_extract_topic_phrases(stem))
-    queries.extend(_stem_frequency_topics(stem))
+    stem_queries: List[str] = []
+    stem_queries.extend(_extract_topic_phrases(stem))
+    stem_queries.extend(_stem_frequency_topics(stem))
+    query_groups.append((stem_queries, 1.0))
 
+    # ── Primary: cloze answers (reduced weight) ──────────────────────────────
+    # Cloze answers name real conditions too, but on "What effects are caused
+    # by ethylene glycol poisoning? → AKI" the answer is a *consequence*, not
+    # the topic.  Weighting below 1.0 ensures stem topics rank above them when
+    # both map to different pages.
+    cloze_queries: List[str] = []
     for answer in _extract_cloze_answers(card_text):
         if _is_useful_cloze_query(answer):
             clean = re.sub(r'[^\w\s]', ' ', answer).strip()
             if len(clean.replace(' ', '')) >= 3:
-                queries.append(clean)
+                cloze_queries.append(clean)
+    if cloze_queries:
+        query_groups.append((cloze_queries, CLOZE_TOPIC_WEIGHT))
 
-    # Deduplicate
-    seen: Set[str] = set()
-    queries = [q for q in queries if not (q.lower() in seen or seen.add(q.lower()))]
+    # ── Extra field ──────────────────────────────────────────────────────────
+    if extra and extra.strip():
+        extra_clean = re.sub(r'<[^>]+>', ' ', extra)
+        extra_q: List[str] = []
+        extra_q.extend(_extract_topic_phrases(extra_clean))
+        extra_q.extend(_stem_frequency_topics(extra_clean))
+        query_groups.append((extra_q, EXTRA_WEIGHT))
 
-    print(f"[SuggestTags] Stage 1 queries: {queries}")
-    for query in queries:
-        if len(query.replace(' ', '')) < 3:
-            continue
-        for page in notion_cache.filter_pages(all_pages, query):
-            pid = page.get('id', '')
-            if pid:
-                s = page.get('_composite_score', 0.0) * TOPIC_SEARCH_BONUS
-                scores[pid] = max(scores.get(pid, 0.0), s)
+    # ── Source field (URL titles / slugs) ────────────────────────────────────
+    if source and source.strip():
+        source_clean = _extract_source_topics(source)
+        source_q: List[str] = []
+        source_q.extend(_extract_topic_phrases(source_clean))
+        source_q.extend(_stem_frequency_topics(source_clean))
+        query_groups.append((source_q, SOURCE_WEIGHT))
+
+    # Deduplicate within each group; across groups keep all (different weights)
+    for i, (queries, _) in enumerate(query_groups):
+        seen: Set[str] = set()
+        query_groups[i] = (
+            [q for q in queries if not (q.lower() in seen or seen.add(q.lower()))],
+            query_groups[i][1],
+        )
+
+    # query_groups order: stem, cloze, extra, source (only non-empty ones appended)
+    print(f"[SuggestTags] Stage 1: {sum(len(q) for q, _ in query_groups)} queries "
+          f"across {len(query_groups)} groups "
+          f"(stem={len(query_groups[0][0])}, "
+          f"cloze={len(query_groups[1][0]) if len(query_groups) > 1 and query_groups[1][1] == CLOZE_TOPIC_WEIGHT else 0})")
+
+    for queries, weight in query_groups:
+        for query in queries:
+            if len(query.replace(' ', '')) < 3:
+                continue
+            for page in notion_cache.filter_pages(all_pages, query):
+                pid = page.get('id', '')
+                if pid:
+                    s = page.get('_composite_score', 0.0) * TOPIC_SEARCH_BONUS * weight
+                    scores[pid] = max(scores.get(pid, 0.0), s)
 
     print(f"[SuggestTags] Stage 1: {len(scores)} pages matched")
     return scores
@@ -422,16 +558,44 @@ def _expand(word: str) -> List[str]:
             if len(w) >= MIN_WORD_LEN]
 
 
-def _body_candidates(card_text: str) -> List[Tuple[str, float]]:
-    """Stage 2 body candidate extraction — skips drug-type cloze answers."""
+def _body_candidates(
+    card_text: str,
+    extra: str = '',
+    additional_resources: str = '',
+    source: str = '',
+) -> List[Tuple[str, float]]:
+    """
+    Stage 2 body candidate extraction.
+
+    Weight hierarchy:
+      Text field            1.0×  (+ WEIGHT_CLOZE_BODY for cloze answers)
+      Extra                 EXTRA_WEIGHT (0.6×)
+      Source (URL titles)   SOURCE_WEIGHT (0.5×)
+      Additional Resources  ADDL_WEIGHT (0.2×)
+
+    Higher weight for the same phrase wins — a phrase seen in the Text field
+    at 1.0× is never downgraded if it also appears in a supplementary field.
+    """
     candidates: List[Tuple[str, float]] = []
-    seen: Set[str] = set()
 
     def add(phrase: str, weight: float):
-        if phrase not in seen:
-            seen.add(phrase)
-            candidates.append((phrase, weight))
+        for i, (p, w) in enumerate(candidates):
+            if p == phrase:
+                if weight > w:
+                    candidates[i] = (phrase, weight)
+                return
+        candidates.append((phrase, weight))
 
+    def _tokenise_field(text: str, weight: float):
+        clean = re.sub(r'<[^>]+>', ' ', text)
+        words_raw = re.sub(r'[^\w\s]', ' ', clean.lower()).split()
+        kept = [w for raw in words_raw for w in _expand(raw) if _is_worth_keeping(w)]
+        for w in kept:
+            add(w, WEIGHT_SINGLE_WORD * weight)
+        for i in range(len(kept) - 1):
+            add(kept[i] + ' ' + kept[i + 1], WEIGHT_BIGRAM * weight)
+
+    # ── Text: cloze answers (boosted) ───────────────────────────────────────
     for answer in _extract_cloze_answers(card_text):
         if _is_drug_answer(answer):
             continue
@@ -442,15 +606,23 @@ def _body_candidates(card_text: str) -> List[Tuple[str, float]]:
         for i in range(len(kept) - 1):
             add(kept[i] + ' ' + kept[i + 1], WEIGHT_CLOZE_BODY * WEIGHT_BIGRAM)
 
-    clean = re.sub(r'\{\{c\d+::([^}:]+)(?:::[^}]*)?\}\}', r'\1', card_text)
-    clean = re.sub(r'<[^>]+>', ' ', clean)
-    words_raw = re.sub(r'[^\w\s]', ' ', clean.lower()).split()
-    kept_body = [w for raw in words_raw for w in _expand(raw) if _is_worth_keeping(w)]
+    # ── Text: full body ──────────────────────────────────────────────────────
+    _tokenise_field(
+        re.sub(r'\{\{c\d+::([^}:]+)(?:::[^}]*)?\}\}', r'\1', card_text),
+        1.0,
+    )
 
-    for w in kept_body:
-        add(w, WEIGHT_SINGLE_WORD)
-    for i in range(len(kept_body) - 1):
-        add(kept_body[i] + ' ' + kept_body[i + 1], WEIGHT_BIGRAM)
+    # ── Extra ────────────────────────────────────────────────────────────────
+    if extra and extra.strip():
+        _tokenise_field(extra, EXTRA_WEIGHT)
+
+    # ── Source (URL titles / slugs) ──────────────────────────────────────────
+    if source and source.strip():
+        _tokenise_field(_extract_source_topics(source), SOURCE_WEIGHT)
+
+    # ── Additional Resources ─────────────────────────────────────────────────
+    if additional_resources and additional_resources.strip():
+        _tokenise_field(additional_resources, ADDL_WEIGHT)
 
     return candidates
 
@@ -549,7 +721,7 @@ SUBTAG_KEYWORDS: Dict[str, List[str]] = {
         "palpitat", "syncope", "dizzi", "headache", "weakness",
         "swelling", "redness", "jaundice", "pallor", "rash",
         "itching", "pruritus", "numbness", "tingling",
-        "appearance",
+        "appearance", "suggestive"
     ],
     "Diagnosis/Investigations": [
         "diagnos", "investigat", "imaging", "scan", "biopsy",
@@ -608,15 +780,24 @@ SUBTAG_PRIORITY = [
 ]
 
 
-def suggest_subtag(card_text: str) -> Optional[str]:
+def suggest_subtag(card_text: str, extra: str = '') -> Optional[str]:
     """
     Return the most relevant Subjects subtag, or None.
 
-    Scores each subtag by counting keyword substring hits in the cleaned
-    card text (cloze markers stripped).  Ties broken by SUBTAG_PRIORITY.
+    Scores each subtag by counting keyword hits in the cleaned card text
+    plus the Extra field (at full weight — Extra often explicitly labels
+    the clinical aspect: "Management:", "Investigations:" etc.).
+
+    Source and Additional Resources are excluded here: URL slugs don't
+    reliably indicate subtag type, and reference lists add noise.
+    Ties broken by SUBTAG_PRIORITY.
     """
     clean = re.sub(r'\{\{c\d+::([^}:]+)(?:::[^}]*)?\}\}', r'\1', card_text)
     clean = re.sub(r'<[^>]+>', ' ', clean).lower()
+
+    if extra and extra.strip():
+        extra_clean = re.sub(r'<[^>]+>', ' ', extra).lower()
+        clean = clean + ' ' + extra_clean
 
     scores: Dict[str, int] = {}
     for subtag, keywords in SUBTAG_KEYWORDS.items():
@@ -641,9 +822,27 @@ def suggest_subject_tags(
     card_text: str,
     notion_cache,
     max_results: int = MAX_SUGGESTIONS,
+    extra: str = '',
+    additional_resources: str = '',
+    source: str = '',
 ) -> List[Dict]:
     """
     Return a ranked list of suggested Subjects pages.
+
+    Args:
+        card_text:            The note's Text field (cloze-formatted).
+        notion_cache:         NotionCache instance.
+        max_results:          Maximum number of suggestions to return.
+        extra:                Note's Extra field.  Used in all four stages
+                              at EXTRA_WEIGHT (0.6×); subtag detection uses
+                              it at full weight since it often explicitly
+                              labels the clinical aspect.
+        additional_resources: Note's Additional Resources field.  Used in
+                              Stages 2–3 at ADDL_WEIGHT (0.2×).
+        source:               Note's Source field.  URL titles and path
+                              slugs extracted and used in Stages 1–3 at
+                              SOURCE_WEIGHT (0.5×).  Not used for subtag
+                              detection (URL slugs are poor subtag signals).
 
     Each result dict:
         title            — human-readable page name
@@ -661,8 +860,12 @@ def suggest_subject_tags(
 
     page_by_id: Dict[str, Dict] = {p.get('id', ''): p for p in pages}
 
-    stage1 = _topic_search_scores(card_text, pages, notion_cache)
-    candidates = _body_candidates(card_text)
+    stage1 = _topic_search_scores(card_text, pages, notion_cache,
+                                   extra=extra, source=source)
+    candidates = _body_candidates(card_text,
+                                  extra=extra,
+                                  additional_resources=additional_resources,
+                                  source=source)
     stage2 = _shortlist_and_score(candidates, index, page_by_id, notion_cache) if candidates else {}
 
     merged: Dict[str, float] = {}
@@ -674,8 +877,14 @@ def suggest_subject_tags(
     if not merged:
         return []
 
+    # Title bonus: page names mentioned anywhere in any field get a score lift
     clean_card = re.sub(r'<[^>]+>', ' ',
         re.sub(r'\{\{c\d+::([^}:]+)(?:::[^}]*)?\}\}', r'\1', card_text))
+    for field_text in (extra, additional_resources):
+        if field_text:
+            clean_card += ' ' + re.sub(r'<[^>]+>', ' ', field_text)
+    if source:
+        clean_card += ' ' + _extract_source_topics(source)
     merged = _apply_title_bonus(merged, page_by_id, clean_card)
 
     ranked = sorted(
@@ -683,7 +892,7 @@ def suggest_subject_tags(
         reverse=True,
     )
 
-    subtag = suggest_subtag(card_text)
+    subtag = suggest_subtag(card_text, extra=extra)
 
     results = []
     for score, pid in ranked[:max_results]:

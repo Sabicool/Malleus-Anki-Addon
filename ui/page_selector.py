@@ -485,7 +485,8 @@ class NotionPageSelector(QDialog):
             # db.list returns a flat list of values for a single-column query
             self._note_tag_strings = col.db.list("select tags from notes")
             self._note_tag_strings_col = col_path
-        except Exception:
+        except Exception as e:
+            print(f"[MalleusCardCount] failed to load note tag strings: {e}")
             self._note_tag_strings = []
             self._note_tag_strings_col = None
 
@@ -493,16 +494,21 @@ class NotionPageSelector(QDialog):
         """
         Return the number of notes that have a tag matching this Notion page.
 
-        Uses the cached tag strings loaded by _load_note_tag_strings() so that
-        counting across many result rows requires only one DB query total.
-        Each call is a pure-Python prefix scan — typically <1 ms for a 10k-note
-        collection regardless of how many result rows are being rendered.
+        Uses the cached tag strings loaded by _load_note_tag_strings() so
+        counting N result rows costs one DB query total.
+
+        Checks 'Main Tag' first (gives the page-root prefix that is shared by
+        all subtag variants on notes), then falls back to 'Tag'.  General pages
+        show 0 — their Main Tag path omits *General and so won't match, but
+        that edge case is acceptable.
         """
         try:
-            # Prefer Main Tag (the page root, matches all subtag variants)
             tag = ''
+            properties = page.get('properties', {})
             for prop_name in ('Main Tag', 'Tag'):
-                prop = page.get('properties', {}).get(prop_name, {})
+                prop = properties.get(prop_name)
+                if not prop or not isinstance(prop, dict):
+                    continue
                 if prop.get('type') == 'formula':
                     val = prop.get('formula', {}).get('string', '').strip()
                     if val:
@@ -514,9 +520,9 @@ class NotionPageSelector(QDialog):
 
             tag_strings = getattr(self, '_note_tag_strings', [])
             return sum(1 for ts in tag_strings if tag in ts)
-        except Exception:
+        except Exception as e:
+            print(f"[MalleusCardCount] error: {e}")
             return 0
-
     @staticmethod
     def _score_to_dots(score: float, max_score: float = 4.0) -> str:
         """
@@ -556,8 +562,8 @@ class NotionPageSelector(QDialog):
         # Card count pill — omitted when the result set is large
         if show_count:
             card_count = self._get_card_count_for_page(page)
-            count_label = QLabel(f"{card_count} {'card' if card_count == 1 else 'cards'}")
-            count_label.setToolTip("Number of cards in your collection tagged with this page")
+            count_label = QLabel(f"{card_count} {'note' if card_count == 1 else 'notes'}")
+            count_label.setToolTip("Number of notes in your collection tagged with this page")
             if card_count == 0:
                 count_label.setStyleSheet(
                     "color: rgba(128,128,128,0.6); font-size: 11px; padding: 1px 6px;"
@@ -694,9 +700,27 @@ class NotionPageSelector(QDialog):
             showInfo("The card's Text field is empty — nothing to analyse.")
             return
 
+        # Collect supplementary fields individually so each can be weighted
+        # differently inside the suggester.
+        def _field(name):
+            try:
+                v = note[name]
+                return v if v and v.strip() else ''
+            except Exception:
+                return ''
+
+        extra_text          = _field('Extra')
+        addl_resources_text = _field('Additional Resources')
+        source_text         = _field('Source')
+
         # 2. Run the suggester
         tooltip("Analysing card text…")
-        suggestions = suggest_subject_tags(card_text, self.notion_cache)
+        suggestions = suggest_subject_tags(
+            card_text, self.notion_cache,
+            extra=extra_text,
+            additional_resources=addl_resources_text,
+            source=source_text,
+        )
 
         if not suggestions:
             showInfo(
