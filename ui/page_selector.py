@@ -366,46 +366,14 @@ class NotionPageSelector(QDialog):
         # button_layout.addWidget(donate_button)
 
         if has_notes:
-            # ── Row 1: primary card actions ───────────────────────────────────
+            # ── Row 1: tag management (all outlined — reversible/config actions)
             row1 = QHBoxLayout()
             row1.setSpacing(6)
 
             select_all_button = QPushButton("Select All")
             select_all_button.setObjectName("secondary")
             select_all_button.clicked.connect(self.select_all_pages)
-            row1.addWidget(select_all_button)
-
-            find_cards_button = QPushButton("Find Cards")
-            find_cards_button.clicked.connect(self.search_cards)
-            row1.addWidget(find_cards_button)
-
-            if isinstance(self.parent(), AddCards):
-                add_tags_button = QPushButton("Add Tags")
-                add_tags_button.clicked.connect(self.add_tags)
-                row1.addWidget(add_tags_button)
-            else:
-                create_cards_button = QPushButton("Create Cards")
-                create_cards_button.clicked.connect(self.create_cards)
-                row1.addWidget(create_cards_button)
-                add_tags_button = QPushButton("Add Tags")
-                add_tags_button.clicked.connect(self.add_tags)
-                row1.addWidget(add_tags_button)
-
-            replace_tags_button = QPushButton("Replace Tags")
-            replace_tags_button.clicked.connect(self.replace_tags)
-            row1.addWidget(replace_tags_button)
-
-            remove_tags_button = QPushButton("Remove Tags")
-            remove_tags_button.setObjectName("danger")
-            remove_tags_button.clicked.connect(self.remove_tags)
-            row1.addWidget(remove_tags_button)
-
-            row1.addStretch()
-            buttons_vbox.addLayout(row1)
-
-            # ── Row 2: utilities + suggest ────────────────────────────────────
-            row2 = QHBoxLayout()
-            row2.setSpacing(6)
+            row1.addWidget(select_all_button, stretch=1)
 
             suggest_button = QPushButton("✦ Suggest Tags")
             suggest_button.setObjectName("secondary")
@@ -413,41 +381,65 @@ class NotionPageSelector(QDialog):
                 "Automatically suggest subject tags based on the card's text content"
             )
             suggest_button.clicked.connect(self.suggest_tags_from_card)
-            row2.addWidget(suggest_button)
+            row1.addWidget(suggest_button, stretch=1)
 
-            row2.addWidget(update_database_button)
-            row2.addWidget(guidelines_button)
-            row2.addWidget(donate_button)
-            row2.addStretch()
+            add_tags_button = QPushButton("Add Tags")
+            add_tags_button.setObjectName("secondary")
+            add_tags_button.clicked.connect(self.add_tags)
+            row1.addWidget(add_tags_button, stretch=1)
+
+            if not isinstance(self.parent(), AddCards):
+                replace_tags_button = QPushButton("Replace Tags")
+                replace_tags_button.setObjectName("secondary")
+                replace_tags_button.clicked.connect(self.replace_tags)
+                row1.addWidget(replace_tags_button, stretch=1)
+
+                remove_tags_button = QPushButton("Remove Tags")
+                remove_tags_button.setObjectName("danger")
+                remove_tags_button.clicked.connect(self.remove_tags)
+                row1.addWidget(remove_tags_button, stretch=1)
+
+            buttons_vbox.addLayout(row1)
+
+            # ── Row 2: execute / utilities (primary blue for Find/Create) ─────
+            row2 = QHBoxLayout()
+            row2.setSpacing(6)
+
+            find_cards_button = QPushButton("Find Cards")
+            find_cards_button.clicked.connect(self.search_cards)
+            row2.addWidget(find_cards_button, stretch=1)
+
+            if not isinstance(self.parent(), AddCards):
+                create_cards_button = QPushButton("Create Cards")
+                create_cards_button.clicked.connect(self.create_cards)
+                row2.addWidget(create_cards_button, stretch=1)
+
+            row2.addWidget(update_database_button, stretch=1)
+            row2.addWidget(guidelines_button, stretch=1)
+            row2.addWidget(donate_button, stretch=1)
             buttons_vbox.addLayout(row2)
 
         else:
-            # ── Single row: no note open ──────────────────────────────────────
+            # ── Single row: no note open — all stretch to fill ────────────────
             row1 = QHBoxLayout()
             row1.setSpacing(6)
 
             select_all_button = QPushButton("Select All")
             select_all_button.setObjectName("secondary")
             select_all_button.clicked.connect(self.select_all_pages)
-            row1.addWidget(select_all_button)
+            row1.addWidget(select_all_button, stretch=1)
 
             find_cards_button = QPushButton("Find Cards")
             find_cards_button.clicked.connect(self.search_cards)
-            row1.addWidget(find_cards_button)
+            row1.addWidget(find_cards_button, stretch=1)
 
-            if isinstance(self.parent(), AddCards):
-                add_tags_button = QPushButton("Add Tags")
-                add_tags_button.clicked.connect(self.add_tags)
-                row1.addWidget(add_tags_button)
-            else:
-                create_cards_button = QPushButton("Create Cards")
-                create_cards_button.clicked.connect(self.create_cards)
-                row1.addWidget(create_cards_button)
+            create_cards_button = QPushButton("Create Cards")
+            create_cards_button.clicked.connect(self.create_cards)
+            row1.addWidget(create_cards_button, stretch=1)
 
-            row1.addWidget(update_database_button)
-            row1.addWidget(guidelines_button)
-            row1.addWidget(donate_button)
-            row1.addStretch()
+            row1.addWidget(update_database_button, stretch=1)
+            row1.addWidget(guidelines_button, stretch=1)
+            row1.addWidget(donate_button, stretch=1)
             buttons_vbox.addLayout(row1)
 
         button_widget = QWidget()
