@@ -11,7 +11,7 @@ from typing import List, Dict, Tuple
 from datetime import datetime
 from aqt import mw
 from aqt.utils import tooltip
-from .config import NOTION_TOKEN, get_database_name, SYNCED_EXTRA_DATABASE_ID
+from .config import NOTION_TOKEN, get_database_name
 
 class NotionCache:
     """Handles caching of Notion database content"""
@@ -169,13 +169,8 @@ class NotionCache:
                     return
 
                 cached_pages, last_sync_timestamp = self.load_from_cache(database_id, warn_if_expired=False)
-                use_fs = (database_id != SYNCED_EXTRA_DATABASE_ID)
-                pages = self.fetch_updated_pages(database_id, last_sync_timestamp, use_for_search=use_fs)
-
-                # For Synced Extra, fetch block content and embed as _block_html
-                if pages and database_id == SYNCED_EXTRA_DATABASE_ID:
-                    pages = self.fetch_and_embed_blocks(pages)
-
+                pages = self.fetch_updated_pages(database_id, last_sync_timestamp)
+                
                 if pages:
                     self.save_to_cache(database_id, pages)
                     mw.taskman.run_on_main(lambda: tooltip(f"{database_name} database updated"))
@@ -198,11 +193,51 @@ class NotionCache:
         self._sync_thread = threading.Thread(target=sync_thread, daemon=True)
         self._sync_thread.start()
 
-    def fetch_updated_pages(self, database_id: str, last_sync_timestamp: float, use_for_search: bool = True) -> List[Dict]:
-        """Fetch all pages from Notion database that have been updated since last sync"""
+    def _build_query_payload(
+        self, last_sync_date: str, use_for_search_filter: bool, start_cursor: str = None
+    ) -> dict:
+        """Build the Notion database query payload."""
+        if use_for_search_filter:
+            payload = {
+                "filter": {
+                    "and": [
+                        {
+                            "property": "For Search",
+                            "formula": {"checkbox": {"equals": True}}
+                        },
+                        {
+                            "timestamp": "last_edited_time",
+                            "last_edited_time": {"on_or_after": last_sync_date}
+                        }
+                    ]
+                },
+                "page_size": 100
+            }
+        else:
+            payload = {
+                "filter": {
+                    "timestamp": "last_edited_time",
+                    "last_edited_time": {"on_or_after": last_sync_date}
+                },
+                "page_size": 100
+            }
+        if start_cursor:
+            payload["start_cursor"] = start_cursor
+        return payload
+
+    def fetch_updated_pages(self, database_id: str, last_sync_timestamp: float) -> List[Dict]:
+        """
+        Fetch all pages from a Notion database updated since last_sync_timestamp.
+
+        Tries with the "For Search" formula filter first (used by main content
+        databases).  If the database returns a 400 (e.g. Synced Extra /
+        Additional Resources which lack that property), automatically retries
+        with only the last_edited_time filter.
+        """
         pages = []
         has_more = True
         start_cursor = None
+        use_for_search_filter = True   # start optimistic; disabled on 400
 
         if last_sync_timestamp <= 0:
             last_sync_timestamp = time.time() - self.CACHE_EXPIRY
@@ -210,39 +245,30 @@ class NotionCache:
         last_sync_date = datetime.fromtimestamp(last_sync_timestamp).strftime('%Y-%m-%d')
 
         while has_more:
-            timestamp_filter = {
-                "timestamp": "last_edited_time",
-                "last_edited_time": {"on_or_after": last_sync_date}
-            }
-            if use_for_search:
-                payload = {
-                    "filter": {
-                        "and": [
-                            {
-                                "property": "For Search",
-                                "formula": {"checkbox": {"equals": True}}
-                            },
-                            timestamp_filter
-                        ]
-                    },
-                    "page_size": 100
-                }
-            else:
-                payload = {
-                    "filter": timestamp_filter,
-                    "page_size": 100
-                }
-
-            if start_cursor:
-                payload["start_cursor"] = start_cursor
+            payload = self._build_query_payload(
+                last_sync_date, use_for_search_filter, start_cursor
+            )
 
             try:
                 response = requests.post(
                     f"https://api.notion.com/v1/databases/{database_id}/query",
                     headers=self.headers,
                     json=payload,
-                    timeout=self.REQUEST_TIMEOUT  # Use configurable timeout
+                    timeout=self.REQUEST_TIMEOUT
                 )
+
+                # If the "For Search" property doesn't exist on this database,
+                # Notion returns 400.  Retry without that filter.
+                if response.status_code == 400 and use_for_search_filter:
+                    print(
+                        f"Database {database_id} returned 400 with 'For Search' filter — "
+                        f"retrying without it (database may not have that property)"
+                    )
+                    use_for_search_filter = False
+                    start_cursor = None   # reset pagination for the retry
+                    pages = []
+                    continue
+
                 response.raise_for_status()
                 data = response.json()
 
@@ -261,186 +287,6 @@ class NotionCache:
                 break
 
         print(f"Found {len(pages)} updated pages")
-        return pages
-
-    def _fetch_block_children_flat(self, block_id: str) -> List[Dict]:
-        """Fetch direct children of a block, handling pagination. Returns flat list."""
-        blocks = []
-        params = {"page_size": 100}
-        url = f"https://api.notion.com/v1/blocks/{block_id}/children"
-        while True:
-            try:
-                response = requests.get(
-                    url, headers=self.headers, params=params,
-                    timeout=self.REQUEST_TIMEOUT
-                )
-                response.raise_for_status()
-                data = response.json()
-            except Exception as e:
-                print(f"Error fetching block children for {block_id}: {e}")
-                break
-            blocks.extend(data.get("results", []))
-            if data.get("has_more") and data.get("next_cursor"):
-                params = {"page_size": 100, "start_cursor": data["next_cursor"]}
-            else:
-                break
-        return blocks
-
-    def fetch_blocks(self, page_id: str) -> List[Dict]:
-        """Fetch all blocks for a page recursively, embedding children as '_children' key."""
-        blocks = self._fetch_block_children_flat(page_id)
-        for block in blocks:
-            if block.get("has_children"):
-                block["_children"] = self.fetch_blocks(block["id"])
-        return blocks
-
-    def blocks_to_html(self, blocks: List[Dict]) -> str:
-        """Convert a nested block tree (with _children keys) to HTML."""
-
-        # Notion color → CSS style mapping
-        _NOTION_COLORS = {
-            "gray": "color:#9b9a97", "brown": "color:#9f6b53",
-            "orange": "color:#d9730d", "yellow": "color:#cb912f",
-            "green": "color:#448361", "blue": "color:#337ea9",
-            "purple": "color:#9065b0", "pink": "color:#c14c8a", "red": "color:#d44c47",
-            "gray_background": "background-color:#f1f1ef",
-            "brown_background": "background-color:#f4eeee",
-            "orange_background": "background-color:#fbecdd",
-            "yellow_background": "background-color:#fbf3db",
-            "green_background": "background-color:#edf3ec",
-            "blue_background": "background-color:#e7f3f8",
-            "purple_background": "background-color:#f4f0f9",
-            "pink_background": "background-color:#fbe8f1",
-            "red_background": "background-color:#fde8e8",
-        }
-
-        def rich_text_to_html(rich_texts):
-            html = ""
-            for rt in rich_texts:
-                rt_type = rt.get("type", "text")
-                if rt_type == "equation":
-                    expr = rt.get("equation", {}).get("expression", rt.get("plain_text", ""))
-                    html += f"<anki-mathjax>{expr}</anki-mathjax>"
-                    continue
-                text = rt.get("plain_text", "")
-                if not text:
-                    continue
-                ann = rt.get("annotations", {})
-                if ann.get("bold"):          text = f"<strong>{text}</strong>"
-                if ann.get("italic"):        text = f"<em>{text}</em>"
-                if ann.get("underline"):     text = f"<u>{text}</u>"
-                if ann.get("strikethrough"): text = f"<s>{text}</s>"
-                if ann.get("code"):          text = f"<code>{text}</code>"
-                color = ann.get("color", "default")
-                if color and color != "default":
-                    style = _NOTION_COLORS.get(color, "")
-                    if style:
-                        text = f'<span style="{style}">{text}</span>'
-                link = (rt.get("href") or (rt.get("text") or {}).get("link") or {})
-                if isinstance(link, dict) and link.get("url"):
-                    text = f'<a href="{link["url"]}">{text}</a>'
-                html += text
-            return html
-
-        def render_blocks(blocks):
-            """Recursively render a list of blocks (which may have _children) to HTML."""
-            parts = []
-            i = 0
-            while i < len(blocks):
-                block = blocks[i]
-                btype = block.get("type", "")
-                data  = block.get(btype, {})
-                rt    = data.get("rich_text", [])
-                children = block.get("_children", [])
-
-                # Collect consecutive list items of the same type into a single list tag
-                if btype in ("bulleted_list_item", "numbered_list_item"):
-                    tag = "ul" if btype == "bulleted_list_item" else "ol"
-                    items = []
-                    while i < len(blocks) and blocks[i].get("type") == btype:
-                        b = blocks[i]
-                        bd = b.get(btype, {})
-                        brt = bd.get("rich_text", [])
-                        bchildren = b.get("_children", [])
-                        item_html = rich_text_to_html(brt)
-                        if bchildren:
-                            item_html += render_blocks(bchildren)
-                        items.append(f"<li>{item_html}</li>")
-                        i += 1
-                    parts.append(f"<{tag}>{''.join(items)}</{tag}>")
-                    continue  # i already advanced
-
-                elif btype == "paragraph":
-                    inner = rich_text_to_html(rt)
-                    if inner.strip():
-                        color = data.get("color", "default")
-                        style = f' style="{_NOTION_COLORS[color]}"' if color != "default" and color in _NOTION_COLORS else ""
-                        parts.append(f"<p{style}>{inner}</p>")
-
-                elif btype in ("heading_1", "heading_2", "heading_3"):
-                    level = btype[-1]
-                    color = data.get("color", "default")
-                    style = f' style="{_NOTION_COLORS[color]}"' if color != "default" and color in _NOTION_COLORS else ""
-                    parts.append(f"<h{level}{style}>{rich_text_to_html(rt)}</h{level}>")
-
-                elif btype in ("callout", "quote"):
-                    inner = rich_text_to_html(rt)
-                    if children:
-                        inner += render_blocks(children)
-                    color = data.get("color", "default")
-                    style = f' style="{_NOTION_COLORS[color]}"' if color != "default" and color in _NOTION_COLORS else ""
-                    parts.append(f"<blockquote{style}>{inner}</blockquote>")
-
-                elif btype == "code":
-                    lang = data.get("language", "")
-                    if lang.lower() == "html":
-                        raw = "".join(seg.get("plain_text", "") for seg in rt)
-                        parts.append(raw)
-                    else:
-                        parts.append(f'<pre><code class="{lang}">{rich_text_to_html(rt)}</code></pre>')
-
-                elif btype == "equation":
-                    expr = data.get("expression", "")
-                    if expr:
-                        parts.append(f'<div><anki-mathjax block="true">{expr}</anki-mathjax><br></div>')
-
-                elif btype == "divider":
-                    parts.append("<hr>")
-
-                elif btype == "image":
-                    url = (data.get("file") or data.get("external") or {}).get("url", "")
-                    caption = rich_text_to_html(data.get("caption", []))
-                    if url:
-                        parts.append(f'<figure><img src="{url}"><figcaption>{caption}</figcaption></figure>')
-
-                elif btype == "table":
-                    rows = "".join(render_blocks(children))
-                    parts.append(f"<table><tbody>{rows}</tbody></table>")
-
-                elif btype == "table_row":
-                    cells = data.get("cells", [])
-                    row_html = "".join(f"<td>{rich_text_to_html(cell)}</td>" for cell in cells)
-                    parts.append(f"<tr>{row_html}</tr>")
-
-                i += 1
-            return "\n".join(parts)
-
-        return render_blocks(blocks)
-
-    def fetch_and_embed_blocks(self, pages: List[Dict]) -> List[Dict]:
-        """For each page in a Synced Extra result set, fetch blocks and embed as _block_html."""
-        for page in pages:
-            page_id = page.get("id")
-            if not page_id:
-                continue
-            try:
-                blocks = self.fetch_blocks(page_id)
-                html = self.blocks_to_html(blocks).strip()
-                if html:
-                    page["_block_html"] = html
-                    print(f"[NotionCache] Embedded block HTML for {page_id} ({len(html)} chars)")
-            except Exception as e:
-                print(f"[NotionCache] Error fetching blocks for {page_id}: {e}")
         return pages
 
     def filter_pages(self, pages: List[Dict], search_term: str) -> List[Dict]:
