@@ -285,15 +285,15 @@ class NotionCache:
         ds_id = self._get_data_source_id(database_id)
         url = f"https://api.notion.com/v1/data_sources/{ds_id}/query"
 
-        for attempt in range(1, 6):
+        for attempt in range(1, 9):
             try:
                 _rate_limited_wait()
                 response = self.session.post(url, json=payload, timeout=TIMEOUT)
                 response.raise_for_status()
                 return response.json()
             except Exception as e:
-                print(f"  Attempt {attempt}/5 failed: {type(e).__name__}: {e}")
-                if attempt < 5:
+                print(f"  Attempt {attempt}/8 failed: {type(e).__name__}: {e}")
+                if attempt < 8:
                     wait = 2 ** attempt
                     print(f"  Waiting {wait}s before retry...")
                     time.sleep(wait)
@@ -343,11 +343,23 @@ class NotionCache:
         print(f"  [{name}] Saved {len(pages)} pages → {cache_path}")
 
 def _run_one(db_id: str, name: str):
-    """Worker function — each database gets its own NotionCache (and session)."""
-    print(f"\n--- Starting {name} ---")
-    cache = NotionCache()
-    cache.update_cache(db_id, name)
-    print(f"--- Done: {name} ---")
+    """Worker function — each database gets its own NotionCache (and session).
+    Retries the full database update up to 3 times on failure with increasing waits."""
+    for db_attempt in range(1, 4):
+        try:
+            print(f"\n--- Starting {name} (attempt {db_attempt}/3) ---")
+            cache = NotionCache()
+            cache.update_cache(db_id, name)
+            print(f"--- Done: {name} ---")
+            return
+        except Exception as e:
+            print(f"\n  [{name}] DB-level attempt {db_attempt}/3 failed: {e}")
+            if db_attempt < 3:
+                wait = 60 * db_attempt  # 60s, then 120s
+                print(f"  [{name}] Waiting {wait}s before retrying entire database...")
+                time.sleep(wait)
+            else:
+                raise
 
 def update_notion_cache():
     databases = [
