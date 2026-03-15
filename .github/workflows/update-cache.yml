@@ -62,7 +62,7 @@ jobs:
             session = requests.Session()
             session.headers.update({
                 "Authorization": f"Bearer {NOTION_TOKEN}",
-                "Notion-Version": "2022-06-28",
+                "Notion-Version": "2025-09-03",
                 "Content-Type": "application/json",
             })
             retry = Retry(
@@ -216,6 +216,22 @@ jobs:
                 self.cache_dir = Path("cache")
                 self.cache_dir.mkdir(exist_ok=True)
                 self.session = make_session()
+                self._data_source_id_cache = {}
+
+            def _get_data_source_id(self, database_id: str) -> str:
+                """Fetch the primary data_source_id for a database (required by API v2025-09-03)."""
+                if database_id in self._data_source_id_cache:
+                    return self._data_source_id_cache[database_id]
+                data = self.get(f"https://api.notion.com/v1/databases/{database_id}")
+                # data_sources is a list; the first entry is the primary source
+                sources = data.get("data_sources", [])
+                if sources:
+                    ds_id = sources[0].get("id", database_id)
+                else:
+                    ds_id = database_id
+                self._data_source_id_cache[database_id] = ds_id
+                print(f"  data_source_id for {database_id}: {ds_id}")
+                return ds_id
 
             def get(self, url: str) -> dict:
                 for attempt in range(1, 6):
@@ -267,13 +283,13 @@ jobs:
                 if start_cursor:
                     payload["start_cursor"] = start_cursor
 
+                # API v2025-09-03: use data_source_id-based query endpoint
+                ds_id = self._get_data_source_id(database_id)
+                url = f"https://api.notion.com/v1/data_sources/{ds_id}/query"
+
                 for attempt in range(1, 6):
                     try:
-                        response = self.session.post(
-                            f"https://api.notion.com/v1/databases/{database_id}/query",
-                            json=payload,
-                            timeout=TIMEOUT,
-                        )
+                        response = self.session.post(url, json=payload, timeout=TIMEOUT)
                         response.raise_for_status()
                         return response.json()
                     except Exception as e:
