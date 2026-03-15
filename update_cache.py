@@ -30,15 +30,22 @@ USES_FOR_SEARCH = {
     GUIDELINES_DATABASE_ID,
 }
 
-# Large databases (Pharmacology, Subjects, eTG, Guidelines) time out at page_size=100
-# even with server-side For Search formula filtering. Use 25 for these, 100 for the rest.
+# Large databases time out at page_size=100 even with server-side formula filtering.
+# Use 25 for these, 100 for the rest.
 PAGE_SIZE_OVERRIDE = {
     SUBJECT_DATABASE_ID:      25,
     PHARMACOLOGY_DATABASE_ID: 25,
-    ETG_DATABASE_ID:          25,
+    ETG_DATABASE_ID:          10,
     GUIDELINES_DATABASE_ID:   25,
 }
 DEFAULT_PAGE_SIZE = 100
+
+# eTG is too large for server-side formula filtering even at page_size=25 — the cold
+# scan on batch 1 (no cursor) times out before returning any results. Fetch all pages
+# and filter client-side instead, which makes every batch a cheap sequential read.
+SERVER_SIDE_FILTER_SKIP = {
+    ETG_DATABASE_ID,
+}
 
 TIMEOUT = 120  # seconds — large databases need time
 
@@ -285,15 +292,15 @@ class NotionCache:
         ds_id = self._get_data_source_id(database_id)
         url = f"https://api.notion.com/v1/data_sources/{ds_id}/query"
 
-        for attempt in range(1, 6):
+        for attempt in range(1, 9):
             try:
                 _rate_limited_wait()
                 response = self.session.post(url, json=payload, timeout=TIMEOUT)
                 response.raise_for_status()
                 return response.json()
             except Exception as e:
-                print(f"  Attempt {attempt}/5 failed: {type(e).__name__}: {e}")
-                if attempt < 5:
+                print(f"  Attempt {attempt}/8 failed: {type(e).__name__}: {e}")
+                if attempt < 8:
                     wait = 2 ** attempt
                     print(f"  Waiting {wait}s before retry...")
                     time.sleep(wait)
@@ -302,6 +309,7 @@ class NotionCache:
 
     def update_cache(self, database_id: str, name: str):
         use_for_search = database_id in USES_FOR_SEARCH
+        server_side_filter = use_for_search and database_id not in SERVER_SIDE_FILTER_SKIP
         is_synced_extra = database_id in (SYNCED_EXTRA_DATABASE_ID, SYNCED_ADDITIONAL_RESOURCES_DATABASE_ID)
         pages = []
         has_more = True
@@ -311,9 +319,11 @@ class NotionCache:
         while has_more:
             batch += 1
             print(f"  [{name}] Fetching batch {batch}...")
-            data = self.fetch_pages_batch(database_id, start_cursor, use_for_search=use_for_search)
+            data = self.fetch_pages_batch(database_id, start_cursor, use_for_search=server_side_filter)
             results = data['results']
             if use_for_search:
+                # Always filter client-side — for server_side_filter DBs this is a no-op
+                # (server already filtered), for SERVER_SIDE_FILTER_SKIP DBs this does the work
                 results = [
                     p for p in results
                     if p.get("properties", {}).get("For Search", {}).get("formula", {}).get("boolean", False)
@@ -343,11 +353,23 @@ class NotionCache:
         print(f"  [{name}] Saved {len(pages)} pages → {cache_path}")
 
 def _run_one(db_id: str, name: str):
-    """Worker function — each database gets its own NotionCache (and session)."""
-    print(f"\n--- Starting {name} ---")
-    cache = NotionCache()
-    cache.update_cache(db_id, name)
-    print(f"--- Done: {name} ---")
+    """Worker function — each database gets its own NotionCache (and session).
+    Retries the full database update up to 3 times on failure with increasing waits."""
+    for db_attempt in range(1, 4):
+        try:
+            print(f"\n--- Starting {name} (attempt {db_attempt}/3) ---")
+            cache = NotionCache()
+            cache.update_cache(db_id, name)
+            print(f"--- Done: {name} ---")
+            return
+        except Exception as e:
+            print(f"\n  [{name}] DB-level attempt {db_attempt}/3 failed: {e}")
+            if db_attempt < 3:
+                wait = 60 * db_attempt  # 60s, then 120s
+                print(f"  [{name}] Waiting {wait}s before retrying entire database...")
+                time.sleep(wait)
+            else:
+                raise
 
 def update_notion_cache():
     databases = [
