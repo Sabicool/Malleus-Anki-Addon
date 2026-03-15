@@ -30,15 +30,22 @@ USES_FOR_SEARCH = {
     GUIDELINES_DATABASE_ID,
 }
 
-# Large databases (Pharmacology, Subjects, eTG, Guidelines) time out at page_size=100
-# even with server-side For Search formula filtering. Use 25 for these, 100 for the rest.
+# Large databases time out at page_size=100 even with server-side formula filtering.
+# Use 25 for these, 100 for the rest.
 PAGE_SIZE_OVERRIDE = {
     SUBJECT_DATABASE_ID:      25,
     PHARMACOLOGY_DATABASE_ID: 25,
-    ETG_DATABASE_ID:          25,
+    ETG_DATABASE_ID:          10,
     GUIDELINES_DATABASE_ID:   25,
 }
 DEFAULT_PAGE_SIZE = 100
+
+# eTG is too large for server-side formula filtering even at page_size=25 — the cold
+# scan on batch 1 (no cursor) times out before returning any results. Fetch all pages
+# and filter client-side instead, which makes every batch a cheap sequential read.
+SERVER_SIDE_FILTER_SKIP = {
+    ETG_DATABASE_ID,
+}
 
 TIMEOUT = 120  # seconds — large databases need time
 
@@ -302,6 +309,7 @@ class NotionCache:
 
     def update_cache(self, database_id: str, name: str):
         use_for_search = database_id in USES_FOR_SEARCH
+        server_side_filter = use_for_search and database_id not in SERVER_SIDE_FILTER_SKIP
         is_synced_extra = database_id in (SYNCED_EXTRA_DATABASE_ID, SYNCED_ADDITIONAL_RESOURCES_DATABASE_ID)
         pages = []
         has_more = True
@@ -311,9 +319,11 @@ class NotionCache:
         while has_more:
             batch += 1
             print(f"  [{name}] Fetching batch {batch}...")
-            data = self.fetch_pages_batch(database_id, start_cursor, use_for_search=use_for_search)
+            data = self.fetch_pages_batch(database_id, start_cursor, use_for_search=server_side_filter)
             results = data['results']
             if use_for_search:
+                # Always filter client-side — for server_side_filter DBs this is a no-op
+                # (server already filtered), for SERVER_SIDE_FILTER_SKIP DBs this does the work
                 results = [
                     p for p in results
                     if p.get("properties", {}).get("For Search", {}).get("formula", {}).get("boolean", False)
