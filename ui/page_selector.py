@@ -1136,23 +1136,47 @@ class NotionPageSelector(QDialog):
             selected_pages = subtag_pages
 
         tags = []
-        for page in selected_pages:
-            # Try to use the selected subtag property
-            tag_prop = page['properties'].get(property_name)
+        if self.database_selector.currentText() == "eTG":
+            # eTG: use cross-database Subject/Pharmacology tag lookup
+            subjects_lookup = {}
+            pharmacology_lookup = {}
+            subjects_subtags = {s for s in DATABASE_PROPERTIES.get("Subjects", []) if s}
+            pharmacology_subtags = {s for s in DATABASE_PROPERTIES.get("Pharmacology", []) if s}
 
-            # If subtag is empty, fall back to 'Tag'
-            if (not tag_prop or
-                (tag_prop['type'] == 'formula' and
-                 (not tag_prop['formula'].get('string') or tag_prop['formula'].get('string').strip() == ''))):
-                if self.database_selector.currentText() == "Subjects":
-                    tag_prop = page['properties'].get('Main Tag')
-                else:
-                    tag_prop = page['properties'].get('Tag')
+            if property_name in subjects_subtags:
+                subject_pages, _ = self.notion_cache.load_from_cache(SUBJECT_DATABASE_ID)
+                for p in subject_pages:
+                    subjects_lookup[p['id']] = p
+                    subjects_lookup[p['id'].replace('-', '')] = p
+            elif property_name in pharmacology_subtags:
+                pharm_pages, _ = self.notion_cache.load_from_cache(PHARMACOLOGY_DATABASE_ID)
+                for p in pharm_pages:
+                    pharmacology_lookup[p['id']] = p
+                    pharmacology_lookup[p['id'].replace('-', '')] = p
 
-            if tag_prop and tag_prop['type'] == 'formula':
-                formula_value = tag_prop['formula']
-                if formula_value['type'] == 'string':
-                    tags.extend(formula_value['string'].split())
+            for page in selected_pages:
+                tags.extend(self._get_etg_tags_for_page(
+                    page, property_name, subjects_subtags, pharmacology_subtags,
+                    subjects_lookup, pharmacology_lookup
+                ))
+        else:
+            for page in selected_pages:
+                # Try to use the selected subtag property
+                tag_prop = page['properties'].get(property_name)
+
+                # If subtag is empty, fall back to 'Tag'
+                if (not tag_prop or
+                    (tag_prop['type'] == 'formula' and
+                     (not tag_prop['formula'].get('string') or tag_prop['formula'].get('string').strip() == ''))):
+                    if self.database_selector.currentText() == "Subjects":
+                        tag_prop = page['properties'].get('Main Tag')
+                    else:
+                        tag_prop = page['properties'].get('Tag')
+
+                if tag_prop and tag_prop['type'] == 'formula':
+                    formula_value = tag_prop['formula']
+                    if formula_value['type'] == 'string':
+                        tags.extend(formula_value['string'].split())
 
         if not selected_pages:
             tags = ["#Malleus_CM::#TO_BE_TAGGED"]
@@ -1186,8 +1210,8 @@ class NotionPageSelector(QDialog):
         # Open add cards dialog first, then async-populate Extra (Synced)
         self.guiAddCards(note)
 
-        # After dialog opens, populate Extra (Synced) in background (Subjects only)
-        if self.database_selector.currentText() == "Subjects":
+        # After dialog opens, populate Extra (Synced) in background (Subjects and eTG)
+        if self.database_selector.currentText() in ("Subjects", "eTG"):
             self._async_update_extra_synced(all_tags)
         # self.accept()
 
