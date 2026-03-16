@@ -31,21 +31,19 @@ USES_FOR_SEARCH = {
 }
 
 # Large databases time out at page_size=100 even with server-side formula filtering.
-# Use 25 for these, 100 for the rest.
+# eTG has heavy rollups that make each row expensive to return — use page_size=5 so
+# Notion only computes rollups for 5 rows per request instead of 25/100.
 PAGE_SIZE_OVERRIDE = {
     SUBJECT_DATABASE_ID:      25,
     PHARMACOLOGY_DATABASE_ID: 25,
-    ETG_DATABASE_ID:          10,
+    ETG_DATABASE_ID:          100,
     GUIDELINES_DATABASE_ID:   25,
 }
 DEFAULT_PAGE_SIZE = 100
 
-# eTG is too large for server-side formula filtering even at page_size=25 — the cold
-# scan on batch 1 (no cursor) times out before returning any results. Fetch all pages
-# and filter client-side instead, which makes every batch a cheap sequential read.
-SERVER_SIDE_FILTER_SKIP = {
-    ETG_DATABASE_ID,
-}
+# No databases currently need client-side-only filtering, but this set is kept
+# for future use if a database's formula scan is too expensive even at page_size=5.
+SERVER_SIDE_FILTER_SKIP: set = set()
 
 TIMEOUT = 120  # seconds — large databases need time
 

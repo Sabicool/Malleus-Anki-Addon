@@ -15,7 +15,8 @@ from aqt.utils import showInfo
 from ..utils import malleus_tooltip
 from PyQt6.QtGui import QDesktopServices
 import anki.notes
-from ..config import DATABASE_PROPERTIES, get_database_id, get_database_name
+from ..config import (DATABASE_PROPERTIES, get_database_id, get_database_name,
+                       SUBJECT_DATABASE_ID, PHARMACOLOGY_DATABASE_ID)
 from ..utils import open_browser_with_search
 from ..cache_updater import perform_cache_update
 from ..extra_sync import (
@@ -1425,31 +1426,115 @@ class NotionPageSelector(QDialog):
 
         property_name = self.property_selector.currentText()
 
-        # Special handling for Subjects database when empty is selected
+        # Normalise empty property_name per database
         if self.database_selector.currentText() == "Subjects" and property_name == "":
             property_name = "Main Tag"
-
-        if self.database_selector.currentText() == "Pharmacology" and property_name == "":
+        elif self.database_selector.currentText() == "Pharmacology" and property_name == "":
+            property_name = "Tag"
+        elif self.database_selector.currentText() == "eTG" and property_name == "":
             property_name = "Tag"
 
         tags = []
-        for page in selected_pages:
-            if property_name == "Tag" or property_name == "Main Tag":
-                tag_prop = page['properties'].get(property_name)
-            else:
-                tag_prop = page['properties'].get(property_name)
-                if (not tag_prop or
-                    (tag_prop['type'] == 'formula' and
-                     (not tag_prop['formula'].get('string') or tag_prop['formula'].get('string').strip() == ''))):
-                    tag_prop = page['properties'].get('Tag')
 
-            if tag_prop and tag_prop['type'] == 'formula':
-                formula_value = tag_prop['formula']
-                if formula_value['type'] == 'string':
-                    tags.extend(formula_value['string'].split())
+        if self.database_selector.currentText() == "eTG":
+            # Build Subject / Pharmacology lookup dicts once (keyed by page id, both
+            # hyphenated and bare forms so we always find a match regardless of format)
+            subjects_lookup = {}
+            pharmacology_lookup = {}
+
+            subjects_subtags = {s for s in DATABASE_PROPERTIES.get("Subjects", []) if s}
+            pharmacology_subtags = {s for s in DATABASE_PROPERTIES.get("Pharmacology", []) if s}
+
+            if property_name in subjects_subtags:
+                subject_pages, _ = self.notion_cache.load_from_cache(SUBJECT_DATABASE_ID)
+                for p in subject_pages:
+                    subjects_lookup[p['id']] = p
+                    subjects_lookup[p['id'].replace('-', '')] = p
+
+            elif property_name in pharmacology_subtags:
+                pharm_pages, _ = self.notion_cache.load_from_cache(PHARMACOLOGY_DATABASE_ID)
+                for p in pharm_pages:
+                    pharmacology_lookup[p['id']] = p
+                    pharmacology_lookup[p['id'].replace('-', '')] = p
+
+            for page in selected_pages:
+                tags.extend(self._get_etg_tags_for_page(
+                    page, property_name, subjects_subtags, pharmacology_subtags,
+                    subjects_lookup, pharmacology_lookup
+                ))
+        else:
+            for page in selected_pages:
+                if property_name == "Tag" or property_name == "Main Tag":
+                    tag_prop = page['properties'].get(property_name)
+                else:
+                    tag_prop = page['properties'].get(property_name)
+                    if (not tag_prop or
+                            (tag_prop['type'] == 'formula' and
+                             (not tag_prop['formula'].get('string') or
+                              tag_prop['formula'].get('string').strip() == ''))):
+                        tag_prop = page['properties'].get('Tag')
+
+                if tag_prop and tag_prop['type'] == 'formula':
+                    formula_value = tag_prop['formula']
+                    if formula_value['type'] == 'string':
+                        tags.extend(formula_value['string'].split())
 
         if not selected_pages:
             tags = ["#Malleus_CM::#TO_BE_TAGGED"]
+
+        return tags
+
+    def _get_etg_tags_for_page(self, page, property_name,
+                                subjects_subtags, pharmacology_subtags,
+                                subjects_lookup, pharmacology_lookup):
+        """
+        Return the tags to apply for a single eTG page.
+
+        Always includes the eTG page's own 'Tag' formula value.  When the user
+        has selected a subtag that belongs to the Subjects or Pharmacology
+        database, also looks up every page linked via the corresponding relation
+        property and appends the formula value of that subtag from the linked page.
+        """
+        tags = []
+
+        # 1. Always add the eTG page's own Tag formula
+        etg_tag_prop = page['properties'].get('Tag')
+        if etg_tag_prop and etg_tag_prop.get('type') == 'formula':
+            tag_str = etg_tag_prop['formula'].get('string', '').strip()
+            if tag_str:
+                tags.extend(tag_str.split())
+
+        # 2. If no meaningful subtag selected, we're done
+        if not property_name or property_name in ('Tag', 'Main Tag'):
+            return tags
+
+        # 3. Subjects subtag — look up each linked Subject page
+        if property_name in subjects_subtags:
+            subject_rel = page['properties'].get('Subject', {})
+            for rel in subject_rel.get('relation', []):
+                rel_id = rel.get('id', '')
+                subject_page = subjects_lookup.get(rel_id) or subjects_lookup.get(rel_id.replace('-', ''))
+                if not subject_page:
+                    continue
+                subtag_prop = subject_page['properties'].get(property_name)
+                if subtag_prop and subtag_prop.get('type') == 'formula':
+                    subtag_str = subtag_prop['formula'].get('string', '').strip()
+                    if subtag_str:
+                        tags.extend(subtag_str.split())
+
+        # 4. Pharmacology subtag — look up each linked Pharmacology page
+        elif property_name in pharmacology_subtags:
+            pharm_rel = page['properties'].get('Pharmacology', {})
+            for rel in pharm_rel.get('relation', []):
+                rel_id = rel.get('id', '')
+                pharm_page = pharmacology_lookup.get(rel_id) or pharmacology_lookup.get(rel_id.replace('-', ''))
+                if not pharm_page:
+                    continue
+                subtag_prop = pharm_page['properties'].get(property_name)
+                if subtag_prop and subtag_prop.get('type') == 'formula':
+                    subtag_str = subtag_prop['formula'].get('string', '').strip()
+                    if subtag_str:
+                        tags.extend(subtag_str.split())
 
         return tags
 
