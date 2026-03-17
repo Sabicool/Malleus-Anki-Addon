@@ -90,6 +90,20 @@ def download_github_cache(browser=None):
 # Register shortcut in a window
 def register_shortcut(window):
     shortcut_key = config.get('shortcut', 'Ctrl+Alt+M')
+
+    # Guard: don't register more than once per window — duplicate QShortcuts for
+    # the same key on the same parent cause Qt to fire activatedAmbiguously()
+    # instead of activated(), silently breaking the shortcut.  This happens when
+    # on_editor_did_load_note fires again after a tag is saved (note reload).
+    if hasattr(window, '_malleus_shortcuts'):
+        # Clean up any shortcuts that Qt has already destroyed
+        window._malleus_shortcuts = [
+            s for s in window._malleus_shortcuts
+            if not sip.isdeleted(s)
+        ]
+        if window._malleus_shortcuts:
+            return  # Already registered on this window
+
     shortcut = QShortcut(QKeySequence(shortcut_key), window)
 
     # Handle Qt version differences for shortcut context
