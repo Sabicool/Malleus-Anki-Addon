@@ -816,6 +816,36 @@ def suggest_subtag(card_text: str, extra: str = '') -> Optional[str]:
     return tied[0]
 
 
+# ── Knee cut-off ───────────────────────────────────────────────────────────────
+
+def _cutoff_at_knee(
+    scores: List[float],
+    ratio_threshold: float = 0.4,
+    min_score: float = 0.3,
+) -> int:
+    """
+    Return the number of top-ranked scores to keep based on natural drop-offs.
+    Two independent conditions can trigger a cut at position i (keeping i items):
+      1. Ratio cliff: scores[i] / scores[i-1] < ratio_threshold
+         Catches steep relative drops, e.g. [17, 16, 3] → cuts after index 1
+         because 3/16 = 0.19 < 0.4.
+      2. Absolute floor: scores[i] < min_score
+         Drops genuinely weak suggestions even when there's no cliff, e.g. all
+         scores bunched at 0.2 are cut entirely.
+    If neither triggers, all scores are returned (no artificial cap).
+    """
+    if not scores:
+        return 0
+    if scores[0] < min_score:
+        return 0
+    for i in range(1, len(scores)):
+        if scores[i] < min_score:
+            return i
+        if scores[i] / scores[i - 1] < ratio_threshold:
+            return i
+    return len(scores)
+
+
 # ── Public API ─────────────────────────────────────────────────────────────────
 
 def suggest_subject_tags(
@@ -891,6 +921,12 @@ def suggest_subject_tags(
         [(score, pid) for pid, score in merged.items() if score >= MIN_FINAL_SCORE],
         reverse=True,
     )
+
+    # Apply knee cut-off: drop suggestions where there's a steep score drop-off
+    _total = len(ranked)
+    keep = _cutoff_at_knee([s for s, _ in ranked])
+    ranked = ranked[:keep]
+    print(f"[SuggestTags] After knee cut-off: {len(ranked)} of {_total} suggestions kept")
 
     subtag = suggest_subtag(card_text, extra=extra)
 
