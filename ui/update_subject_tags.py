@@ -5,7 +5,7 @@ Feature to update subject tags by re-searching the database cache
 from aqt.qt import (QDialog, QVBoxLayout, QHBoxLayout, QLineEdit,
                     QPushButton, QLabel, QScrollArea, QWidget,
                     QFrame, QComboBox, QRadioButton,
-                    QButtonGroup, QGroupBox, QTimer)
+                    QButtonGroup, QGroupBox, QTimer, Qt, QKeyEvent)
 from aqt.utils import showInfo
 from ..utils import malleus_tooltip
 from aqt import mw
@@ -21,6 +21,7 @@ from ..extra_sync import (
 )
 from .synced_extra_dialog import SyncedExtraSelectionDialog
 from ..tag_utils import parse_tag, normalize_subtag_for_matching
+from ..suggest_tags import suggest_subject_tags
 try:
     from ..ui.styles import apply_malleus_style, make_header, COLORS
 except Exception:
@@ -150,6 +151,15 @@ class MissingPageDialog(QDialog):
                     self.subtag_selector.setCurrentIndex(idx)
         search_controls.addWidget(self.subtag_selector)
 
+        suggest_btn = QPushButton("✦ Suggest")
+        suggest_btn.setObjectName("secondary")
+        suggest_btn.setToolTip(
+            "Suggest pages based on the card content\n"
+            "(uses the same engine as the main Page Selector)"
+        )
+        suggest_btn.clicked.connect(self._suggest_tags)
+        search_controls.addWidget(suggest_btn)
+
         search_layout.addLayout(search_controls)
 
         self.search_timer = QTimer()
@@ -227,6 +237,99 @@ class MissingPageDialog(QDialog):
             if widget:
                 widget.setParent(None)
         self.pages_data = []
+
+    def _get_result_radios(self) -> list:
+        """Return all QRadioButton widgets currently in the results area."""
+        radios = []
+        for i in range(self.results_layout.count()):
+            item = self.results_layout.itemAt(i)
+            if item and item.widget() and isinstance(item.widget(), QRadioButton):
+                radios.append(item.widget())
+        return radios
+
+    def keyPressEvent(self, event: QKeyEvent):
+        """
+        Keyboard shortcuts:
+          Up / Down    — move between result radio buttons (and check them)
+          Enter/Return — confirm selection (when focus is outside the search box)
+          Escape       — close the dialog
+        """
+        key = event.key()
+        radios = self._get_result_radios()
+
+        if key in (Qt.Key.Key_Down, Qt.Key.Key_Up):
+            if not radios:
+                super().keyPressEvent(event)
+                return
+            # Find current focus / checked index
+            focused = None
+            for i, r in enumerate(radios):
+                if r.hasFocus() or r.isChecked():
+                    focused = i
+                    break
+            if key == Qt.Key.Key_Down:
+                next_idx = (focused + 1) if focused is not None else 0
+                next_idx = min(next_idx, len(radios) - 1)
+            else:
+                next_idx = (focused - 1) if focused is not None else len(radios) - 1
+                next_idx = max(next_idx, 0)
+            radios[next_idx].setChecked(True)
+            radios[next_idx].setFocus()
+            event.accept()
+            return
+
+        if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            # Don't intercept Enter while the user is typing in the search box
+            if not self.search_input.hasFocus():
+                self.replace_tag()
+                event.accept()
+                return
+
+        super().keyPressEvent(event)
+
+    def _suggest_tags(self):
+        """Populate results with pages suggested from the card's text content."""
+        self.clear_results()
+        malleus_tooltip("Analysing card text…")
+
+        suggestions = suggest_subject_tags(self.note_context or "", self.notion_cache)
+
+        if not suggestions:
+            no_res = QLabel("No suggestions found — try searching manually")
+            no_res.setStyleSheet(
+                "font-style: italic; padding: 8px; color: palette(placeholderText);"
+            )
+            self.results_layout.addWidget(no_res)
+            return
+
+        self.pages_data = [s['page'] for s in suggestions]
+
+        for suggestion in suggestions:
+            page = suggestion['page']
+            try:
+                title = (
+                    page['properties']['Name']['title'][0]['text']['content']
+                    if page['properties']['Name']['title'] else "Untitled"
+                )
+                suffix = page['properties'].get('Search Suffix', {}).get('formula', {}).get('string', '')
+                prefix = page['properties'].get('Search Prefix', {}).get('formula', {}).get('string', '')
+                display = f"{prefix} {title} {suffix}".strip().replace('&', '&&')
+            except Exception:
+                display = suggestion.get('title', 'Untitled')
+
+            radio = QRadioButton(display)
+            radio.page_data = page
+            self.button_group.addButton(radio)
+            self.results_layout.addWidget(radio)
+
+        # Pre-select the suggested subtag if one was returned
+        subtag = suggestions[0].get('suggested_subtag')
+        if subtag:
+            idx = self.subtag_selector.findText(subtag)
+            if idx >= 0:
+                self.subtag_selector.setCurrentIndex(idx)
+
+        malleus_tooltip(f"Found {len(suggestions)} suggestion(s)")
 
     def perform_search(self):
         search_term = self.search_input.text()
