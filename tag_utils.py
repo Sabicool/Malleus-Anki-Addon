@@ -36,9 +36,15 @@ def parse_tag(tag: str) -> Dict:
     # Check if the last part looks like a subtag (starts with digit or specific patterns)
     if page_name and len(parts) > 2:
         # Common subtag patterns
+        # NOTE: r'^\*' (asterisk prefix) is intentionally excluded here.
+        # In the tag hierarchy, *-prefixed segments like *Cardiac_Exam and
+        # *ECG_Essentials are page names, not subtags.  Adding r'^\*' would
+        # cause the LAST segment to be treated as a subtag and page_name to
+        # be set to the preceding segment (*General / ECGs / etc.) which is
+        # never an actual Notion page.  parse_subject_tag already maps any
+        # remaining *-prefixed subtag to "Main_Tag" as a safety net.
         subtag_patterns = [
             r'^\d+_',  # Starts with number and underscore
-            r'^\*',     # Starts with asterisk (general)
             r'^(Epidemiology|Aetiology|Risk Factors|Physiology|Pathophysiology|Clinical Features)',
             r'^(Management|Complications|Screening|Prevention|Diagnosis|Investigations)',
             r'^(Generic Names|Mechanism of Action|Indications|Contraindications)',

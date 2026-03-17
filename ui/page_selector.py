@@ -14,7 +14,28 @@ from aqt.editcurrent import EditCurrent
 from aqt.utils import showInfo
 from ..utils import malleus_tooltip
 from PyQt6.QtGui import QDesktopServices
+import re as _re
 import anki.notes
+
+
+def _fix_amp_display(text: str) -> str:
+    """Prepare a display string for use in Qt widgets (QCheckBox / QLabel).
+
+    Two problems are fixed here:
+
+    1. Legacy cache format: older Notion formula outputs stored '&' as ' _'
+       (e.g. 'Bradyarrhythmias _Conduction Disorders').  Convert those back
+       to ' & ' so they display correctly.
+
+    2. Qt mnemonic escaping: Qt widgets treat a bare '&' as a keyboard
+       accelerator prefix — '&F' hides the '&' and underlines 'F'.  Replacing
+       every '&' with '&&' tells Qt to display a literal ampersand instead.
+    """
+    # Step 1 — fix legacy underscore-for-ampersand substitution
+    text = _re.sub(r' _([A-Za-z])', r' & \1', text)
+    # Step 2 — escape for Qt so the ampersand renders visibly
+    text = text.replace('&', '&&')
+    return text
 from ..config import (DATABASE_PROPERTIES, get_database_id, get_database_name,
                        SUBJECT_DATABASE_ID, PHARMACOLOGY_DATABASE_ID)
 from ..utils import open_browser_with_search
@@ -761,7 +782,7 @@ class NotionPageSelector(QDialog):
                     .get('formula', {})
                     .get('string', '')
                 )
-                display_text = f"{prefix} {title} {suffix}".strip()
+                display_text = _fix_amp_display(f"{prefix} {title} {suffix}".strip())
             except Exception:
                 display_text = title
 
@@ -888,7 +909,7 @@ class NotionPageSelector(QDialog):
             if database_name in ("Subjects", "Pharmacology"):
                 prefix = (page.get('properties', {}).get('Search Prefix', {})
                           .get('formula', {}).get('string', ''))
-            display_text = f"{prefix} {title} {suffix}".strip()
+            display_text = _fix_amp_display(f"{prefix} {title} {suffix}".strip())
 
             entry = {
                 'page_id': page.get('id', ''),
@@ -1057,9 +1078,9 @@ class NotionPageSelector(QDialog):
 
                 if self.database_selector.currentText() in ("Subjects", "Pharmacology"):
                     search_prefix = page['properties']['Search Prefix']['formula']['string'] if page['properties'].get('Search Suffix', {}).get('formula', {}).get('string') else ""
-                    display_text = f"{search_prefix} {title} {search_suffix}"
+                    display_text = _fix_amp_display(f"{search_prefix} {title} {search_suffix}")
                 else:
-                    display_text = f"{title} {search_suffix}"
+                    display_text = _fix_amp_display(f"{title} {search_suffix}")
 
                 row, _cb = self._make_result_row(display_text, page, show_count=show_count)
                 self.checkbox_layout.addWidget(row)

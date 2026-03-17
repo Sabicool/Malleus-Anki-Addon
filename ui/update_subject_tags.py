@@ -245,7 +245,7 @@ class MissingPageDialog(QDialog):
         try:
             cached_pages, _ = self.notion_cache.load_from_cache(database_id)
             self.pages_data = (
-                self.notion_cache.filter_pages(cached_pages, search_term)
+                self.notion_cache.filter_pages(cached_pages, search_term_normalised)
                 if cached_pages else []
             )
         except Exception as e:
@@ -266,7 +266,9 @@ class MissingPageDialog(QDialog):
                 )
                 suffix = page['properties'].get('Search Suffix', {}).get('formula', {}).get('string', '')
                 prefix = page['properties'].get('Search Prefix', {}).get('formula', {}).get('string', '')
-                display = f"{prefix} {title} {suffix}".strip()
+                # Escape & as && so QRadioButton renders it as a literal
+                # ampersand rather than treating it as a Qt mnemonic prefix.
+                display = f"{prefix} {title} {suffix}".strip().replace('&', '&&')
 
                 radio = QRadioButton(display)
                 radio.page_data = page
@@ -350,10 +352,14 @@ def _normalise(text: str) -> str:
     text = ''.join(c for c in text if not unicodedata.combining(c))
     # Normalise all apostrophe variants to straight quote
     text = text.replace('\u2019', "'").replace('\u2018', "'").replace('\u02bc', "'")
-    # Normalise ampersand (tag uses & , title may spell out 'and' or vice versa - normalise both)
-    text = re.sub(r'\s*&\s*', ' and ', text)
-    # Underscores to spaces
+    # Underscores to spaces FIRST so that "_&_" becomes " & " before ampersand
+    # substitution — otherwise "Foo_ and _Bar" → double spaces after underscore
+    # replacement, which mismatches "Foo and Bar" (single space) from the title.
     text = text.replace('_', ' ')
+    # Normalise ampersand (tag uses & , title may spell out 'and' or vice versa)
+    text = re.sub(r'\s*&\s*', ' and ', text)
+    # Collapse any runs of whitespace produced by the above steps
+    text = re.sub(r'\s+', ' ', text)
     return text.lower().strip()
 
 def is_general_page(page: Dict) -> bool:

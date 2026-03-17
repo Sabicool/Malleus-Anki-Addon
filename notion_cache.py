@@ -357,8 +357,16 @@ class NotionCache:
                     return False
             return True
 
-        search_terms = search_term.lower().split()
-        normalized_search_term = search_term.lower()
+        # Normalise the query to mirror what normalize_text does to page words:
+        #   • & is removed (not a word char, can never match any page token)
+        #   • apostrophes become spaces so "Barrett's" → ["barrett", "s"],
+        #     matching the page-word split produced by normalize_text
+        #   • remaining punctuation is stripped per-token
+        _query_lower = re.sub(r'\s*&\s*', ' ', search_term.lower())
+        _query_lower = re.sub(r"['\u2019\u2018\u02bc]", ' ', _query_lower).strip()
+        search_terms = [re.sub(r'[^\w]', '', t) for t in _query_lower.split()
+                        if re.sub(r'[^\w]', '', t)]
+        normalized_search_term = ' '.join(search_terms)
 
         filtered_pages = []
         for page in pages:
