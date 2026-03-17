@@ -478,7 +478,7 @@ def prompt_for_yield_selection(parent, note_context: str = None) -> Optional[str
         "High Yield":                    "#Malleus_CM::#Yield::High",
         "Medium Yield":                  "#Malleus_CM::#Yield::Medium",
         "Low Yield":                     "#Malleus_CM::#Yield::Low",
-        "Beyond medical student level":  "#Malleus_CM::#Yield::Beyond_medical_student_level"
+        "Beyond Medical Student Level":  "#Malleus_CM::#Yield::Beyond_medical_student_level"
     }
 
     for display_text, tag_value in yield_options.items():
@@ -504,6 +504,61 @@ def prompt_for_yield_selection(parent, note_context: str = None) -> Optional[str
                 return tag_value
 
     return None
+
+# ── Helpers ──────────────────────────────────────────────────────────────────
+
+def _show_update_summary(browser, summary_text, notes, tag_snapshot):
+    """
+    Show a summary dialog after a bulk subject tag update.
+    Includes an Undo button that restores all affected notes to their pre-update tags.
+    """
+    from aqt.qt import (QDialog, QVBoxLayout, QLabel, QDialogButtonBox,
+                        QPushButton, QHBoxLayout)
+
+    dialog = QDialog(browser)
+    dialog.setWindowTitle("Update Complete")
+    dialog.setMinimumWidth(420)
+    apply_malleus_style(dialog)
+
+    layout = QVBoxLayout()
+    layout.setContentsMargins(16, 16, 16, 12)
+    layout.setSpacing(10)
+
+    label = QLabel(summary_text)
+    label.setWordWrap(True)
+    layout.addWidget(label)
+
+    btn_layout = QHBoxLayout()
+    btn_layout.setSpacing(8)
+
+    undo_btn = QPushButton("Undo")
+    undo_btn.setObjectName("danger")
+    undo_btn.setToolTip("Restore all affected notes to their original tags")
+
+    ok_btn = QPushButton("OK")
+    ok_btn.setDefault(True)
+
+    btn_layout.addWidget(undo_btn)
+    btn_layout.addStretch()
+    btn_layout.addWidget(ok_btn)
+    layout.addLayout(btn_layout)
+    dialog.setLayout(layout)
+
+    def do_undo():
+        for note in notes:
+            original_tags = tag_snapshot.get(note.id)
+            if original_tags is not None:
+                note.tags = original_tags
+                note.flush()
+        browser.model.reset()
+        dialog.accept()
+        malleus_tooltip("Undo complete — tags restored")
+
+    undo_btn.clicked.connect(do_undo)
+    ok_btn.clicked.connect(dialog.accept)
+
+    dialog.exec()
+
 
 # ── Main entry point ─────────────────────────────────────────────────────────
 
@@ -545,11 +600,37 @@ def update_subject_tags_for_browser(browser, notion_cache, config):
     total_tags_updated = 0
     total_tags_removed = 0
 
+    # Snapshot tags before any changes for undo support
+    tag_snapshot = {note.id: list(note.tags) for note in notes}
+
     replacement_cache = {}  # page_name → (action, page, subtag)
 
-    for note_index, note in enumerate(notes):
-        print(f"Processing note {note_index + 1} of {total_notes}")
+    from aqt.qt import QProgressDialog, Qt, QApplication
+    _progress = QProgressDialog(
+        f"Updating subject tags (0/{total_notes})...",
+        None,          # no cancel button
+        0,
+        total_notes,
+        browser,
+    )
+    _progress.setWindowTitle("Malleus: Update Subject Tags")
+    _progress.setWindowModality(Qt.WindowModality.WindowModal)
+    _progress.setMinimumDuration(0)   # show immediately, no delay
+    _progress.setValue(0)             # triggers the initial paint
+    QApplication.processEvents()      # flush the render queue
 
+    def _progress_update(note_index):
+        _progress.setValue(note_index + 1)
+        _progress.setLabelText(
+            f"Updating subject tags ({note_index + 1}/{total_notes})..."
+        )
+        QApplication.processEvents()
+
+    def _progress_finish():
+        _progress.close()
+
+    for note_index, note in enumerate(notes):
+        _progress_update(note_index)
         current_tags = list(note.tags)
         subject_tags = [t for t in current_tags if t.startswith("#Malleus_CM::#Subjects::")]
 
@@ -616,6 +697,7 @@ def update_subject_tags_for_browser(browser, notion_cache, config):
                     else:  # ignore
                         total_tags_removed += 1
                 else:
+                    _progress.hide()
                     dialog = MissingPageDialog(
                         browser, original_tag, note_context, notion_cache, config
                     )
@@ -638,15 +720,18 @@ def update_subject_tags_for_browser(browser, notion_cache, config):
                     # user choice can be reused for other legitimate missing pages.
                     if not is_improper:
                         replacement_cache[page_name] = (action, selected_page, selected_subtag)
+                    _progress.show()
 
         final_tags = list(set(remaining_tags + new_tags))
 
         # Check for yield tag — prompt if missing
         has_yield = any(t.startswith("#Malleus_CM::#Yield::") for t in final_tags)
         if not has_yield:
+            _progress.hide()
             yield_tag = prompt_for_yield_selection(browser, note_context)
             if yield_tag:
                 final_tags.append(yield_tag)
+            _progress.show()
 
         # ── Additional Resources (Synced) — auto-populate ───────────────────
         _additional = build_additional_resources_content(list(final_tags), notion_cache)
@@ -663,11 +748,14 @@ def update_subject_tags_for_browser(browser, notion_cache, config):
                 current_extra = ''
             existing_se_ids = get_existing_se_ids_from_field(current_extra)
 
+            _progress.hide()
             se_dlg = SyncedExtraSelectionDialog(
                 browser, entries, existing_se_ids, note_context=note_context
             )
             from aqt.qt import QDialog
-            if se_dlg.exec() == QDialog.DialogCode.Accepted:
+            _se_result = se_dlg.exec()
+            _progress.show()
+            if _se_result == QDialog.DialogCode.Accepted:
                 selected = se_dlg.get_selected_entries()
                 try:
                     note[EXTRA_FIELD] = build_field_from_selected_entries(selected)
@@ -696,6 +784,7 @@ def update_subject_tags_for_browser(browser, notion_cache, config):
             note.flush()
             notes_modified += 1
 
+    _progress_finish()
     browser.model.reset()
 
     summary = (
@@ -707,4 +796,4 @@ def update_subject_tags_for_browser(browser, notion_cache, config):
         f"Tags removed: {total_tags_removed}\n"
     )
     malleus_tooltip(f"Updated {notes_modified} notes")
-    showInfo(summary)
+    _show_update_summary(browser, summary, notes, tag_snapshot)

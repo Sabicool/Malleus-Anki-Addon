@@ -76,6 +76,7 @@ class NotionPageSelector(QDialog):
 
         self.database_properties = DATABASE_PROPERTIES
         self.pages_data = []  # Store full page data
+        self._showing_recent = False
         self.setup_ui()
         apply_malleus_style(self)
 
@@ -159,6 +160,8 @@ class NotionPageSelector(QDialog):
             search_layout.addWidget(search_button)
 
         content_layout.addLayout(search_layout)
+
+        self.database_selector.currentTextChanged.connect(self._update_cache_age_label)
 
         # Results section
         self.results_group = QGroupBox("Search Results")
@@ -254,7 +257,7 @@ class NotionPageSelector(QDialog):
             "High Yield",
             "Medium Yield",
             "Low Yield",
-            "Beyond medical student level"
+            "Beyond Medical Student Level"
         ]
 
         for yield_option in yield_options:
@@ -269,18 +272,11 @@ class NotionPageSelector(QDialog):
         # Initialize tracking variable
         self._last_checked_yield = None
 
-        print(f"DEBUG RESTORE: Class last_yield_selection = '{NotionPageSelector.last_yield_selection}'")
-
         # Restore last selection if it exists
         if NotionPageSelector.last_yield_selection:
             if NotionPageSelector.last_yield_selection in self.yield_radio_buttons:
                 self.yield_radio_buttons[NotionPageSelector.last_yield_selection].setChecked(True)
                 self._last_checked_yield = NotionPageSelector.last_yield_selection
-                print(f"DEBUG RESTORE: Set _last_checked_yield to '{self._last_checked_yield}'")
-            else:
-                print(f"DEBUG RESTORE: '{NotionPageSelector.last_yield_selection}' not found in buttons")
-        else:
-            print(f"DEBUG RESTORE: No last selection to restore")
 
         yield_group.setLayout(yield_layout)
 
@@ -347,8 +343,11 @@ class NotionPageSelector(QDialog):
         update_database_button = QPushButton("↻  Update Database")
         update_database_button.setObjectName("secondary")
         update_database_button.clicked.connect(
-            lambda: (perform_cache_update(self.notion_cache, mw), invalidate_index())
+            lambda: (perform_cache_update(self.notion_cache, mw), invalidate_index(),
+                     self._update_cache_age_label())
         )
+        self._update_database_button = update_database_button
+        self._update_cache_age_label(self.database_selector.currentText())
         guidelines_button = QPushButton("Guidelines ↗")
         guidelines_button.setObjectName("secondary")
         guidelines_button.clicked.connect(
@@ -453,6 +452,9 @@ class NotionPageSelector(QDialog):
 
         layout.addWidget(content_widget)
         self.setLayout(layout)
+
+        # Show recent tags on first open (search is empty)
+        self._show_recent_tags()
 
     # ── Card count + confidence helpers ──────────────────────────────────────
 
@@ -785,14 +787,8 @@ class NotionPageSelector(QDialog):
         """Handle yield radio button clicks - allow deselection of selected button"""
         radio_button = self.yield_radio_buttons[yield_option]
 
-        print(f"DEBUG: Clicked on '{yield_option}'")
-        print(f"  Button is checked: {radio_button.isChecked()}")
-        print(f"  Last tracked type: {type(self._last_checked_yield)}")
-        print(f"  Last tracked value: {repr(self._last_checked_yield)}")
-
         # Check if this button was already checked before the click
         if radio_button.isChecked() and self._last_checked_yield == yield_option:
-            print(f"  Action: UNSELECTING")
             # This button is currently selected, so unselect it
             # Temporarily allow deselection
             self.yield_button_group.setExclusive(False)
@@ -807,8 +803,6 @@ class NotionPageSelector(QDialog):
             self._last_checked_yield = yield_option
             NotionPageSelector.last_yield_selection = yield_option
 
-        print(f"  After - Last tracked: {repr(self._last_checked_yield)}")
-
     def get_selected_yield_tags(self):
         """Get the selected yield tags from the radio buttons"""
         # Map the display text to the actual tag
@@ -816,7 +810,7 @@ class NotionPageSelector(QDialog):
             "High Yield": "#Malleus_CM::#Yield::High",
             "Medium Yield": "#Malleus_CM::#Yield::Medium",
             "Low Yield": "#Malleus_CM::#Yield::Low",
-            "Beyond medical student level": "#Malleus_CM::#Yield::Beyond_medical_student_level"
+            "Beyond Medical Student Level": "#Malleus_CM::#Yield::Beyond_medical_student_level"
         }
 
         # Find which radio button is checked
@@ -841,7 +835,7 @@ class NotionPageSelector(QDialog):
             "High Yield": "tag:#Malleus_CM::#Yield::High",
             "Medium Yield": "tag:#Malleus_CM::#Yield::Medium",
             "Low Yield": "tag:#Malleus_CM::#Yield::Low",
-            "Beyond medical student level": "tag:#Malleus_CM::#Yield::Beyond_medical_student_level"
+            "Beyond Medical Student Level": "tag:#Malleus_CM::#Yield::Beyond_medical_student_level"
         }
 
         # Find which radio button is checked
@@ -858,6 +852,135 @@ class NotionPageSelector(QDialog):
             return ["#Malleus_CM::#Resources_by_Rotation::Paediatrics"]
         return []
 
+    # ── Recent tags ───────────────────────────────────────────────────────────
+
+    def _recent_tags_path(self):
+        import os
+        return os.path.join(self._addon_dir, "recent_tags.json")
+
+    def _load_recent_tags(self):
+        """Load the list of recently used page selections from disk."""
+        import json, os
+        path = self._recent_tags_path()
+        if not os.path.exists(path):
+            return []
+        try:
+            with open(path, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except Exception:
+            return []
+
+    def _save_recent_tag(self, page, database_name):
+        """Prepend a page to the recent tags list and persist it (max 8 entries)."""
+        import json
+        try:
+            title = ""
+            if database_name == "Textbooks":
+                title = (page.get('properties', {}).get('Search Term', {})
+                         .get('formula', {}).get('string', '') or "Untitled")
+            else:
+                title_list = page.get('properties', {}).get('Name', {}).get('title', [])
+                title = title_list[0]['text']['content'] if title_list else "Untitled"
+
+            suffix = (page.get('properties', {}).get('Search Suffix', {})
+                      .get('formula', {}).get('string', ''))
+            prefix = ""
+            if database_name in ("Subjects", "Pharmacology"):
+                prefix = (page.get('properties', {}).get('Search Prefix', {})
+                          .get('formula', {}).get('string', ''))
+            display_text = f"{prefix} {title} {suffix}".strip()
+
+            entry = {
+                'page_id': page.get('id', ''),
+                'database_name': database_name,
+                'display_text': display_text,
+                'page_data': page,
+            }
+
+            recent = self._load_recent_tags()
+            # Deduplicate by page_id
+            recent = [r for r in recent if r.get('page_id') != entry['page_id']]
+            recent.insert(0, entry)
+            recent = recent[:8]
+
+            with open(self._recent_tags_path(), 'w', encoding='utf-8') as f:
+                json.dump(recent, f)
+        except Exception:
+            pass
+
+    def _show_recent_tags(self):
+        """Populate the checkbox layout with recently used tags."""
+        recent = self._load_recent_tags()
+        if not recent:
+            return
+
+        # Compact inline separator:  ──── RECENT ────
+        from aqt.qt import QSizePolicy as _QSP
+        sep_widget = QWidget()
+        sep_widget.setSizePolicy(_QSP.Policy.Expanding, _QSP.Policy.Fixed)
+        sep_layout = QHBoxLayout(sep_widget)
+        sep_layout.setContentsMargins(2, 6, 2, 2)
+        sep_layout.setSpacing(6)
+
+        for _ in range(2):
+            line = QFrame()
+            line.setFrameShape(QFrame.Shape.HLine)
+            line.setStyleSheet("color: palette(mid); background: transparent;")
+            sep_layout.addWidget(line, stretch=1)
+            if _ == 0:
+                lbl = QLabel("RECENT")
+                lbl.setStyleSheet(
+                    "font-size: 9px; color: palette(placeholderText); "
+                    "background: transparent; letter-spacing: 1px;"
+                )
+                sep_layout.addWidget(lbl)
+
+        self.checkbox_layout.addWidget(sep_widget)
+
+        for entry in recent:
+            page = entry.get('page_data')
+            if not page:
+                continue
+            db_name = entry.get('database_name', '')
+            display = entry.get('display_text', 'Unknown')
+            label = f"{display}  [{db_name}]" if db_name else display
+
+            row, _cb = self._make_result_row(label, page, show_count=False)
+            self.checkbox_layout.addWidget(row)
+            # pages_data is populated so add_tags can match by index
+            self.pages_data.append(page)
+            # Store the source database on the page for recent-tag add_tags lookups
+            page['_recent_database'] = db_name
+
+        # Track that the current results are "recent" results
+        self._showing_recent = True
+
+    def _update_cache_age_label(self, database_name=None):
+        """Update the 'Update Database' button tooltip with cache age for the selected database."""
+        if not hasattr(self, '_update_database_button'):
+            return
+        if database_name is None:
+            database_name = self.database_selector.currentText()
+        try:
+            import time as _time
+            database_id = get_database_id(database_name)
+            _, timestamp = self.notion_cache.load_from_cache(database_id, warn_if_expired=False)
+            age_seconds = _time.time() - timestamp
+            age_days = int(age_seconds / 86400)
+            if age_days == 0:
+                age_text = "updated today"
+            elif age_days == 1:
+                age_text = "1 day old"
+            else:
+                age_text = f"{age_days} days old"
+            warning = " — consider updating" if age_days > 7 else ""
+            self._update_database_button.setToolTip(
+                f"{database_name} cache: {age_text}{warning}\n"
+                "Download the latest Malleus database cache"
+            )
+        except Exception:
+            self._update_database_button.setToolTip("Download the latest Malleus database cache")
+
     def update_property_selector(self, database_name):
         """Update property selector items based on selected database"""
         self.property_selector.clear()
@@ -868,19 +991,19 @@ class NotionPageSelector(QDialog):
         """Get database ID from selected database name"""
         return get_database_id(self.database_selector.currentText())
 
-    def clear_search_results(self):
-        """Clear the search results when database is changed"""
-        # Clear existing checkboxes
+    def _clear_checkbox_layout(self):
+        """Remove all widgets from checkbox_layout."""
         for i in reversed(range(self.checkbox_layout.count())):
             widget = self.checkbox_layout.itemAt(i).widget()
             if widget:
                 widget.setParent(None)
 
-        # Reset pages data
+    def clear_search_results(self):
+        """Clear the search results and show recent tags if available."""
+        self._clear_checkbox_layout()
         self.pages_data = []
-
-        # Optional: also clear the search input
-        # self.search_input.clear()
+        self._showing_recent = False
+        self._show_recent_tags()
 
     def query_notion_pages(self, filter_text: str, database_id: str) -> list[dict]:
         """Query pages from cache and filter them"""
@@ -901,7 +1024,6 @@ class NotionPageSelector(QDialog):
             return
 
         database_id = self.get_selected_database_id()
-        print(f"Using database ID: {database_id}")
 
         # Since cache is checked on startup, directly perform search
         self.pages_data = self.query_notion_pages(search_term, database_id)
@@ -1801,6 +1923,9 @@ class NotionPageSelector(QDialog):
             result = self._add_tags_single_note(notes[0], selected_pages, property_name)
 
             if result:
+                database_name = self.database_selector.currentText()
+                for page in selected_pages:
+                    self._save_recent_tag(page, database_name)
                 parent = self.parent()
                 if isinstance(parent, Browser):
                     parent.model.reset()
@@ -1886,6 +2011,11 @@ class NotionPageSelector(QDialog):
 
             notes_modified += 1
 
+        if notes_modified > 0:
+            database_name = self.database_selector.currentText()
+            for page in selected_pages:
+                self._save_recent_tag(page, database_name)
+
         # Refresh the UI
         if isinstance(parent, Browser):
             parent.model.reset()
@@ -1970,11 +2100,6 @@ class NotionPageSelector(QDialog):
         existing_yields = self.get_existing_yield_tags(note.tags)
         selected_yields = self.get_selected_yield_tags()
 
-        print(f"DEBUG Add Tags Single Note:")
-        print(f"  Note tags: {note.tags}")
-        print(f"  Existing yields: {existing_yields}")
-        print(f"  Selected yields: {selected_yields}")
-
         # Validate yield selection
         if len(selected_yields) > 1:
             showInfo("Please select only one yield level")
@@ -1988,11 +2113,9 @@ class NotionPageSelector(QDialog):
         elif existing_yields and not selected_yields:
             # Keep existing yield
             final_yield_tags = existing_yields
-            print(f"  Using existing yield tags: {final_yield_tags}")
         elif selected_yields:
             # Use selected yield (replace existing if any)
             final_yield_tags = selected_yields
-            print(f"  Using selected yield tags: {final_yield_tags}")
 
         # Get current tags
         current_tags = set(note.tags)
@@ -2002,8 +2125,6 @@ class NotionPageSelector(QDialog):
             tag for tag in current_tags
             if not tag.startswith("#Malleus_CM::#Yield::")
         }
-
-        print(f"  Tags after removing yields: {current_tags}")
 
         # Get new tags
         # Temporarily set property selector
@@ -2020,15 +2141,11 @@ class NotionPageSelector(QDialog):
         if original_index >= 0:
             self.property_selector.setCurrentIndex(original_index)
 
-        print(f"  New tags to add: {new_tags}")
-
         # Combine new tags with final yield tags and paediatrics tag
         all_new_tags = new_tags | set(final_yield_tags) | set(self.get_paediatrics_tag())
 
         # Combine everything
         combined_tags = list(current_tags | all_new_tags)
-
-        print(f"  Final combined tags: {combined_tags}")
 
         # Update the note
         note.tags = combined_tags
@@ -2110,9 +2227,7 @@ class NotionPageSelector(QDialog):
 
         # Process each note
         for note_index, note in enumerate(notes):
-            # For batch operations, show progress
-            if len(notes) > 1:
-                print(f"Processing note {note_index + 1} of {total_notes}")
+            # For batch operations, continue to next
 
             # Handle yield tags
             existing_yields = self.get_existing_yield_tags(note.tags)
@@ -2272,7 +2387,6 @@ class NotionPageSelector(QDialog):
                 # All tags have the same subtag - normalize it to match property selector
                 raw_subtag = list(raw_subtags)[0]
                 final_subtag = normalize_subtag_for_matching(raw_subtag, possible_subtags)
-                print(f"DEBUG: Normalized subtag '{raw_subtag}' → '{final_subtag}'")
             elif len(raw_subtags) == 0:
                 # No subtags in original tags
                 if user_selected_subtag == "":
@@ -2294,7 +2408,6 @@ class NotionPageSelector(QDialog):
                 if len(normalized_subtags) == 1:
                     # After normalization, they're all the same
                     final_subtag = list(normalized_subtags)[0]
-                    print(f"DEBUG: Multiple raw subtags normalized to single: '{final_subtag}'")
                 else:
                     # They're genuinely different - need user selection
                     if not user_selected_subtag or user_selected_subtag == "":
@@ -2302,35 +2415,27 @@ class NotionPageSelector(QDialog):
                         return False
                     final_subtag = user_selected_subtag
 
-        print(f"DEBUG: Final subtag to use: '{final_subtag}'")
-
         # Set property selector temporarily to get new tags
         original_property = self.property_selector.currentText()
 
         if final_subtag == "Main Tag" or (database_name in ("Subjects", "Pharmacology") and all_general):
             self.property_selector.setCurrentIndex(0)
-            print("DEBUG: Set property selector to index 0 (Main Tag)")
         elif final_subtag and final_subtag not in ("Tag", "Main Tag"):
             index = self.property_selector.findText(final_subtag)
             if index >= 0:
                 self.property_selector.setCurrentIndex(index)
-                print(f"DEBUG: Set property selector to '{final_subtag}' at index {index}")
             else:
-                print(f"WARNING: Could not find '{final_subtag}' in property selector")
                 # Try without spaces
                 for i in range(self.property_selector.count()):
                     item_text = self.property_selector.itemText(i)
                     if item_text.replace(' ', '').lower() == final_subtag.replace(' ', '').lower():
                         self.property_selector.setCurrentIndex(i)
-                        print(f"DEBUG: Found match at index {i}: '{item_text}'")
                         break
         else:
             self.property_selector.setCurrentIndex(0)
-            print("DEBUG: Set property selector to index 0 (default)")
 
         # Get new tags
         new_tags = self.get_tags_from_selected_pages()
-        print(f"DEBUG: New tags: {new_tags}")
 
         # Restore property selector
         original_index = self.property_selector.findText(original_property)
@@ -2352,8 +2457,6 @@ class NotionPageSelector(QDialog):
         elif len(yield_tags_in_final) == 0:
             showInfo("No yield tag. Please select a yield level.")
             return False
-
-        print(f"DEBUG: Final tags for note: {final_tags}")
 
         # Update note
         note.tags = final_tags
@@ -2426,7 +2529,7 @@ class NotionPageSelector(QDialog):
             "High Yield": "#Malleus_CM::#Yield::High",
             "Medium Yield": "#Malleus_CM::#Yield::Medium",
             "Low Yield": "#Malleus_CM::#Yield::Low",
-            "Beyond medical student level": "#Malleus_CM::#Yield::Beyond_medical_student_level"
+            "Beyond Medical Student Level": "#Malleus_CM::#Yield::Beyond_medical_student_level"
         }
         
         for display_text, tag_value in yield_options.items():
