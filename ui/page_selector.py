@@ -7,7 +7,7 @@ from aqt.qt import (QDialog, QVBoxLayout, QHBoxLayout, QComboBox,
                     QLineEdit, QPushButton, QGroupBox, QScrollArea,
                     QWidget, QCheckBox, QButtonGroup, QRadioButton,
                     QLabel, QFrame, QTimer, Qt, QUrl, QWidget as QWidgetBase,
-                    QKeyEvent, QColor, QPalette)
+                    QKeyEvent, QColor, QPalette, QPixmap, QIcon, QSize)
 from aqt.browser import Browser
 from aqt.addcards import AddCards
 from aqt.editcurrent import EditCurrent
@@ -36,6 +36,121 @@ def _fix_amp_display(text: str) -> str:
     # Step 2 — escape for Qt so the ampersand renders visibly
     text = text.replace('&', '&&')
     return text
+
+
+# ── Database display constants ────────────────────────────────────────────────
+
+# Emoji indicators for databases that don't use the page's own Search Prefix.
+# Subjects and Pharmacology use the page's Search Prefix property (🩺 / 💊 / ℹ️).
+# eTG uses a logo image (loaded lazily in _make_result_row).
+_DB_EMOJI = {
+    "Rotation":   "🏥",
+    "Textbooks":  "📖",
+    "Guidelines": "🖊️",
+}
+
+# ── Result row widget (supports right-edge overlay for subtag combo) ──────────
+
+class _ResultRowWidget(QWidget):
+    """A result row that positions the subtag QComboBox as a right-edge overlay.
+
+    The combo is a direct child of this widget but *not* part of the layout,
+    so it overlays the checkbox text without expanding the row width.
+
+    Call `reserve_right(px)` for each fixed-width widget added to the right side
+    of the layout (e.g. count label, confidence dots) so the combo stays clear
+    of those widgets.
+    """
+    _COMBO_W = 170
+    _BASE_MARGIN = 4   # pixels between combo right edge and row right edge
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._overlay_combo = None
+        self._combo_h = 32       # updated to combo's actual sizeHint in set_overlay_combo
+        self._right_reserved = 0  # pixels used by fixed right-side layout items
+
+    def reserve_right(self, px: int):
+        """Reserve additional right-side pixels (count label, dots, etc.)."""
+        self._right_reserved += px
+
+    def set_overlay_combo(self, combo):
+        self._overlay_combo = combo
+        combo.setParent(self)
+        combo.raise_()
+        # Use the combo's preferred height; fall back to 32 if not yet known.
+        hint_h = combo.sizeHint().height()
+        self._combo_h = hint_h if hint_h > 8 else 32
+        self._position_combo()
+
+    # ── Size hints — ensure the row is always tall enough to fit the overlay ──
+
+    def sizeHint(self):
+        sh = super().sizeHint()
+        if self._overlay_combo is not None:
+            from aqt.qt import QSize
+            return QSize(sh.width(), max(sh.height(), self._combo_h + 4))
+        return sh
+
+    def minimumSizeHint(self):
+        msh = super().minimumSizeHint()
+        if self._overlay_combo is not None:
+            from aqt.qt import QSize
+            return QSize(msh.width(), max(msh.height(), self._combo_h + 4))
+        return msh
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._position_combo()
+
+    def _position_combo(self):
+        if self._overlay_combo is None or not self._overlay_combo.isVisible():
+            return
+        h = self.height()
+        if h < self._combo_h:          # row hasn't been sized yet — defer
+            from aqt.qt import QTimer
+            QTimer.singleShot(0, self._position_combo)
+            return
+        x = max(0, self.width() - self._COMBO_W - self._BASE_MARGIN - self._right_reserved)
+        y = max(0, (h - self._combo_h) // 2)
+        self._overlay_combo.setGeometry(x, y, self._COMBO_W, self._combo_h)
+
+
+# Maps the UI database name to the fragment used in Anki tag strings.
+# Most are identical; Rotation is the exception.
+DB_TAG_MAPPING = {
+    "Subjects":     "Subjects",
+    "Pharmacology": "Pharmacology",
+    "eTG":          "eTG",
+    "Rotation":     "Resources_by_Rotation",
+    "Textbooks":    "Textbooks",
+    "Guidelines":   "Guidelines",
+}
+
+# Maximum search results shown across all databases
+_MAX_SEARCH_RESULTS = 15
+
+# Score multipliers applied per-database before the global top-N sort.
+# Values > 1.0 push that database's results higher; < 1.0 pushes them lower.
+_DB_SCORE_BIAS = {
+    "Subjects":     1.30,
+    "Pharmacology": 1.10,
+    "eTG":          1.00,
+    "Rotation":     0.85,
+    "Textbooks":    0.80,
+    "Guidelines":   0.85,
+}
+
+
+def _is_general_page(page: dict) -> bool:
+    """Return True when the page is a 'general' overview page (ℹ️ in Search Prefix)."""
+    prefix = (page.get('properties', {})
+              .get('Search Prefix', {})
+              .get('formula', {})
+              .get('string', ''))
+    return 'ℹ️' in prefix
+
+
 from ..config import (DATABASE_PROPERTIES, get_database_id, get_database_name,
                        SUBJECT_DATABASE_ID, PHARMACOLOGY_DATABASE_ID)
 from ..utils import open_browser_with_search
@@ -60,9 +175,10 @@ except Exception:
         lbl = QLabel(title); lbl.setStyleSheet("font-weight: bold; font-size: 14px;")
         lay.addWidget(lbl); lay.addStretch(); return h
     COLORS = {}
-from ..tag_utils import (simplify_tags_by_page, get_subtag_from_tag, 
-                         get_all_subtags_from_tags, normalize_subtag_for_matching, 
+from ..tag_utils import (simplify_tags_by_page, get_subtag_from_tag,
+                         get_all_subtags_from_tags, normalize_subtag_for_matching,
                          get_subtags_with_normalization)
+
 
 class NotionPageSelector(QDialog):
     last_yield_selection = ""  # Class variable to remember last selection
@@ -82,22 +198,15 @@ class NotionPageSelector(QDialog):
             self.current_note = parent.editor.note
         self.notion_cache = notion_cache
         self.config = config
-        # Derive addon_dir from the cache directory so we can load the logo
         import os
         self._addon_dir = str(notion_cache.cache_dir.parent)
-        # Initialize cache on startup without forcing
-        # if SUBJECT_DATABASE_ID:
-        #     self.notion_cache.update_cache_async(SUBJECT_DATABASE_ID, force=False)
-        # if PHARMACOLOGY_DATABASE_ID:
-        #     self.notion_cache.update_cache_async(PHARMACOLOGY_DATABASE_ID, force=False)
-        # if ETG_DATABASE_ID:
-        #     self.notion_cache.update_cache_async(ETG_DATABASE_ID, force=False)
-        # if ROTATION_DATABASE_ID:
-        #     self.notion_cache.update_cache_async(ROTATION_DATABASE_ID, force=False)
 
         self.database_properties = DATABASE_PROPERTIES
-        self.pages_data = []  # Store full page data
+        # _result_rows: list of dicts {page, checkbox, subtag_combo, row_widget}
+        # Replaces the old self.pages_data + fragile index-based checkbox lookup.
+        self._result_rows = []
         self._showing_recent = False
+        self._db_chips = {}  # db_name → QPushButton (filter chips)
         self.setup_ui()
         apply_malleus_style(self)
 
@@ -106,7 +215,6 @@ class NotionPageSelector(QDialog):
         parent = self.parent()
 
         if isinstance(parent, Browser):
-            # Check if any cards are selected
             selected_card_ids = parent.selectedCards()
             return len(selected_card_ids) > 0
         elif isinstance(parent, EditCurrent):
@@ -118,8 +226,6 @@ class NotionPageSelector(QDialog):
 
     def setup_ui(self):
         self.setWindowTitle("Malleus Page Selector")
-        # Wider when a note is open: the result rows show card count + confidence
-        # dots side-by-side and need the extra space to avoid truncation.
         self.setMinimumWidth(820 if self.has_notes_to_process() else 640)
         self.setMinimumHeight(580)
 
@@ -145,50 +251,124 @@ class NotionPageSelector(QDialog):
         content_layout.setContentsMargins(16, 14, 16, 12)
         content_layout.setSpacing(10)
 
-        # Search section
-        search_layout = QHBoxLayout()
-        search_layout.setSpacing(8)
-
-        # Database selector
-        self.database_selector = QComboBox()
-        self.database_selector.addItems(["Subjects", "Pharmacology", "eTG", "Rotation", "Textbooks", "Guidelines"])
-        self.database_selector.currentTextChanged.connect(self.update_property_selector)
-        self.database_selector.currentTextChanged.connect(self.clear_search_results)
-        search_layout.addWidget(self.database_selector)
-
-        # Initialize search timer
+        # ── Search input (full row) ─────────────────────────────────────────
         self.search_timer = QTimer()
         self.search_timer.setSingleShot(True)
         self.search_timer.timeout.connect(self.perform_search)
 
-        # Search input
         self.search_input = QLineEdit()
-        self.search_input.setPlaceholderText("🔍  Search pages...")
+        self.search_input.setPlaceholderText("🔍  Search all databases…")
         self.search_input.textChanged.connect(self.on_search_text_changed)
         self.search_input.setMinimumHeight(34)
-        search_layout.addWidget(self.search_input)
+        content_layout.addWidget(self.search_input)
 
-        # Property selector
-        self.property_selector = QComboBox()
-        search_layout.addWidget(self.property_selector)
-
-        self.update_property_selector(self.database_selector.currentText())
-
-        # Search button
         if not self.config['autosearch']:
             search_button = QPushButton("Search")
             search_button.clicked.connect(self.perform_search)
-            search_layout.addWidget(search_button)
+            content_layout.addWidget(search_button)
 
-        content_layout.addLayout(search_layout)
+        # ── Database filter chips ───────────────────────────────────────────
+        chips_row = QHBoxLayout()
+        chips_row.setSpacing(4)
+        chips_row.setContentsMargins(0, 0, 0, 0)
 
-        self.database_selector.currentTextChanged.connect(self._update_cache_age_label)
+        chips_label = QLabel("Databases:")
+        chips_label.setStyleSheet(
+            "font-size: 11px; color: palette(placeholderText); background: transparent;"
+        )
+        chips_row.addWidget(chips_label)
 
-        # Results section
+        _chip_style = (
+            "QPushButton {"
+            "  border: 1px solid palette(mid); border-radius: 10px;"
+            "  padding: 2px 9px; font-size: 11px; background: transparent;"
+            "  color: palette(windowText);"   # explicit colour — stays readable in light mode
+            "}"
+            "QPushButton:checked {"
+            "  background: rgba(74,130,204,0.20); border-color: #4a82cc; color: #4a82cc;"
+            "}"
+            "QPushButton:!checked {"
+            "  color: palette(placeholderText);"   # dimmed but legible when off
+            "}"
+            "QPushButton:hover { background: rgba(74,130,204,0.10); }"
+        )
+
+        # Chip labels — emoji prefix for all databases; eTG gets an image icon
+        _chip_labels = {
+            "Subjects":     "🩺 Subjects",
+            "Pharmacology": "💊 Pharmacology",
+            "eTG":          "eTG",          # icon set separately below
+            "Rotation":     "🏥 Rotation",
+            "Textbooks":    "📖 Textbooks",
+            "Guidelines":   "🖊️ Guidelines",
+        }
+
+        # Build the eTG icon once (16×16) for use on the chip
+        _etg_chip_icon = None
+        try:
+            import os as _os
+            _etg_pm = QPixmap(_os.path.join(self._addon_dir, 'images', 'eTG.jpg'))
+            if not _etg_pm.isNull():
+                _etg_chip_icon = QIcon(
+                    _etg_pm.scaled(16, 16,
+                                   Qt.AspectRatioMode.KeepAspectRatio,
+                                   Qt.TransformationMode.SmoothTransformation)
+                )
+        except Exception:
+            pass
+
+        for db_name in ["Subjects", "Pharmacology", "eTG", "Rotation", "Textbooks", "Guidelines"]:
+            btn = QPushButton(_chip_labels.get(db_name, db_name))
+            if db_name == "eTG" and _etg_chip_icon:
+                btn.setIcon(_etg_chip_icon)
+                btn.setIconSize(QSize(16, 16))
+            btn.setCheckable(True)
+            btn.setChecked(True)   # all active by default
+            btn.setStyleSheet(_chip_style)
+            btn.clicked.connect(self._on_chip_toggled)
+            chips_row.addWidget(btn)
+            self._db_chips[db_name] = btn
+
+        chips_row.addStretch()
+
+        # ── All / None quick-select buttons ────────────────────────────────
+        _toggle_btn_style = (
+            "QPushButton {"
+            "  border: 1px solid palette(mid); border-radius: 3px;"
+            "  padding: 1px 7px; font-size: 10px; background: transparent;"
+            "  color: palette(windowText);"
+            "}"
+            "QPushButton:hover { background: rgba(74,130,204,0.12); }"
+        )
+        all_btn  = QPushButton("All")
+        none_btn = QPushButton("None")
+        for qb in (all_btn, none_btn):
+            qb.setFixedHeight(22)
+            qb.setStyleSheet(_toggle_btn_style)
+        all_btn.setToolTip("Enable all databases")
+        none_btn.setToolTip("Disable all databases")
+
+        def _select_all_chips():
+            for b in self._db_chips.values():
+                b.setChecked(True)
+            self._on_chip_toggled()
+
+        def _select_no_chips():
+            for b in self._db_chips.values():
+                b.setChecked(False)
+            self._on_chip_toggled()
+
+        all_btn.clicked.connect(_select_all_chips)
+        none_btn.clicked.connect(_select_no_chips)
+        chips_row.addWidget(all_btn)
+        chips_row.addWidget(none_btn)
+
+        content_layout.addLayout(chips_row)
+
+        # ── Results section ─────────────────────────────────────────────────
         self.results_group = QGroupBox("Search Results")
         results_layout = QVBoxLayout()
 
-        # Scrollable area for checkboxes
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setMinimumHeight(220)
@@ -201,18 +381,16 @@ class NotionPageSelector(QDialog):
         self.results_group.setLayout(results_layout)
         content_layout.addWidget(self.results_group, stretch=1)
 
-        # Yield selection section
+        # ── Yield selection ─────────────────────────────────────────────────
         yield_group = QGroupBox("Yield Level")
         yield_layout = QVBoxLayout()
         yield_layout.setSpacing(2)
         yield_layout.setContentsMargins(6, 4, 6, 6)
 
-        # Create a horizontal layout with title and info icon
         yield_title_layout = QHBoxLayout()
         yield_title_label = QLabel("Yield Level")
         yield_title_label.setStyleSheet("font-weight: 700; font-size: 13px; background: transparent;")
 
-        # Create info icon with combined tooltip
         combined_tooltip = """<p style="margin: 0; padding: 4px;">
         <b style="font-size: 14px;">High Yield</b> <span>(~50% cards)</span><br><br>
         <span>• If you study just these cards, you will likely pass final year medical school exams, but likely not do much better if studied in isolation</span><br>
@@ -259,17 +437,14 @@ class NotionPageSelector(QDialog):
         yield_title_layout.addWidget(info_label)
         yield_title_layout.addStretch()
 
-        # Hide the default title and add custom layout
         yield_group.setTitle("")
         yield_layout.addLayout(yield_title_layout)
 
-        # Add separator line
         separator = QFrame()
         separator.setFrameShape(QFrame.Shape.HLine)
         separator.setFrameShadow(QFrame.Shadow.Sunken)
         yield_layout.addWidget(separator)
 
-        # Create radio buttons for yield selection
         self.yield_button_group = QButtonGroup(self)
         self.yield_button_group.setExclusive(True)
 
@@ -286,14 +461,10 @@ class NotionPageSelector(QDialog):
             self.yield_radio_buttons[yield_option] = radio_button
             self.yield_button_group.addButton(radio_button)
             yield_layout.addWidget(radio_button)
-
-            # Connect to handle click for deselection
             radio_button.clicked.connect(lambda checked, opt=yield_option: self.handle_yield_click(opt))
 
-        # Initialize tracking variable
         self._last_checked_yield = None
 
-        # Restore last selection if it exists
         if NotionPageSelector.last_yield_selection:
             if NotionPageSelector.last_yield_selection in self.yield_radio_buttons:
                 self.yield_radio_buttons[NotionPageSelector.last_yield_selection].setChecked(True)
@@ -301,10 +472,7 @@ class NotionPageSelector(QDialog):
 
         yield_group.setLayout(yield_layout)
 
-        # Paediatrics section (right side)
-        # Mirror yield_group structure exactly:
-        # use a non-empty placeholder title then suppress it with setTitle("")
-        # so Qt's native title margin is removed identically to yield_group.
+        # ── Paediatrics / Specialty Tags ────────────────────────────────────
         paeds_group = QGroupBox("Specialty Tags")
         paeds_layout = QVBoxLayout()
         paeds_layout.setSpacing(2)
@@ -318,7 +486,6 @@ class NotionPageSelector(QDialog):
         paeds_title_layout.addWidget(paeds_title)
         paeds_title_layout.addStretch()
 
-        # Suppress the native QGroupBox title, drawing our own instead (same as yield_group)
         paeds_group.setTitle("")
         paeds_layout.addLayout(paeds_title_layout)
 
@@ -328,19 +495,18 @@ class NotionPageSelector(QDialog):
         paeds_layout.addWidget(paeds_separator)
 
         paeds_layout.addSpacing(6)
-        
+
         paeds_question = QLabel("Is this a card on paediatrics?")
         paeds_question.setWordWrap(True)
         paeds_layout.addWidget(paeds_question)
 
         self.paeds_checkbox = QCheckBox("Yes")
         paeds_layout.addWidget(self.paeds_checkbox)
-        paeds_layout.addStretch()  # pin content to top; absorb remaining height
+        paeds_layout.addStretch()
 
         paeds_group.setLayout(paeds_layout)
 
-        # Place yield and paediatrics side by side
-        # Wrap in a QWidget with fixed vertical size policy so this row never grows
+        # Yield + Paediatrics side by side
         from aqt.qt import QSizePolicy
         yield_paeds_widget = QWidget()
         yield_paeds_layout = QHBoxLayout(yield_paeds_widget)
@@ -349,18 +515,15 @@ class NotionPageSelector(QDialog):
         yield_paeds_layout.addWidget(paeds_group, stretch=1)
         yield_paeds_widget.setSizePolicy(
             QSizePolicy.Policy.Expanding,
-            QSizePolicy.Policy.Fixed     # Fixed vertical — won't grow on resize
+            QSizePolicy.Policy.Fixed
         )
         content_layout.addWidget(yield_paeds_widget, stretch=0)
 
-        # ── Buttons — two rows ────────────────────────────────────────────────
-        # Buttons: two rows when a note is open (extra action buttons present),
-        # single row otherwise (just Select All / Find / Create / utilities).
+        # ── Buttons ─────────────────────────────────────────────────────────
         has_notes = self.has_notes_to_process()
         buttons_vbox = QVBoxLayout()
         buttons_vbox.setSpacing(6)
 
-        # Shared utility buttons (always present)
         update_database_button = QPushButton("↻  Update Database")
         update_database_button.setObjectName("secondary")
         update_database_button.clicked.connect(
@@ -368,7 +531,8 @@ class NotionPageSelector(QDialog):
                      self._update_cache_age_label())
         )
         self._update_database_button = update_database_button
-        self._update_cache_age_label(self.database_selector.currentText())
+        self._update_cache_age_label()
+
         guidelines_button = QPushButton("Guidelines ↗")
         guidelines_button.setObjectName("secondary")
         guidelines_button.clicked.connect(
@@ -384,10 +548,8 @@ class NotionPageSelector(QDialog):
                 QUrl("https://www.paypal.com/donate/?hosted_button_id=9VM7MHMMK5JJJ")
             )
         )
-        # button_layout.addWidget(donate_button)
 
         if has_notes:
-            # ── Row 1: tag management (all outlined — reversible/config actions)
             row1 = QHBoxLayout()
             row1.setSpacing(6)
 
@@ -422,7 +584,6 @@ class NotionPageSelector(QDialog):
 
             buttons_vbox.addLayout(row1)
 
-            # ── Row 2: execute / utilities (primary blue for Find/Create) ─────
             row2 = QHBoxLayout()
             row2.setSpacing(6)
 
@@ -441,7 +602,6 @@ class NotionPageSelector(QDialog):
             buttons_vbox.addLayout(row2)
 
         else:
-            # ── Single row: no note open — all stretch to fill ────────────────
             row1 = QHBoxLayout()
             row1.setSpacing(6)
 
@@ -474,8 +634,32 @@ class NotionPageSelector(QDialog):
         layout.addWidget(content_widget)
         self.setLayout(layout)
 
-        # Show recent tags on first open (search is empty)
+        # Show recent tags on first open
         self._show_recent_tags()
+
+    # ── Database chip helpers ─────────────────────────────────────────────────
+
+    def _get_active_db_names(self) -> list:
+        """Return list of database names whose filter chip is currently active."""
+        return [db for db, btn in self._db_chips.items() if btn.isChecked()]
+
+    def _get_active_db_ids(self) -> list:
+        """Return list of (db_id, db_name) for all active filter chips."""
+        result = []
+        for db_name, btn in self._db_chips.items():
+            if btn.isChecked():
+                db_id = get_database_id(db_name)
+                if db_id:
+                    result.append((db_id, db_name))
+        return result
+
+    def _on_chip_toggled(self):
+        """Re-run search (or show recent tags) when a database chip is toggled."""
+        if len(self.search_input.text()) >= 2:
+            self.search_timer.stop()
+            self.perform_search()
+        else:
+            self.clear_search_results()
 
     # ── Card count + confidence helpers ──────────────────────────────────────
 
@@ -483,11 +667,6 @@ class NotionPageSelector(QDialog):
         """
         Fetch every note's raw tag string from the collection DB in one query
         and cache the result on self._note_tag_strings.
-
-        This is called once before a batch of _get_card_count_for_page() calls
-        so that counting N result rows costs one DB round-trip instead of N.
-        The cache is keyed on the collection path; if it changes (user switches
-        profile) the cache is transparently rebuilt.
         """
         try:
             col = mw.col
@@ -498,8 +677,7 @@ class NotionPageSelector(QDialog):
             col_path = str(col.path)
             if (getattr(self, '_note_tag_strings_col', None) == col_path
                     and hasattr(self, '_note_tag_strings')):
-                return  # already cached for this collection
-            # db.list returns a flat list of values for a single-column query
+                return
             self._note_tag_strings = col.db.list("select tags from notes")
             self._note_tag_strings_col = col_path
         except Exception as e:
@@ -508,17 +686,7 @@ class NotionPageSelector(QDialog):
             self._note_tag_strings_col = None
 
     def _get_card_count_for_page(self, page: dict) -> int:
-        """
-        Return the number of notes that have a tag matching this Notion page.
-
-        Uses the cached tag strings loaded by _load_note_tag_strings() so
-        counting N result rows costs one DB query total.
-
-        Checks 'Main Tag' first (gives the page-root prefix that is shared by
-        all subtag variants on notes), then falls back to 'Tag'.  General pages
-        show 0 — their Main Tag path omits *General and so won't match, but
-        that edge case is acceptable.
-        """
+        """Return the number of notes tagged with this Notion page."""
         try:
             tag = ''
             properties = page.get('properties', {})
@@ -531,24 +699,17 @@ class NotionPageSelector(QDialog):
                     if val:
                         tag = val.split()[0]
                         break
-
             if not tag:
                 return 0
-
             tag_strings = getattr(self, '_note_tag_strings', [])
             return sum(1 for ts in tag_strings if tag in ts)
         except Exception as e:
             print(f"[MalleusCardCount] error: {e}")
             return 0
+
     @staticmethod
     def _score_to_dots(score: float, max_score: float = 4.0) -> str:
-        """
-        Convert a raw suggestion score to a 5-dot confidence string.
-
-        The max_score is TOPIC_SEARCH_BONUS (4.0) — a perfect cloze-first match
-        gives ~4.0 before title bonus, so that anchors the scale.
-        Scores above max are capped at 5 dots.
-        """
+        """Convert a raw suggestion score to a 5-dot confidence string."""
         normalised = min(score / max_score, 1.0)
         filled = max(1, round(normalised * 5))
         return '●' * filled + '○' * (5 - filled)
@@ -559,24 +720,97 @@ class NotionPageSelector(QDialog):
         """
         Build a single result row widget.
 
-        Returns (row_widget, checkbox) where row_widget is a QWidget
-        containing a QHBoxLayout with:
-          - QCheckBox (the display text)
-          - card count pill  (only when show_count=True)
-          - confidence dots  (only when score is provided, i.e. suggestions)
+        Layout: [db indicator] [checkbox (stretch)] [card count pill] [confidence dots]
+                Subtag combo is a right-edge overlay on the row (not in the layout),
+                so it appears over the checkbox text without expanding the row width.
 
-        The checkbox is also returned separately so callers can wire it
-        into checkbox_layout tracking.
+        Returns (row_widget, checkbox, subtag_combo_or_None).
+        The subtag_combo is None for databases that have no subtag options
+        (Rotation, Textbooks, Guidelines) and for ℹ️ general pages.
         """
-        row = QWidget()
+        db_name = page.get('_database_name', '')
+
+        row = _ResultRowWidget()
         row_layout = QHBoxLayout(row)
         row_layout.setContentsMargins(0, 0, 4, 0)
         row_layout.setSpacing(6)
 
+        # ── Database indicator ─────────────────────────────────────────────
+        # • Subjects / Pharmacology → the page's own Search Prefix emoji (🩺 💊 ℹ️)
+        # • eTG                     → the eTG logo image (lazy-loaded pixmap)
+        # • Rotation / Textbooks / Guidelines → a fixed emoji
+        if db_name:
+            badge = QLabel()
+            badge.setFixedWidth(28)
+            badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            badge.setStyleSheet("background: transparent;")
+            badge.setToolTip(db_name)
+
+            if db_name in ("Subjects", "Pharmacology"):
+                # Extract the page's own prefix emoji
+                prefix = (page.get('properties', {})
+                          .get('Search Prefix', {})
+                          .get('formula', {}).get('string', ''))
+                badge.setText(prefix or "")
+                badge.setStyleSheet(
+                    "background: transparent; font-size: 15px;"
+                )
+            elif db_name == "eTG":
+                # Lazy-load the eTG logo pixmap once per dialog instance
+                if not hasattr(self, '_etg_pixmap'):
+                    import os as _os
+                    img_path = _os.path.join(self._addon_dir, 'images', 'eTG.jpg')
+                    pm = QPixmap(img_path)
+                    self._etg_pixmap = (
+                        pm.scaled(22, 22,
+                                  Qt.AspectRatioMode.KeepAspectRatio,
+                                  Qt.TransformationMode.SmoothTransformation)
+                        if not pm.isNull() else None
+                    )
+                if self._etg_pixmap:
+                    badge.setPixmap(self._etg_pixmap)
+                else:
+                    badge.setText("eTG")
+            else:
+                emoji = _DB_EMOJI.get(db_name, "")
+                badge.setText(emoji)
+                badge.setStyleSheet(
+                    "background: transparent; font-size: 15px;"
+                )
+
+            row_layout.addWidget(badge, stretch=0)
+
+        # ── Checkbox ───────────────────────────────────────────────────────
         cb = QCheckBox(display_text)
         row_layout.addWidget(cb, stretch=1)
 
-        # Card count pill — omitted when the result set is large
+        # ── Per-result subtag ComboBox (overlay, not in layout) ────────────
+        # Shown overlaid on the right edge of the row when the checkbox is checked.
+        # Applies to Subjects/Pharmacology 🩺/💊 pages and all eTG pages.
+        subtag_combo = None
+        has_subtag_options = db_name in ("Subjects", "Pharmacology", "eTG")
+        is_general = _is_general_page(page)
+        skip_combo = (db_name in ("Subjects", "Pharmacology") and is_general)
+
+        if has_subtag_options and not skip_combo:
+            subtag_combo = QComboBox()
+            subtag_combo.setVisible(False)
+            props = DATABASE_PROPERTIES.get(db_name, [""])
+            subtag_combo.addItems(props)
+            subtag_combo.setToolTip("Select a subtag for this result")
+            # Attach as overlay — positions itself over the right edge of the row
+            row.set_overlay_combo(subtag_combo)
+
+            def _toggle_subtag(state, sc=subtag_combo, r=row):
+                if state == 2:  # Qt.CheckState.Checked
+                    sc.setVisible(True)
+                    r._position_combo()
+                else:
+                    sc.setVisible(False)
+
+            cb.stateChanged.connect(_toggle_subtag)
+
+        # ── Card count pill ────────────────────────────────────────────────
         if show_count:
             card_count = self._get_card_count_for_page(page)
             count_label = QLabel(f"{card_count} {'note' if card_count == 1 else 'notes'}")
@@ -590,8 +824,11 @@ class NotionPageSelector(QDialog):
                     "color: #58a6ff; font-size: 11px; font-weight: 600; padding: 1px 6px;"
                 )
             row_layout.addWidget(count_label, stretch=0)
+            # Reserve space so the overlay combo doesn't cover this label
+            if subtag_combo is not None:
+                row.reserve_right(count_label.sizeHint().width() + 6)
 
-        # Confidence dots (suggestions only)
+        # ── Confidence dots (suggestions only) ────────────────────────────
         if score is not None:
             dots = self._score_to_dots(score)
             dots_label = QLabel(dots)
@@ -600,8 +837,10 @@ class NotionPageSelector(QDialog):
                 "font-size: 11px; letter-spacing: 2px; color: #f0a500; padding: 1px 4px;"
             )
             row_layout.addWidget(dots_label, stretch=0)
+            if subtag_combo is not None:
+                row.reserve_right(dots_label.sizeHint().width() + 4)
 
-        return row, cb
+        return row, cb, subtag_combo
 
     # ── Keyboard navigation ───────────────────────────────────────────────────
 
@@ -625,7 +864,6 @@ class NotionPageSelector(QDialog):
         if key in (Qt_Key.Key_Down, Qt_Key.Key_Up):
             if not checkboxes:
                 return
-            # Find current focused checkbox index
             focused = None
             for i, cb in enumerate(checkboxes):
                 if cb.hasFocus():
@@ -644,7 +882,6 @@ class NotionPageSelector(QDialog):
             return
 
         if key in (Qt_Key.Key_Return, Qt_Key.Key_Enter):
-            # Trigger primary action
             if self.has_notes_to_process():
                 self.add_tags()
             else:
@@ -666,42 +903,51 @@ class NotionPageSelector(QDialog):
         super().keyPressEvent(event)
 
     def _get_result_checkboxes(self) -> list:
-        """Return all QCheckBox widgets currently in the results area."""
-        checkboxes = []
-        for i in range(self.checkbox_layout.count()):
-            item = self.checkbox_layout.itemAt(i)
-            if item is None:
-                continue
-            widget = item.widget()
-            if widget is None:
-                continue
-            # Direct checkbox (old-style from perform_search)
-            if isinstance(widget, QCheckBox):
-                checkboxes.append(widget)
-            # Row widget containing a checkbox (new _make_result_row style)
-            elif hasattr(widget, 'layout') and widget.layout():
-                for j in range(widget.layout().count()):
-                    child = widget.layout().itemAt(j).widget()
-                    if isinstance(child, QCheckBox):
-                        checkboxes.append(child)
-        return checkboxes
+        """Return all QCheckBox widgets from the current result rows."""
+        return [row['checkbox'] for row in self._result_rows]
+
+    def _get_selected_rows(self) -> list:
+        """Return _result_rows entries whose checkbox is checked."""
+        return [row for row in self._result_rows if row['checkbox'].isChecked()]
+
+    def _get_row_property_name(self, row_data: dict) -> str:
+        """
+        Derive the Notion property name to use for tag extraction from a result row.
+
+        Rules:
+        • ℹ️ general pages (Subjects/Pharmacology): always "Main Tag"
+        • Row has a subtag_combo: return its current text (may be "" = no selection)
+        • Rotation/Textbooks/Guidelines (no combo): return "Tag"
+        • Subjects with no combo (shouldn't happen for non-general): "Main Tag"
+        """
+        page = row_data['page']
+        db_name = page.get('_database_name', '')
+
+        # General pages always use Main Tag
+        if db_name in ("Subjects", "Pharmacology") and _is_general_page(page):
+            return "Main Tag"
+
+        subtag_combo = row_data.get('subtag_combo')
+        if subtag_combo is not None:
+            return subtag_combo.currentText()  # may be "" (no subtag chosen)
+
+        # Databases without subtag combos
+        if db_name == "Subjects":
+            return "Main Tag"
+        return "Tag"
+
+    # ── Suggest tags ──────────────────────────────────────────────────────────
 
     def suggest_tags_from_card(self):
         """
         Run the local tag suggester against the current note's Text field,
         then show the results so the user can select which ones to apply.
 
-        How results are displayed
-        -------------------------
-        1. The database selector is switched to "Subjects".
-        2. The search box is cleared and the results area is populated
-           directly with the suggested pages — same checkbox UI as a normal
-           search, so the existing Select All / Create Cards / Add Tags
-           buttons all work without any changes.
-        3. A tooltip on each checkbox shows the confidence score so the
-           user can judge quality at a glance.
+        The database filter chips are not changed — results are stamped with
+        _database_name = "Subjects" and displayed using the same checkbox UI
+        as a regular search.  The suggested subtag (if any) is pre-set on each
+        result's subtag combo so it's ready when the user checks the row.
         """
-        # 1. Get the card text to analyse
         notes = self.get_notes_to_process()
         if not notes:
             showInfo("No note found — open a card in the editor first.")
@@ -717,8 +963,6 @@ class NotionPageSelector(QDialog):
             showInfo("The card's Text field is empty — nothing to analyse.")
             return
 
-        # Collect supplementary fields individually so each can be weighted
-        # differently inside the suggester.
         def _field(name):
             try:
                 v = note[name]
@@ -730,7 +974,6 @@ class NotionPageSelector(QDialog):
         addl_resources_text = _field('Additional Resources')
         source_text         = _field('Source')
 
-        # 2. Run the suggester
         malleus_tooltip("Analysing card text…")
         suggestions = suggest_subject_tags(
             card_text, self.notion_cache,
@@ -746,129 +989,107 @@ class NotionPageSelector(QDialog):
             )
             return
 
-        # 3. Switch UI to Subjects database
-        subjects_index = self.database_selector.findText("Subjects")
-        if subjects_index >= 0:
-            self.database_selector.setCurrentIndex(subjects_index)
+        # Populate results area
+        self._clear_checkbox_layout()
+        self._result_rows = []
+        self._showing_recent = False
 
-        # 4. Populate the results area with suggestion checkboxes
-        #    (mirrors what perform_search does, reusing the same layout)
-        self.pages_data = [s['page'] for s in suggestions]
-
-        # Clear existing checkboxes
-        for i in reversed(range(self.checkbox_layout.count())):
-            widget = self.checkbox_layout.itemAt(i).widget()
-            if widget:
-                widget.setParent(None)
-
-        # Load note tag cache once for all suggestion rows
         self._load_note_tag_strings()
 
         for suggestion in suggestions:
-            page    = suggestion['page']
-            title   = suggestion['title']
-            score   = suggestion['score']
+            page  = suggestion['page']
+            title = suggestion['title']
+            score = suggestion['score']
+
+            # Stamp database so _make_result_row can show the correct badge/combo
+            page['_database_name'] = 'Subjects'
 
             try:
-                suffix = (
-                    page['properties']
-                    .get('Search Suffix', {})
-                    .get('formula', {})
-                    .get('string', '')
-                )
-                prefix = (
-                    page['properties']
-                    .get('Search Prefix', {})
-                    .get('formula', {})
-                    .get('string', '')
-                )
-                display_text = _fix_amp_display(f"{prefix} {title} {suffix}".strip())
+                suffix = (page['properties']
+                          .get('Search Suffix', {})
+                          .get('formula', {}).get('string', ''))
+                # Prefix emoji is shown in the badge, not the checkbox text
+                display_text = _fix_amp_display(f"{title} {suffix}".strip())
             except Exception:
                 display_text = title
 
-            row, _cb = self._make_result_row(display_text, page, score=score)
+            row, cb, subtag_combo = self._make_result_row(
+                display_text, page, score=score, show_count=True
+            )
             self.checkbox_layout.addWidget(row)
+            self._result_rows.append({
+                'page': page,
+                'checkbox': cb,
+                'subtag_combo': subtag_combo,
+                'row_widget': row,
+            })
 
-        # Pre-select the suggested subtag in the property selector.
-        # All suggestions share the same subtag (the card tests one concept).
+        # Pre-set the suggested subtag on every combo (visible once user checks the row)
         subtag = suggestions[0].get('suggested_subtag')
         if subtag:
-            idx = self.property_selector.findText(subtag)
-            if idx >= 0:
-                self.property_selector.setCurrentIndex(idx)
+            for row_data in self._result_rows:
+                sc = row_data.get('subtag_combo')
+                if sc:
+                    idx = sc.findText(subtag)
+                    if idx >= 0:
+                        sc.setCurrentIndex(idx)
 
-        # Update the group box title so the user knows these are suggestions
         subtag_label = f" · subtag: {subtag}" if subtag else ""
         self.results_group.setTitle(
             f"Suggested Tags ({len(suggestions)} found{subtag_label})"
         )
         malleus_tooltip(f"Found {len(suggestions)} suggested tag(s)")
 
+    # ── Yield handlers ────────────────────────────────────────────────────────
+
     def handle_yield_click(self, yield_option):
-        """Handle yield radio button clicks - allow deselection of selected button"""
+        """Handle yield radio button clicks — allow deselection of selected button."""
         radio_button = self.yield_radio_buttons[yield_option]
 
-        # Check if this button was already checked before the click
         if radio_button.isChecked() and self._last_checked_yield == yield_option:
-            # This button is currently selected, so unselect it
-            # Temporarily allow deselection
             self.yield_button_group.setExclusive(False)
             radio_button.setChecked(False)
             self.yield_button_group.setExclusive(True)
-
             self._last_checked_yield = None
             NotionPageSelector.last_yield_selection = ""
         else:
-            print(f"  Action: SELECTING")
-            # This button is being newly selected
             self._last_checked_yield = yield_option
             NotionPageSelector.last_yield_selection = yield_option
 
     def get_selected_yield_tags(self):
-        """Get the selected yield tags from the radio buttons"""
-        # Map the display text to the actual tag
+        """Get the selected yield tags from the radio buttons."""
         yield_tag_mapping = {
             "High Yield": "#Malleus_CM::#Yield::High",
             "Medium Yield": "#Malleus_CM::#Yield::Medium",
             "Low Yield": "#Malleus_CM::#Yield::Low",
             "Beyond Medical Student Level": "#Malleus_CM::#Yield::Beyond_medical_student_level"
         }
-
-        # Find which radio button is checked
         for yield_option, radio_button in self.yield_radio_buttons.items():
             if radio_button.isChecked():
                 tag = yield_tag_mapping.get(yield_option)
                 return [tag] if tag else []
-
-        # No selection
         return []
 
     def get_existing_yield_tags(self, tags):
-        """Extract existing yield tags from a list of tags"""
+        """Extract existing yield tags from a list of tags."""
         yield_pattern = "#Malleus_CM::#Yield::"
-        existing_yields = [tag for tag in tags if tag.startswith(yield_pattern)]
-        return existing_yields
+        return [tag for tag in tags if tag.startswith(yield_pattern)]
 
     def get_yield_search_query(self):
-        """Get the yield search query for browser"""
-        # Map the display text to the search query format
+        """Get the yield search query for the Anki browser."""
         yield_search_mapping = {
             "High Yield": "tag:#Malleus_CM::#Yield::High",
             "Medium Yield": "tag:#Malleus_CM::#Yield::Medium",
             "Low Yield": "tag:#Malleus_CM::#Yield::Low",
             "Beyond Medical Student Level": "tag:#Malleus_CM::#Yield::Beyond_medical_student_level"
         }
-
-        # Find which radio button is checked
         for yield_option, radio_button in self.yield_radio_buttons.items():
             if radio_button.isChecked():
                 return yield_search_mapping.get(yield_option, "")
-
-        # No selection
         return ""
 
     def get_paediatrics_tag(self):
-        """Get the paediatrics rotation tag if the paediatrics checkbox is checked"""
+        """Get the paediatrics rotation tag if the paediatrics checkbox is checked."""
         if hasattr(self, 'paeds_checkbox') and self.paeds_checkbox.isChecked():
             return ["#Malleus_CM::#Resources_by_Rotation::Paediatrics"]
         return []
@@ -891,9 +1112,11 @@ class NotionPageSelector(QDialog):
         except Exception:
             return []
 
-    def _save_recent_tag(self, page, database_name):
+    def _save_recent_tag(self, page, database_name=None):
         """Prepend a page to the recent tags list and persist it (max 8 entries)."""
         import json
+        if database_name is None:
+            database_name = page.get('_database_name', '')
         try:
             title = ""
             if database_name == "Textbooks":
@@ -905,11 +1128,8 @@ class NotionPageSelector(QDialog):
 
             suffix = (page.get('properties', {}).get('Search Suffix', {})
                       .get('formula', {}).get('string', ''))
-            prefix = ""
-            if database_name in ("Subjects", "Pharmacology"):
-                prefix = (page.get('properties', {}).get('Search Prefix', {})
-                          .get('formula', {}).get('string', ''))
-            display_text = _fix_amp_display(f"{prefix} {title} {suffix}".strip())
+            # Prefix emoji lives in the badge widget, not stored in display_text
+            display_text = _fix_amp_display(f"{title} {suffix}".strip())
 
             entry = {
                 'page_id': page.get('id', ''),
@@ -919,7 +1139,6 @@ class NotionPageSelector(QDialog):
             }
 
             recent = self._load_recent_tags()
-            # Deduplicate by page_id
             recent = [r for r in recent if r.get('page_id') != entry['page_id']]
             recent.insert(0, entry)
             recent = recent[:8]
@@ -935,7 +1154,6 @@ class NotionPageSelector(QDialog):
         if not recent:
             return
 
-        # Compact inline separator:  ──── RECENT ────
         from aqt.qt import QSizePolicy as _QSP
         sep_widget = QWidget()
         sep_widget.setSizePolicy(_QSP.Policy.Expanding, _QSP.Policy.Fixed)
@@ -963,54 +1181,62 @@ class NotionPageSelector(QDialog):
             if not page:
                 continue
             db_name = entry.get('database_name', '')
+            # Stamp _database_name so the badge and subtag combo render correctly
+            page['_database_name'] = db_name
             display = entry.get('display_text', 'Unknown')
-            label = f"{display}  [{db_name}]" if db_name else display
 
-            row, _cb = self._make_result_row(label, page, show_count=False)
+            # Strip any Search Prefix emoji that may have been stored in older
+            # format (before the badge split).  The badge now shows the prefix.
+            if db_name in ("Subjects", "Pharmacology"):
+                stored_prefix = (page.get('properties', {})
+                                 .get('Search Prefix', {})
+                                 .get('formula', {}).get('string', ''))
+                if stored_prefix and display.startswith(stored_prefix):
+                    display = display[len(stored_prefix):].lstrip()
+
+            row, cb, subtag_combo = self._make_result_row(display, page, show_count=False)
             self.checkbox_layout.addWidget(row)
-            # pages_data is populated so add_tags can match by index
-            self.pages_data.append(page)
-            # Store the source database on the page for recent-tag add_tags lookups
-            page['_recent_database'] = db_name
+            self._result_rows.append({
+                'page': page,
+                'checkbox': cb,
+                'subtag_combo': subtag_combo,
+                'row_widget': row,
+            })
 
-        # Track that the current results are "recent" results
         self._showing_recent = True
 
-    def _update_cache_age_label(self, database_name=None):
-        """Update the 'Update Database' button tooltip with cache age for the selected database."""
+    def _update_cache_age_label(self, _unused=None):
+        """Update the 'Update Database' button tooltip showing the oldest cache age."""
         if not hasattr(self, '_update_database_button'):
             return
-        if database_name is None:
-            database_name = self.database_selector.currentText()
         try:
             import time as _time
-            database_id = get_database_id(database_name)
-            _, timestamp = self.notion_cache.load_from_cache(database_id, warn_if_expired=False)
-            age_seconds = _time.time() - timestamp
-            age_days = int(age_seconds / 86400)
-            if age_days == 0:
-                age_text = "updated today"
-            elif age_days == 1:
-                age_text = "1 day old"
+            from ..config import DATABASES
+            oldest_days = 0
+            oldest_name = ""
+            for db_id, db_name in DATABASES:
+                _, ts = self.notion_cache.load_from_cache(db_id, warn_if_expired=False)
+                age_days = int((_time.time() - ts) / 86400)
+                if age_days > oldest_days:
+                    oldest_days = age_days
+                    oldest_name = db_name
+            if oldest_days == 0:
+                age_text = "all databases updated today"
+            elif oldest_days == 1:
+                age_text = f"{oldest_name}: 1 day old"
             else:
-                age_text = f"{age_days} days old"
-            warning = " — consider updating" if age_days > 7 else ""
+                age_text = f"{oldest_name}: {oldest_days} days old"
+            warning = " — consider updating" if oldest_days > 7 else ""
             self._update_database_button.setToolTip(
-                f"{database_name} cache: {age_text}{warning}\n"
+                f"Cache: {age_text}{warning}\n"
                 "Download the latest Malleus database cache"
             )
         except Exception:
-            self._update_database_button.setToolTip("Download the latest Malleus database cache")
+            self._update_database_button.setToolTip(
+                "Download the latest Malleus database cache"
+            )
 
-    def update_property_selector(self, database_name):
-        """Update property selector items based on selected database"""
-        self.property_selector.clear()
-        properties = self.database_properties.get(database_name, [])
-        self.property_selector.addItems(properties)
-
-    def get_selected_database_id(self):
-        """Get database ID from selected database name"""
-        return get_database_id(self.database_selector.currentText())
+    # ── Search ────────────────────────────────────────────────────────────────
 
     def _clear_checkbox_layout(self):
         """Remove all widgets from checkbox_layout."""
@@ -1020,22 +1246,27 @@ class NotionPageSelector(QDialog):
                 widget.setParent(None)
 
     def clear_search_results(self):
-        """Clear the search results and show recent tags if available."""
+        """Clear search results and show recent tags."""
         self._clear_checkbox_layout()
-        self.pages_data = []
+        self._result_rows = []
         self._showing_recent = False
         self._show_recent_tags()
 
-    def query_notion_pages(self, filter_text: str, database_id: str) -> list[dict]:
-        """Query pages from cache and filter them"""
+    def _search_single_database(self, db_id: str, db_name: str, search_term: str) -> list:
+        """
+        Load one database from cache, filter by search_term, stamp each result
+        with _database_name, and return the filtered page list.
+        """
         try:
-            cached_pages, last_sync_timestamp = self.notion_cache.load_from_cache(database_id)
-            if cached_pages:
-                filtered_pages = self.notion_cache.filter_pages(cached_pages, filter_text)
-                return filtered_pages or []
-            return []
+            cached_pages, _ = self.notion_cache.load_from_cache(db_id)
+            if not cached_pages:
+                return []
+            results = self.notion_cache.filter_pages(cached_pages, search_term)
+            for page in results:
+                page['_database_name'] = db_name
+            return results
         except Exception as e:
-            showInfo(f"Error accessing data: {str(e)}")
+            print(f"[Search] Error searching {db_name}: {e}")
             return []
 
     def perform_search(self):
@@ -1044,55 +1275,71 @@ class NotionPageSelector(QDialog):
             self.clear_search_results()
             return
 
-        database_id = self.get_selected_database_id()
-
-        # Since cache is checked on startup, directly perform search
-        self.pages_data = self.query_notion_pages(search_term, database_id)
-
-        # Clear existing checkboxes
-        for i in reversed(range(self.checkbox_layout.count())):
-            self.checkbox_layout.itemAt(i).widget().setParent(None)
-
-        if not self.pages_data and not self.config['autosearch']:
-            malleus_tooltip("No results found. Try a different search term")
+        enabled_dbs = self._get_active_db_ids()
+        if not enabled_dbs:
+            self.clear_search_results()
             return
 
-        # Only show card counts when the result set is small enough to be useful.
-        # The threshold is configurable (config key: card_count_threshold, default 10).
-        threshold = self.config.get('card_count_threshold', 10)
-        show_count = len(self.pages_data) <= threshold
+        # Search all enabled databases sequentially (all local JSON, very fast)
+        all_results = []
+        for db_id, db_name in enabled_dbs:
+            all_results.extend(self._search_single_database(db_id, db_name, search_term))
 
-        # Load note tag cache once (one DB query) — only needed when showing counts
+        # Apply per-database score bias then sort globally, take top N
+        for page in all_results:
+            bias = _DB_SCORE_BIAS.get(page.get('_database_name', ''), 1.0)
+            page['_composite_score'] = page.get('_composite_score', 0) * bias
+        all_results.sort(key=lambda p: -p.get('_composite_score', 0))
+        all_results = all_results[:_MAX_SEARCH_RESULTS]
+
+        # Rebuild the result area
+        self._clear_checkbox_layout()
+        self._result_rows = []
+        self._showing_recent = False
+
+        if not all_results:
+            if not self.config['autosearch']:
+                malleus_tooltip("No results found. Try a different search term")
+            return
+
+        threshold = self.config.get('card_count_threshold', 10)
+        show_count = len(all_results) <= threshold
         if show_count:
             self._load_note_tag_strings()
 
-        # Create result rows (checkbox + optional card count pill)
-        for page in self.pages_data:
+        for page in all_results:
+            db_name = page.get('_database_name', '')
             try:
-                if self.database_selector.currentText() == "Textbooks":
-                    title = page['properties']['Search Term']['formula']['string'] if page['properties'].get('Search Term', {}).get('formula', {}).get('string') else "Untitled"
+                if db_name == "Textbooks":
+                    title = (page['properties'].get('Search Term', {})
+                             .get('formula', {}).get('string', '') or "Untitled")
                 else:
-                    title = page['properties']['Name']['title'][0]['text']['content'] if page['properties']['Name']['title'] else "Untitled"
+                    title_list = page['properties']['Name']['title']
+                    title = title_list[0]['text']['content'] if title_list else "Untitled"
 
-                search_suffix = page['properties']['Search Suffix']['formula']['string'] if page['properties'].get('Search Suffix', {}).get('formula', {}).get('string') else ""
+                search_suffix = (page['properties'].get('Search Suffix', {})
+                                 .get('formula', {}).get('string', ''))
 
-                if self.database_selector.currentText() in ("Subjects", "Pharmacology"):
-                    search_prefix = page['properties']['Search Prefix']['formula']['string'] if page['properties'].get('Search Suffix', {}).get('formula', {}).get('string') else ""
-                    display_text = _fix_amp_display(f"{search_prefix} {title} {search_suffix}")
-                else:
-                    display_text = _fix_amp_display(f"{title} {search_suffix}")
+                # Prefix emoji (🩺 💊 ℹ️) lives in the badge, not the checkbox text
+                display_text = _fix_amp_display(f"{title} {search_suffix}".strip())
 
-                row, _cb = self._make_result_row(display_text, page, show_count=show_count)
+                row, cb, subtag_combo = self._make_result_row(
+                    display_text, page, show_count=show_count
+                )
                 self.checkbox_layout.addWidget(row)
+                self._result_rows.append({
+                    'page': page,
+                    'checkbox': cb,
+                    'subtag_combo': subtag_combo,
+                    'row_widget': row,
+                })
             except Exception as e:
                 showInfo(f"Error processing page: {e}")
 
     def on_search_text_changed(self, text):
-        """Handle search text changes and perform search when typing"""
-        # Only search if we have at least 2 characters to avoid too many results
+        """Handle search text changes with debounce."""
         if self.config['autosearch']:
             if len(text) >= 2:
-                # Wait 300ms before performing search
                 self.search_timer.start(self.config['search_delay'])
             else:
                 self.clear_search_results()
@@ -1101,194 +1348,21 @@ class NotionPageSelector(QDialog):
         for cb in self._get_result_checkboxes():
             cb.setChecked(True)
 
-    def search_cards(self):
-        selected_pages = []
-        for i, cb in enumerate(self._get_result_checkboxes()):
-            if cb.isChecked():
-                selected_pages.append(self.pages_data[i])
+    # ── Tag extraction helpers ────────────────────────────────────────────────
 
-        if not selected_pages:
-            showInfo("Please select at least one page")
-            return
+    def _get_tags_for_page(self, page: dict, db_name: str, property_name: str) -> list:
+        """
+        Extract Anki tag strings for one page using the given property name.
 
-        property_name = self.property_selector.currentText()
-
-        # Get tags from pages
-        tags = []
-        for page in selected_pages:
-            tag_prop = page['properties'].get('Tag')
-            if tag_prop and tag_prop['type'] == 'formula':
-                formula_value = tag_prop['formula']
-                if formula_value['type'] == 'string':
-                    tags.extend(formula_value['string'].split())
-
-        database_id = self.get_selected_database_id()
-
-        # Split each tag by spaces and flatten the list
-        individual_tags = []
-        for tag in tags:
-            individual_tags.extend(tag.split())
-
-        if property_name == '' or property_name == 'Tag' or property_name == 'Main Tag':
-            subtag = ""
-        else:
-            subtag = f"::*{property_name}".replace(' ', '_')
-
-        def escape_underscores(tag):
-            return tag.replace('_', '\\_')
-
-        # Format tags for Anki search
-        search_query = " or ".join(f"\"tag:{escape_underscores(tag)}{subtag}\"" for tag in individual_tags)
-
-        # Add yield search query if any yields are selected
-        yield_query = self.get_yield_search_query()
-        if yield_query:
-            search_query = f"({search_query}) and ({yield_query})"
-
-        if isinstance(self.parent(), Browser):
-            # If called from browser, update the current browser
-            browser = self.parent()
-            browser.form.searchEdit.lineEdit().setText(search_query)
-            if hasattr(browser, 'onSearch'):
-                browser.onSearch()
-            else:
-                browser.onSearchActivated()
-        else:
-            # Otherwise open a new browser window
-            open_browser_with_search(search_query)
-
-        database_name = self.database_selector.currentText()
-        for page in selected_pages:
-            self._save_recent_tag(page, database_name)
-
-        self.accept()
-
-    def get_property_content(self, page, property_name):
-        """Extract property content from page data with enhanced formatting"""
-        prop = page['properties'].get(property_name)
-
-        # Handle formula type properties (like Source)
-        if prop and prop['type'] == 'formula':
-            formula_value = prop['formula']
-
-            # Handle different formula result types
-            if formula_value['type'] == 'string':
-                source_text = formula_value.get('string', '')
-
-                # Make sure source_text is a string before processing
-                if not isinstance(source_text, str):
-                    source_text = str(source_text) if source_text is not None else ""
-
-                # Parse and format URLs in the source text
-                def format_urls(text):
-                    import re
-
-                    # Regex to find URLs
-                    url_pattern = re.compile(r'(https?://\S+)')
-
-                    # Replace URLs with HTML hyperlinks
-                    def replace_url(match):
-                        url = match.group(1)
-                        # Try to get a clean display text
-                        display_text = url.split('//')[1].split('/')[0]  # Get domain
-                        return f'<a href="{url}" target="_blank">{display_text}</a>'
-
-                    return url_pattern.sub(replace_url, text)
-
-                # Format the source text with clickable links
-                formatted_source = format_urls(source_text)
-
-                return formatted_source
-
-            # Add handling for other formula types if needed
-            return ""
-
-        # Fallback for other property types
-        if prop and prop['type'] == 'rich_text' and prop['rich_text']:
-            return prop['rich_text'][0]['text']['content']
-
-        return ""
-
-    def create_cards(self):
-        # Check yield selection for card creation
-        selected_yields = self.get_selected_yield_tags()
-        if len(selected_yields) > 1:
-            showInfo("Please select only one yield level when creating cards")
-            return
-
-        if len(selected_yields) == 0:
-            showInfo("Please select one yield level when creating cards")
-            return
-
-        selected_pages = []
-        for i, cb in enumerate(self._get_result_checkboxes()):
-            if cb.isChecked():
-                selected_pages.append(self.pages_data[i])
-
-        property_name = self.property_selector.currentText()
-
-        if not selected_pages:
-            showInfo("Please select at least one page")
-            return
-
-        all_general = all(
-            'ℹ️' in page.get('properties', {}).get('Search Prefix', {}).get('formula', {}).get('string', '')
-            for page in selected_pages
-            )
-
-        if property_name == "":
-            if self.database_selector.currentText() in ("Subjects", "Pharmacology"):
-                if not all_general:  # Only show warning if NOT all general
-                    showInfo("Please select a subtag (Change the dropdown to the right of the searchbox)")
-                    return
-                else:
-                    property_name = "Main Tag"  # Use main tag if all are general
-            else:
-                property_name = "Tag"
-
-        # Special handling for Subjects database when Tag is selected
-        #if property_name == "":
-        #    if self.database_selector.currentText() in ("Subjects", "Pharmacology", "eTG"):
-        #        showInfo("Please select a subtag (Change the dropdown to the right of the searchbox)")
-        #        return
-        #    else:
-        #        property_name = "Tag"
-
-        # if self.database_selector.currentText() in ("Subjects", "Pharmacology", "eTG") and property_name == "":
-        #     # Use Main Tag instead of Tag
-        #     # property_name = "Main Tag"
-
-        #     showInfo("Please select a subtag (Change the 'Tag' dropdown to the right of the searchbox)")
-        #     return
-
-        # Special handling for eTG database when subtag is empty
-        if self.database_selector.currentText() == "eTG" and property_name != "Tag" and property_name != "Main Tag":
-            # Check if the selected subtag property is empty
-            subtag_pages = []
-            for page in selected_pages:
-                subtag_prop = page['properties'].get(property_name)
-
-                # If subtag is empty, use 'Tag' property instead
-                if (not subtag_prop or
-                    (subtag_prop['type'] == 'formula' and
-                     (not subtag_prop['formula'].get('string') or subtag_prop['formula'].get('string').strip() == ''))):
-
-                    # Fallback to 'Tag' property
-                    tag_prop = page['properties'].get('Tag')
-                    if tag_prop and tag_prop['type'] == 'formula' and tag_prop['formula'].get('string'):
-                        subtag_pages.append(page)
-                else:
-                    subtag_pages.append(page)
-
-            selected_pages = subtag_pages
-
-        tags = []
-        if self.database_selector.currentText() == "eTG":
-            # eTG: use cross-database Subject/Pharmacology tag lookup
-            subjects_lookup = {}
-            pharmacology_lookup = {}
-            subjects_subtags = {s for s in DATABASE_PROPERTIES.get("Subjects", []) if s}
+        For eTG pages the cross-database Subject/Pharmacology lookup is
+        performed here.  For all other databases the named formula property is
+        read, with a fallback to Main Tag (Subjects) or Tag (others).
+        """
+        if db_name == "eTG":
+            subjects_subtags    = {s for s in DATABASE_PROPERTIES.get("Subjects", []) if s}
             pharmacology_subtags = {s for s in DATABASE_PROPERTIES.get("Pharmacology", []) if s}
+            subjects_lookup     = {}
+            pharmacology_lookup = {}
 
             if property_name in subjects_subtags:
                 subject_pages, _ = self.notion_cache.load_from_cache(SUBJECT_DATABASE_ID)
@@ -1301,90 +1375,256 @@ class NotionPageSelector(QDialog):
                     pharmacology_lookup[p['id']] = p
                     pharmacology_lookup[p['id'].replace('-', '')] = p
 
-            for page in selected_pages:
+            return self._get_etg_tags_for_page(
+                page, property_name,
+                subjects_subtags, pharmacology_subtags,
+                subjects_lookup, pharmacology_lookup,
+            )
+
+        # Non-eTG path
+        tag_prop = page['properties'].get(property_name)
+
+        # Fall back when the subtag property is empty/missing
+        if (not tag_prop or
+                (tag_prop.get('type') == 'formula' and
+                 not tag_prop.get('formula', {}).get('string', '').strip())):
+            fallback = 'Main Tag' if db_name == 'Subjects' else 'Tag'
+            tag_prop = page['properties'].get(fallback)
+
+        if tag_prop and tag_prop.get('type') == 'formula':
+            val = tag_prop['formula'].get('string', '').strip()
+            if val:
+                return val.split()
+
+        return []
+
+    def get_tags_from_selected_pages(self) -> list:
+        """
+        Extract Anki tag strings from all currently checked result rows.
+
+        Each row's per-result subtag combo (if visible) determines which
+        property to read for that page.  eTG cross-database lookups are
+        batched to avoid redundant cache loads.
+        """
+        selected_rows = self._get_selected_rows()
+        if not selected_rows:
+            return ["#Malleus_CM::#TO_BE_TAGGED"]
+
+        # Pre-build eTG cross-DB lookups once if any eTG rows are selected
+        etg_rows = [r for r in selected_rows if r['page'].get('_database_name') == 'eTG']
+        subjects_lookup     = {}
+        pharmacology_lookup = {}
+        etg_subjects_subtags    = {s for s in DATABASE_PROPERTIES.get("Subjects", []) if s}
+        etg_pharm_subtags       = {s for s in DATABASE_PROPERTIES.get("Pharmacology", []) if s}
+
+        if etg_rows:
+            used_props = {self._get_row_property_name(r) for r in etg_rows}
+            if used_props & etg_subjects_subtags:
+                subject_pages, _ = self.notion_cache.load_from_cache(SUBJECT_DATABASE_ID)
+                for p in subject_pages:
+                    subjects_lookup[p['id']] = p
+                    subjects_lookup[p['id'].replace('-', '')] = p
+            if used_props & etg_pharm_subtags:
+                pharm_pages, _ = self.notion_cache.load_from_cache(PHARMACOLOGY_DATABASE_ID)
+                for p in pharm_pages:
+                    pharmacology_lookup[p['id']] = p
+                    pharmacology_lookup[p['id'].replace('-', '')] = p
+
+        tags = []
+        for row_data in selected_rows:
+            page    = row_data['page']
+            db_name = page.get('_database_name', '')
+            prop    = self._get_row_property_name(row_data)
+
+            if db_name == 'eTG':
                 tags.extend(self._get_etg_tags_for_page(
-                    page, property_name, subjects_subtags, pharmacology_subtags,
-                    subjects_lookup, pharmacology_lookup
+                    page, prop,
+                    etg_subjects_subtags, etg_pharm_subtags,
+                    subjects_lookup, pharmacology_lookup,
                 ))
+            else:
+                tags.extend(self._get_tags_for_page(page, db_name, prop))
+
+        return tags if tags else ["#Malleus_CM::#TO_BE_TAGGED"]
+
+    # ── Search cards ──────────────────────────────────────────────────────────
+
+    def search_cards(self):
+        selected_rows = self._get_selected_rows()
+        if not selected_rows:
+            showInfo("Please select at least one page")
+            return
+
+        # Collect all tag strings from selected pages
+        tags = []
+        for row_data in selected_rows:
+            page    = row_data['page']
+            db_name = page.get('_database_name', '')
+            # For search purposes use the base 'Tag' property (all subtag variants)
+            tag_prop = page['properties'].get('Tag')
+            if tag_prop and tag_prop.get('type') == 'formula':
+                val = tag_prop['formula'].get('string', '')
+                tags.extend(val.split())
+
+        if not tags:
+            showInfo("Could not determine tags for selected pages.")
+            return
+
+        # Determine subtag filter from each row's combo
+        # Build per-row search queries
+        individual_tags = list(dict.fromkeys(tags))  # deduplicate, preserve order
+
+        # Get subtag from any selected row (use first non-empty)
+        property_name = ""
+        for row_data in selected_rows:
+            p = self._get_row_property_name(row_data)
+            if p and p not in ("Tag", "Main Tag", ""):
+                property_name = p
+                break
+
+        if property_name and property_name not in ("Tag", "Main Tag"):
+            subtag = f"::*{property_name}".replace(' ', '_')
         else:
-            for page in selected_pages:
-                # Try to use the selected subtag property
-                tag_prop = page['properties'].get(property_name)
+            subtag = ""
 
-                # If subtag is empty, fall back to 'Tag'
-                if (not tag_prop or
-                    (tag_prop['type'] == 'formula' and
-                     (not tag_prop['formula'].get('string') or tag_prop['formula'].get('string').strip() == ''))):
-                    if self.database_selector.currentText() == "Subjects":
-                        tag_prop = page['properties'].get('Main Tag')
-                    else:
-                        tag_prop = page['properties'].get('Tag')
+        def escape_underscores(tag):
+            return tag.replace('_', '\\_')
 
-                if tag_prop and tag_prop['type'] == 'formula':
-                    formula_value = tag_prop['formula']
-                    if formula_value['type'] == 'string':
-                        tags.extend(formula_value['string'].split())
+        search_query = " or ".join(
+            f'"tag:{escape_underscores(tag)}{subtag}"' for tag in individual_tags
+        )
 
-        if not selected_pages:
-            tags = ["#Malleus_CM::#TO_BE_TAGGED"]
+        yield_query = self.get_yield_search_query()
+        if yield_query:
+            search_query = f"({search_query}) and ({yield_query})"
 
-        # Add yield and paediatrics tags
+        if isinstance(self.parent(), Browser):
+            browser = self.parent()
+            browser.form.searchEdit.lineEdit().setText(search_query)
+            if hasattr(browser, 'onSearch'):
+                browser.onSearch()
+            else:
+                browser.onSearchActivated()
+        else:
+            open_browser_with_search(search_query)
+
+        for row_data in selected_rows:
+            self._save_recent_tag(row_data['page'])
+
+        self.accept()
+
+    # ── Property content helper ───────────────────────────────────────────────
+
+    def get_property_content(self, page, property_name):
+        """Extract property content from page data with enhanced formatting."""
+        prop = page['properties'].get(property_name)
+
+        if prop and prop['type'] == 'formula':
+            formula_value = prop['formula']
+            if formula_value['type'] == 'string':
+                source_text = formula_value.get('string', '')
+                if not isinstance(source_text, str):
+                    source_text = str(source_text) if source_text is not None else ""
+
+                def format_urls(text):
+                    import re
+                    url_pattern = _re.compile(r'(https?://\S+)')
+                    def replace_url(match):
+                        url = match.group(1)
+                        display_text = url.split('//')[1].split('/')[0]
+                        return f'<a href="{url}" target="_blank">{display_text}</a>'
+                    return url_pattern.sub(replace_url, text)
+
+                return format_urls(source_text)
+            return ""
+
+        if prop and prop['type'] == 'rich_text' and prop['rich_text']:
+            return prop['rich_text'][0]['text']['content']
+        return ""
+
+    # ── Create cards ──────────────────────────────────────────────────────────
+
+    def create_cards(self):
+        selected_yields = self.get_selected_yield_tags()
+        if len(selected_yields) > 1:
+            showInfo("Please select only one yield level when creating cards")
+            return
+        if len(selected_yields) == 0:
+            showInfo("Please select one yield level when creating cards")
+            return
+
+        selected_rows = self._get_selected_rows()
+        if not selected_rows:
+            showInfo("Please select at least one page")
+            return
+
+        # Validate that all 🩺 Subjects/Pharmacology pages have a subtag chosen
+        for row_data in selected_rows:
+            page    = row_data['page']
+            db_name = page.get('_database_name', '')
+            if db_name in ("Subjects", "Pharmacology") and not _is_general_page(page):
+                sc = row_data.get('subtag_combo')
+                if sc is None or not sc.currentText():
+                    try:
+                        title_list = page['properties']['Name']['title']
+                        title = title_list[0]['text']['content'] if title_list else "this page"
+                    except Exception:
+                        title = "this page"
+                    showInfo(
+                        f"Please select a subtag for:\n{title}\n\n"
+                        "(Check the result to reveal the subtag dropdown)"
+                    )
+                    return
+
+        tags = self.get_tags_from_selected_pages()
+        selected_db_names = {r['page'].get('_database_name', '') for r in selected_rows}
+
         all_tags = tags + selected_yields + self.get_paediatrics_tag()
 
-        # Prepare note data
         note = {
-            'deckName': self.config['deck_name'],
+            'deckName':  self.config['deck_name'],
             'modelName': 'MalleusCM - Cloze (Malleus Clinical Medicine [AU/NZ] / Stapedius)',
-            'fields': {},
-            'tags': all_tags
+            'fields':    {},
+            'tags':      all_tags,
         }
 
-        # Add source field for eTG database
-        if self.database_selector.currentText() == "eTG" or self.database_selector.currentText() == "Textbooks" or self.database_selector.currentText() == "Guidelines":
+        # Populate Source field for eTG / Textbooks / Guidelines pages
+        source_dbs = selected_db_names & {"eTG", "Textbooks", "Guidelines"}
+        if source_dbs:
             sources = []
-            for page in selected_pages:
-                source = self.get_property_content(page, 'Source')
-                if source:
-                    sources.append(source)
-
-            # Combine sources, remove duplicates
+            for row_data in selected_rows:
+                if row_data['page'].get('_database_name') in source_dbs:
+                    source = self.get_property_content(row_data['page'], 'Source')
+                    if source:
+                        sources.append(source)
             unique_sources = list(dict.fromkeys(sources))
-
-            # Join sources with line breaks and add to fields
             if unique_sources:
                 note['fields']['Source'] = '<br>'.join(unique_sources)
 
-        # Open add cards dialog first, then async-populate Extra (Synced)
         self.guiAddCards(note)
 
-        # After dialog opens, populate Extra (Synced) in background (Subjects and eTG)
-        if self.database_selector.currentText() in ("Subjects", "eTG"):
+        # Async-populate Extra (Synced) for Subjects and eTG cards
+        if selected_db_names & {"Subjects", "eTG"}:
             self._async_update_extra_synced(all_tags)
-        # self.accept()
+
+    # ── Extra (Synced) helpers ────────────────────────────────────────────────
 
     def _apply_extra_synced_dialog(self, anki_note, notion_cache, parent_widget=None, note_context=None):
         """
         Show the SE selection dialog for Extra (Synced) and update the note in place.
-        - Finds all matching SE entries for the note's current tags.
-        - Pre-checks entries already present in the field (by <!-- se:N --> marker).
-        - Builds new field content + updates SE Anki tags from user selection.
-        - If no matches exist, clears the field and removes SE tags silently.
         Does NOT flush the note.
         """
         from aqt.qt import QDialog
         if parent_widget is None:
             parent_widget = self
 
-        # 1. Check field exists
         try:
             current_field = anki_note[EXTRA_FIELD]
         except Exception:
-            return  # field not in note type
+            return
 
-        # 2. Find all matching entries
         entries = get_matching_se_entries(list(anki_note.tags), notion_cache, SYNCED_EXTRA_DATABASE_ID)
 
-        # 3. No matches — clear field and remove SE tags
         if not entries:
             existing_se_ids = get_existing_se_ids_from_field(current_field)
             if existing_se_ids or current_field.strip():
@@ -1393,13 +1633,8 @@ class NotionPageSelector(QDialog):
                                   if not t.startswith(SE_EXTRA_TAG_PREFIX)]
             return
 
-        # 4. Determine which entries are already in the field
         existing_se_ids = get_existing_se_ids_from_field(current_field)
 
-        # 4b. Skip the dialog if every matched entry is already in the field —
-        #     there is nothing new to show.  But if even one entry is new
-        #     (its se_id is absent from existing_se_ids) we show the dialog so
-        #     the user can decide whether to include it.
         all_already_present = all(
             e.get('se_id') and e['se_id'] in existing_se_ids
             for e in entries
@@ -1407,19 +1642,14 @@ class NotionPageSelector(QDialog):
         if all_already_present:
             return
 
-        # 5. Show dialog
         dialog = SyncedExtraSelectionDialog(
             parent_widget, entries, existing_se_ids, note_context=note_context
         )
         if dialog.exec() != QDialog.DialogCode.Accepted:
-            return  # user cancelled — leave field unchanged
+            return
 
         selected = dialog.get_selected_entries()
-
-        # 6. Build new field content
         anki_note[EXTRA_FIELD] = build_field_from_selected_entries(selected)
-
-        # 7. Sync SE Anki tags: strip all, re-add for selected entries only
         base_tags = [t for t in anki_note.tags if not t.startswith(SE_EXTRA_TAG_PREFIX)]
         for entry in selected:
             if entry.get("tag"):
@@ -1428,18 +1658,10 @@ class NotionPageSelector(QDialog):
 
     def _schedule_extra_synced(self, anki_note, notion_cache, subjects_db=True):
         """
-        Update both synced fields:
-        - Additional Resources (Synced): always auto-populated silently.
-        - Extra (Synced): shows the selection dialog when subjects_db=True,
-          but only if there is at least one SE entry not already in the field.
-          _apply_extra_synced_dialog handles that check internally, so this
-          method simply delegates whenever the Subjects database is active.
+        Update both synced fields on a note.
         Does NOT flush the note.
         """
-        # Additional Resources always auto-populates without a dialog
         set_additional_resources_on_note(anki_note, notion_cache)
-
-        # Extra (Synced) — delegate; internal guard skips if nothing is new
         if subjects_db:
             note_context = None
             try:
@@ -1449,14 +1671,14 @@ class NotionPageSelector(QDialog):
             self._apply_extra_synced_dialog(
                 anki_note, notion_cache,
                 parent_widget=self,
-                note_context=note_context
+                note_context=note_context,
             )
 
     def _async_update_extra_synced(self, tags):
         """
         Called after Create Cards opens the AddCards dialog.
         Shows the SE selection dialog for Extra (Synced) and auto-fills
-        Additional Resources (Synced). Runs synchronously on the main thread.
+        Additional Resources (Synced).
         """
         from aqt import dialogs
         from aqt.qt import QDialog
@@ -1467,20 +1689,17 @@ class NotionPageSelector(QDialog):
             note = ac.editor.note
             changed = False
 
-            # Additional Resources — auto
             additional = build_additional_resources_content(tags, self.notion_cache)
             if additional and 'Additional Resources (Synced)' in note:
                 note['Additional Resources (Synced)'] = additional
                 changed = True
 
-            # Extra (Synced) — dialog only when the field is currently empty
             entries = get_matching_se_entries(tags, self.notion_cache, SYNCED_EXTRA_DATABASE_ID)
             if entries:
                 try:
                     current_field = note[EXTRA_FIELD]
                 except Exception:
                     current_field = ''
-                # Skip only when every entry is already in the field
                 existing_se_ids = get_existing_se_ids_from_field(current_field)
                 all_present = all(
                     e.get('se_id') and e['se_id'] in existing_se_ids
@@ -1506,22 +1725,21 @@ class NotionPageSelector(QDialog):
         except Exception as e:
             print(f"[ExtraSync] Error in _async_update_extra_synced: {e}")
 
+    # ── guiAddCards ───────────────────────────────────────────────────────────
+
     def guiAddCards(self, note):
         collection = mw.col
+        print(self.parent())
 
-        print(self.parent()) #debugging
-        # If we're in the add cards dialog, update the existing note
         if isinstance(self.parent(), AddCards):
             addCards = self.parent()
             current_note = addCards.editor.note
 
-            # Update tags
             if 'tags' in note:
                 current_tags = current_note.tags
                 current_tags.extend(note['tags'])
-                current_note.tags = list(set(current_tags))  # Remove duplicates
+                current_note.tags = list(set(current_tags))
 
-            # Apply any pre-built fields (e.g. Extra (Synced), Source) from note dict
             if 'fields' in note:
                 for name, value in note['fields'].items():
                     try:
@@ -1530,22 +1748,15 @@ class NotionPageSelector(QDialog):
                     except Exception:
                         pass
 
-            # Refresh the editor to show the new tags
             try:
-                # Try new version method first
                 addCards.editor.loadNote()
             except TypeError:
                 try:
-                    # Try old version method
                     addCards.editor.loadNote(full=True)
-                except:
-                    # Fallback to basic loadNote if both fail
+                except Exception:
                     addCards.editor.loadNote(current_note)
-
-            # self.accept()
             return
 
-        # Otherwise, proceed with creating a new note as before
         deck = collection.decks.by_name(note['deckName'])
         if deck is None:
             raise Exception('deck was not found: {}'.format(note['deckName']))
@@ -1562,13 +1773,11 @@ class NotionPageSelector(QDialog):
 
         ankiNote = anki.notes.Note(collection, model)
 
-        # Fill note fields
         if 'fields' in note:
             for name, value in note['fields'].items():
                 if name in ankiNote:
                     ankiNote[name] = value
 
-        # Set tags
         if 'tags' in note:
             ankiNote.tags = note['tags']
 
@@ -1588,72 +1797,7 @@ class NotionPageSelector(QDialog):
 
         self.accept()
 
-    def get_tags_from_selected_pages(self):
-        """Extract tags from selected pages"""
-        selected_pages = []
-        for i, checkbox in enumerate(self._get_result_checkboxes()):
-            if checkbox.isChecked():
-                selected_pages.append(self.pages_data[i])
-
-        property_name = self.property_selector.currentText()
-
-        # Normalise empty property_name per database
-        if self.database_selector.currentText() == "Subjects" and property_name == "":
-            property_name = "Main Tag"
-        elif self.database_selector.currentText() == "Pharmacology" and property_name == "":
-            property_name = "Tag"
-        elif self.database_selector.currentText() == "eTG" and property_name == "":
-            property_name = "Tag"
-
-        tags = []
-
-        if self.database_selector.currentText() == "eTG":
-            # Build Subject / Pharmacology lookup dicts once (keyed by page id, both
-            # hyphenated and bare forms so we always find a match regardless of format)
-            subjects_lookup = {}
-            pharmacology_lookup = {}
-
-            subjects_subtags = {s for s in DATABASE_PROPERTIES.get("Subjects", []) if s}
-            pharmacology_subtags = {s for s in DATABASE_PROPERTIES.get("Pharmacology", []) if s}
-
-            if property_name in subjects_subtags:
-                subject_pages, _ = self.notion_cache.load_from_cache(SUBJECT_DATABASE_ID)
-                for p in subject_pages:
-                    subjects_lookup[p['id']] = p
-                    subjects_lookup[p['id'].replace('-', '')] = p
-
-            elif property_name in pharmacology_subtags:
-                pharm_pages, _ = self.notion_cache.load_from_cache(PHARMACOLOGY_DATABASE_ID)
-                for p in pharm_pages:
-                    pharmacology_lookup[p['id']] = p
-                    pharmacology_lookup[p['id'].replace('-', '')] = p
-
-            for page in selected_pages:
-                tags.extend(self._get_etg_tags_for_page(
-                    page, property_name, subjects_subtags, pharmacology_subtags,
-                    subjects_lookup, pharmacology_lookup
-                ))
-        else:
-            for page in selected_pages:
-                if property_name == "Tag" or property_name == "Main Tag":
-                    tag_prop = page['properties'].get(property_name)
-                else:
-                    tag_prop = page['properties'].get(property_name)
-                    if (not tag_prop or
-                            (tag_prop['type'] == 'formula' and
-                             (not tag_prop['formula'].get('string') or
-                              tag_prop['formula'].get('string').strip() == ''))):
-                        tag_prop = page['properties'].get('Tag')
-
-                if tag_prop and tag_prop['type'] == 'formula':
-                    formula_value = tag_prop['formula']
-                    if formula_value['type'] == 'string':
-                        tags.extend(formula_value['string'].split())
-
-        if not selected_pages:
-            tags = ["#Malleus_CM::#TO_BE_TAGGED"]
-
-        return tags
+    # ── eTG cross-database lookup ─────────────────────────────────────────────
 
     def _get_etg_tags_for_page(self, page, property_name,
                                 subjects_subtags, pharmacology_subtags,
@@ -1668,18 +1812,15 @@ class NotionPageSelector(QDialog):
         """
         tags = []
 
-        # 1. Always add the eTG page's own Tag formula
         etg_tag_prop = page['properties'].get('Tag')
         if etg_tag_prop and etg_tag_prop.get('type') == 'formula':
             tag_str = etg_tag_prop['formula'].get('string', '').strip()
             if tag_str:
                 tags.extend(tag_str.split())
 
-        # 2. If no meaningful subtag selected, we're done
         if not property_name or property_name in ('Tag', 'Main Tag'):
             return tags
 
-        # 3. Subjects subtag — look up each linked Subject page
         if property_name in subjects_subtags:
             subject_rel = page['properties'].get('Subject', {})
             for rel in subject_rel.get('relation', []):
@@ -1693,7 +1834,6 @@ class NotionPageSelector(QDialog):
                     if subtag_str:
                         tags.extend(subtag_str.split())
 
-        # 4. Pharmacology subtag — look up each linked Pharmacology page
         elif property_name in pharmacology_subtags:
             pharm_rel = page['properties'].get('Pharmacology', {})
             for rel in pharm_rel.get('relation', []):
@@ -1709,34 +1849,29 @@ class NotionPageSelector(QDialog):
 
         return tags
 
+    # ── Tag selection dialog (used by replace_tags) ───────────────────────────
+
     def show_tag_selection_dialog(self, tags_with_subtags):
-        """Show dialog for user to select which tags to replace"""
+        """Show dialog for user to select which tags to replace."""
         dialog = QDialog(self)
         dialog.setWindowTitle("Select Tags to Replace")
         dialog.setMinimumWidth(600)
 
         layout = QVBoxLayout()
-
-        # Info label
         info_label = QLabel("Multiple subtags detected. Please select which tags you want to replace:")
         info_label.setWordWrap(True)
         layout.addWidget(info_label)
 
-        # Scrollable area for checkboxes
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll_widget = QWidget()
         checkbox_layout = QVBoxLayout()
 
-        # Store checkboxes and their associated data
         checkboxes = []
-
         for tag, subtag in tags_with_subtags:
-            # Remove #Malleus_CM:: prefix for display
             display_tag = tag.replace("#Malleus_CM::", "")
-
             checkbox = QCheckBox(display_tag)
-            checkbox.tag_data = (tag, subtag)  # Store full tag and subtag
+            checkbox.tag_data = (tag, subtag)
             checkboxes.append(checkbox)
             checkbox_layout.addWidget(checkbox)
 
@@ -1744,13 +1879,7 @@ class NotionPageSelector(QDialog):
         scroll.setWidget(scroll_widget)
         layout.addWidget(scroll)
 
-        # Buttons
         button_layout = QHBoxLayout()
-
-        # select_all_button = QPushButton("Select All")
-        # select_all_button.clicked.connect(lambda: [cb.setChecked(True) for cb in checkboxes])
-        # button_layout.addWidget(select_all_button)
-
         button_layout.addStretch()
 
         ok_button = QPushButton("OK")
@@ -1764,45 +1893,35 @@ class NotionPageSelector(QDialog):
         layout.addLayout(button_layout)
         dialog.setLayout(layout)
 
-        # Show dialog and get result
         if dialog.exec() == QDialog.DialogCode.Accepted:
-            # Get selected tags
-            selected = [(cb.tag_data[0], cb.tag_data[1]) for cb in checkboxes if cb.isChecked()]
-            return selected
-
+            return [(cb.tag_data[0], cb.tag_data[1]) for cb in checkboxes if cb.isChecked()]
         return None
 
-    # Add this helper method to your NotionPageSelector class
+    # ── Note context helpers ──────────────────────────────────────────────────
 
     def get_notes_to_process(self):
-        """Get all notes that should be processed based on current context"""
+        """Get all notes that should be processed based on current context."""
         parent = self.parent()
         notes = []
 
         if isinstance(parent, Browser):
-            # Check if multiple cards are selected
             selected_card_ids = parent.selectedCards()
-
             if len(selected_card_ids) > 1:
-                # Multiple cards selected - get all notes
                 for card_id in selected_card_ids:
                     card = mw.col.get_card(card_id)
                     note = card.note()
-                    if note and note not in notes:  # Avoid duplicates
+                    if note and note not in notes:
                         notes.append(note)
             elif len(selected_card_ids) == 1:
-                # Single card selected - use editor note
                 if hasattr(parent, 'editor') and hasattr(parent.editor, 'note'):
                     note = parent.editor.note
                     if note:
                         notes.append(note)
-
         elif isinstance(parent, EditCurrent):
             if hasattr(parent.editor, 'note'):
                 note = parent.editor.note
                 if note:
                     notes.append(note)
-
         elif isinstance(parent, AddCards):
             if hasattr(parent.editor, 'note'):
                 note = parent.editor.note
@@ -1814,59 +1933,98 @@ class NotionPageSelector(QDialog):
 
         return notes
 
+    # ── Remove tags ───────────────────────────────────────────────────────────
 
     def remove_tags(self):
-        """Remove all tags associated with the currently selected database"""
-        notes = self.get_notes_to_process()
+        """
+        Remove Malleus tags from selected notes with the following priority:
 
+        1. Pages + subtag selected  → remove only those specific subtag tags
+        2. Pages selected, no subtag → remove all tags for those pages
+        3. No pages selected, some chips active → remove tags for active databases
+        4. No pages selected, no chips active  → remove all #Malleus_CM:: tags
+        """
+        notes = self.get_notes_to_process()
         if not notes:
             showInfo("No notes found in current context")
             return
 
-        # Get selected database name
-        database_name = self.database_selector.currentText()
-
-        # Map database selector names to their tag equivalents
-        database_tag_mapping = {
-            "Subjects": "Subjects",
-            "Pharmacology": "Pharmacology",
-            "eTG": "eTG",
-            "Rotation": "Resources_by_Rotation",
-            "Textbooks": "Textbooks",
-            "Guidelines": "Guidelines"
-        }
-
-        # Get the actual tag name
-        tag_database_name = database_tag_mapping.get(database_name, database_name)
-        database_pattern = f"#{tag_database_name}::"
-
-        # Track statistics
+        selected_rows = self._get_selected_rows()
+        parent = self.parent()
+        is_add_cards = isinstance(parent, AddCards)
         total_notes = len(notes)
         notes_modified = 0
         total_tags_removed = 0
         all_removed_tags = set()
 
-        # Check if we're in AddCards context
-        parent = self.parent()
-        is_add_cards = isinstance(parent, AddCards)
+        # ── Determine removal predicate based on selection state ─────────────
+        if selected_rows:
+            # Cases 1 & 2: pages are selected
+            # Build a list of (match_fn, is_subjects_db) per row
+            page_matchers = []
+            any_subjects = False
 
-        # Process each note
+            for row_data in selected_rows:
+                page    = row_data['page']
+                db_name = page.get('_database_name', '')
+                prop    = self._get_row_property_name(row_data)
+
+                if db_name in ("Subjects", "eTG"):
+                    any_subjects = True
+
+                if prop and prop not in ("", "Tag", "Main Tag"):
+                    # Case 1: specific subtag → match the exact tag value
+                    subtag_tags = self._get_tags_for_page(page, db_name, prop)
+                    tag_set = set(subtag_tags)
+                    page_matchers.append(lambda t, ts=tag_set: t in ts)
+                else:
+                    # Case 2: whole page → match any tag starting with main tag prefix
+                    main_tag_prop = page['properties'].get('Main Tag') or page['properties'].get('Tag')
+                    main_tag = ''
+                    if main_tag_prop and main_tag_prop.get('type') == 'formula':
+                        main_tag = main_tag_prop['formula'].get('string', '').strip().split()[0] if main_tag_prop['formula'].get('string', '').strip() else ''
+                    if main_tag:
+                        page_matchers.append(lambda t, mt=main_tag: t.startswith(mt))
+                    else:
+                        # Fallback: match by database prefix
+                        tag_db = DB_TAG_MAPPING.get(db_name, db_name)
+                        pattern = f"#{tag_db}::"
+                        page_matchers.append(lambda t, pat=pattern: pat in t)
+
+            def should_remove(tag):
+                return any(m(tag) for m in page_matchers)
+
+            subjects_db_flag = any_subjects
+
+        else:
+            # Cases 3 & 4: no pages selected
+            active_db_names = self._get_active_db_names()
+
+            if active_db_names:
+                # Case 3: remove tags for active databases
+                patterns = [f"#{DB_TAG_MAPPING.get(db, db)}::" for db in active_db_names]
+                def should_remove(tag):
+                    return any(pat in tag for pat in patterns)
+                subjects_db_flag = bool(set(active_db_names) & {"Subjects", "eTG"})
+            else:
+                # Case 4: nuclear — remove everything starting with #Malleus_CM::
+                def should_remove(tag):
+                    return tag.startswith("#Malleus_CM::")
+                subjects_db_flag = True
+
+        # ── Apply removal to each note ────────────────────────────────────────
         for note in notes:
             current_tags = list(note.tags)
-            tags_to_remove = [tag for tag in current_tags if database_pattern in tag]
+            tags_to_remove = [t for t in current_tags if should_remove(t)]
 
             if tags_to_remove:
-                # Remove the tags
-                remaining_tags = [tag for tag in current_tags if tag not in tags_to_remove]
-                note.tags = remaining_tags
+                note.tags = [t for t in current_tags if t not in tags_to_remove]
 
-                # Update Extra (Synced) to reflect removed tags
                 self._schedule_extra_synced(
                     note, self.notion_cache,
-                    subjects_db=(database_name == "Subjects")
+                    subjects_db=subjects_db_flag,
                 )
 
-                # Only flush if not in AddCards dialog
                 if not is_add_cards:
                     note.flush()
 
@@ -1874,7 +2032,7 @@ class NotionPageSelector(QDialog):
                 total_tags_removed += len(tags_to_remove)
                 all_removed_tags.update(tags_to_remove)
 
-        # Refresh the UI
+        # ── Refresh UI ────────────────────────────────────────────────────────
         if isinstance(parent, Browser):
             parent.model.reset()
         elif isinstance(parent, EditCurrent):
@@ -1882,75 +2040,62 @@ class NotionPageSelector(QDialog):
         elif isinstance(parent, AddCards):
             parent.editor.loadNote()
 
-        # Show summary
+        # ── Summary ───────────────────────────────────────────────────────────
         if notes_modified == 0:
-            showInfo(f"No tags found for database: {database_name}")
+            showInfo("No matching tags found on the selected notes.")
         else:
-            # Create a summary message
             summary = f"Successfully processed {total_notes} note(s)\n"
             summary += f"Modified: {notes_modified} note(s)\n"
             summary += f"Total tags removed: {total_tags_removed}\n\n"
-
-            # Show unique tags that were removed (limit to 20 for readability)
             unique_tags = sorted(all_removed_tags)
             if len(unique_tags) <= 20:
                 summary += "Tags removed:\n" + "\n".join(unique_tags)
             else:
                 summary += "Tags removed (showing first 20):\n" + "\n".join(unique_tags[:20])
                 summary += f"\n... and {len(unique_tags) - 20} more"
-
             showInfo(summary)
-            
-    def add_tags(self):
-        """Add new tags to existing ones"""
-        notes = self.get_notes_to_process()
 
+    # ── Add tags ──────────────────────────────────────────────────────────────
+
+    def add_tags(self):
+        """Add new tags to existing ones."""
+        notes = self.get_notes_to_process()
         if not notes:
             showInfo("No notes found in current context")
             return
 
-        selected_pages = []
-        for i, checkbox in enumerate(self._get_result_checkboxes()):
-            if checkbox.isChecked():
-                selected_pages.append(self.pages_data[i])
-
+        selected_rows  = self._get_selected_rows()
         selected_yields = self.get_selected_yield_tags()
 
-        # Check if user has selected either pages or yields
-        if not selected_pages and not selected_yields:
+        if not selected_rows and not selected_yields:
             showInfo("Please select at least one page or yield level")
             return
 
-        # If only yield is selected (no pages), just update yield
-        if not selected_pages and selected_yields:
+        if not selected_rows and selected_yields:
             return self._update_yield_only(notes, selected_yields)
 
-        property_name = self.property_selector.currentText()
-
-        # Check if all selected pages are general
-        all_general = all(
-            'ℹ️' in page.get('properties', {}).get('Search Prefix', {}).get('formula', {}).get('string', '')
-            for page in selected_pages
-        )
-
-        if property_name == "":
-            if self.database_selector.currentText() in ("Subjects", "Pharmacology"):
-                if not all_general:
-                    showInfo("Please select a subtag (Change the dropdown to the right of the searchbox)")
+        # Validate subtags
+        for row_data in selected_rows:
+            page    = row_data['page']
+            db_name = page.get('_database_name', '')
+            if db_name in ("Subjects", "Pharmacology") and not _is_general_page(page):
+                sc = row_data.get('subtag_combo')
+                if sc is None or not sc.currentText():
+                    try:
+                        title = page['properties']['Name']['title'][0]['text']['content']
+                    except Exception:
+                        title = "this page"
+                    showInfo(
+                        f"Please select a subtag for:\n{title}\n\n"
+                        "(Check the result to reveal the subtag dropdown)"
+                    )
                     return
-                else:
-                    property_name = "Main Tag"
-            else:
-                property_name = "Tag"
 
-        # For single note, use dedicated function
         if len(notes) == 1:
-            result = self._add_tags_single_note(notes[0], selected_pages, property_name)
-
+            result = self._add_tags_single_note(notes[0], selected_rows)
             if result:
-                database_name = self.database_selector.currentText()
-                for page in selected_pages:
-                    self._save_recent_tag(page, database_name)
+                for row_data in selected_rows:
+                    self._save_recent_tag(row_data['page'])
                 parent = self.parent()
                 if isinstance(parent, Browser):
                     parent.model.reset()
@@ -1960,88 +2105,50 @@ class NotionPageSelector(QDialog):
                     parent.editor.loadNote()
             return
 
-        # Track statistics for multiple notes
-        total_notes = len(notes)
-        notes_modified = 0
+        # Multiple notes
+        total_notes             = len(notes)
+        notes_modified          = 0
         notes_with_yield_issues = 0
-        notes_needing_yield = 0
-
-        # Check if we're in AddCards context
-        parent = self.parent()
+        notes_needing_yield     = 0
+        parent   = self.parent()
         is_add_cards = isinstance(parent, AddCards)
 
-        # Process each note
         for note in notes:
-            # Handle yield tags
             existing_yields = self.get_existing_yield_tags(note.tags)
-            selected_yields = self.get_selected_yield_tags()
+            sel_yields      = self.get_selected_yield_tags()
 
-            # Validate yield selection
-            if len(selected_yields) > 1:
+            if len(sel_yields) > 1:
                 notes_with_yield_issues += 1
                 continue
 
-            # Determine final yield tags to use
             final_yield_tags = []
-            if not existing_yields and not selected_yields:
+            if not existing_yields and not sel_yields:
                 notes_needing_yield += 1
                 continue
-            elif existing_yields and not selected_yields:
+            elif existing_yields and not sel_yields:
                 final_yield_tags = existing_yields
-            elif selected_yields:
-                final_yield_tags = selected_yields
+            elif sel_yields:
+                final_yield_tags = sel_yields
 
-            # Get current tags
-            current_tags = set(note.tags)
-
-            # Remove any existing yield tags
-            current_tags = {
-                tag for tag in current_tags
-                if not tag.startswith("#Malleus_CM::#Yield::")
-            }
-
-            # Get new tags
-            # Temporarily set property selector
-            original_property = self.property_selector.currentText()
-            if property_name and property_name not in ("Tag", "Main Tag"):
-                index = self.property_selector.findText(property_name)
-                if index >= 0:
-                    self.property_selector.setCurrentIndex(index)
-
-            new_tags = set(self.get_tags_from_selected_pages())
-
-            # Restore original property selector
-            original_index = self.property_selector.findText(original_property)
-            if original_index >= 0:
-                self.property_selector.setCurrentIndex(original_index)
-
-            # Combine new tags with final yield tags and paediatrics tag
+            current_tags = {t for t in note.tags if not t.startswith("#Malleus_CM::#Yield::")}
+            new_tags     = set(self.get_tags_from_selected_pages())
             all_new_tags = new_tags | set(final_yield_tags) | set(self.get_paediatrics_tag())
+            note.tags    = list(current_tags | all_new_tags)
 
-            # Combine everything
-            combined_tags = list(current_tags | all_new_tags)
-
-            # Update the note
-            note.tags = combined_tags
-
-            # Populate Extra (Synced) field from SE array
+            selected_db_names = {r['page'].get('_database_name', '') for r in selected_rows}
             self._schedule_extra_synced(
                 note, self.notion_cache,
-                subjects_db=(self.database_selector.currentText() == "Subjects")
+                subjects_db=bool(selected_db_names & {"Subjects", "eTG"}),
             )
 
-            # Only flush if not in AddCards dialog
             if not is_add_cards:
                 note.flush()
-
             notes_modified += 1
 
         if notes_modified > 0:
-            database_name = self.database_selector.currentText()
-            for page in selected_pages:
-                self._save_recent_tag(page, database_name)
+            for row_data in selected_rows:
+                self._save_recent_tag(row_data['page'])
 
-        # Refresh the UI
         if isinstance(parent, Browser):
             parent.model.reset()
         elif isinstance(parent, EditCurrent):
@@ -2049,62 +2156,37 @@ class NotionPageSelector(QDialog):
         elif isinstance(parent, AddCards):
             parent.editor.loadNote()
 
-        # Show summary only for multiple notes
         summary = f"Successfully processed {total_notes} note(s)\n"
         summary += f"Modified: {notes_modified} note(s)\n"
-
         if notes_with_yield_issues > 0:
             summary += f"Skipped (multiple yields selected): {notes_with_yield_issues} note(s)\n"
         if notes_needing_yield > 0:
             summary += f"Skipped (no yield selected): {notes_needing_yield} note(s)\n"
-
         showInfo(summary)
 
-
     def _update_yield_only(self, notes, selected_yields):
-        """Update only the yield tags without adding any other tags"""
-        # Validate yield selection
+        """Update only the yield tags without adding any other tags."""
         if len(selected_yields) > 1:
             showInfo("Please select only one yield level")
             return
-
         if len(selected_yields) == 0:
             showInfo("Please select a yield level")
             return
 
-        # Check if we're in AddCards context
-        parent = self.parent()
+        parent       = self.parent()
         is_add_cards = isinstance(parent, AddCards)
-        is_single_note = (len(notes) == 1)
-
-        # Track statistics
-        total_notes = len(notes)
+        is_single    = (len(notes) == 1)
+        total_notes  = len(notes)
         notes_modified = 0
 
-        # Process each note
         for note in notes:
-            # Get current tags
-            current_tags = list(note.tags)
-
-            # Remove any existing yield tags
-            remaining_tags = [tag for tag in current_tags if not tag.startswith("#Malleus_CM::#Yield::")]
-
-            # Add the selected yield tag
-            final_tags = remaining_tags + selected_yields
-
-            # Update the note
-            note.tags = final_tags
-
-            # Update Additional Resources only (yield change doesn't affect SE matching)
+            remaining = [t for t in note.tags if not t.startswith("#Malleus_CM::#Yield::")]
+            note.tags = remaining + selected_yields
             self._schedule_extra_synced(note, self.notion_cache, subjects_db=False)
-
-            # Only flush if not in AddCards dialog
             if not is_add_cards:
                 note.flush()
-
             notes_modified += 1
 
-        # Refresh the UI
         if isinstance(parent, Browser):
             parent.model.reset()
         elif isinstance(parent, EditCurrent):
@@ -2112,245 +2194,154 @@ class NotionPageSelector(QDialog):
         elif isinstance(parent, AddCards):
             parent.editor.loadNote()
 
-        # Show summary only for multiple notes
-        if not is_single_note:
+        if not is_single:
             summary = f"Successfully updated yield for {total_notes} note(s)\n"
             summary += f"New yield: {selected_yields[0].replace('#Malleus_CM::#Yield::', '')}"
             showInfo(summary)
 
-
-    def _add_tags_single_note(self, note, selected_pages, property_name):
-        """Handle add tags for a single note with proper validation"""
-        # Handle yield tags
+    def _add_tags_single_note(self, note, selected_rows):
+        """Handle add_tags for a single note with proper validation."""
         existing_yields = self.get_existing_yield_tags(note.tags)
         selected_yields = self.get_selected_yield_tags()
 
-        # Validate yield selection
         if len(selected_yields) > 1:
             showInfo("Please select only one yield level")
             return False
 
-        # Determine final yield tags to use
         final_yield_tags = []
         if not existing_yields and not selected_yields:
             showInfo("Please select a yield level for this card")
             return False
         elif existing_yields and not selected_yields:
-            # Keep existing yield
             final_yield_tags = existing_yields
         elif selected_yields:
-            # Use selected yield (replace existing if any)
             final_yield_tags = selected_yields
 
-        # Get current tags
-        current_tags = set(note.tags)
-
-        # Remove any existing yield tags
-        current_tags = {
-            tag for tag in current_tags
-            if not tag.startswith("#Malleus_CM::#Yield::")
-        }
-
-        # Get new tags
-        # Temporarily set property selector
-        original_property = self.property_selector.currentText()
-        if property_name and property_name not in ("Tag", "Main Tag"):
-            index = self.property_selector.findText(property_name)
-            if index >= 0:
-                self.property_selector.setCurrentIndex(index)
-
-        new_tags = set(self.get_tags_from_selected_pages())
-
-        # Restore original property selector
-        original_index = self.property_selector.findText(original_property)
-        if original_index >= 0:
-            self.property_selector.setCurrentIndex(original_index)
-
-        # Combine new tags with final yield tags and paediatrics tag
+        current_tags = {t for t in note.tags if not t.startswith("#Malleus_CM::#Yield::")}
+        new_tags     = set(self.get_tags_from_selected_pages())
         all_new_tags = new_tags | set(final_yield_tags) | set(self.get_paediatrics_tag())
+        note.tags    = list(current_tags | all_new_tags)
 
-        # Combine everything
-        combined_tags = list(current_tags | all_new_tags)
-
-        # Update the note
-        note.tags = combined_tags
-
-        # Populate Extra (Synced) field from SE array
+        selected_db_names = {r['page'].get('_database_name', '') for r in selected_rows}
         self._schedule_extra_synced(
             note, self.notion_cache,
-            subjects_db=(self.database_selector.currentText() == "Subjects")
+            subjects_db=bool(selected_db_names & {"Subjects", "eTG"}),
         )
 
-        # Only flush if not in AddCards dialog
-        parent = self.parent()
-        if not isinstance(parent, AddCards):
+        if not isinstance(self.parent(), AddCards):
             note.flush()
 
         return True
 
+    # ── Replace tags ──────────────────────────────────────────────────────────
+
     def replace_tags(self):
-        """
-        Improved replace tags with better tag identification and user selection
-        """
+        """Replace existing database tags with newly selected ones."""
         from .tag_selection_dialog import TagSelectionDialog
         from ..tag_utils import simplify_tags_by_page
         from aqt.qt import QDialog
 
         notes = self.get_notes_to_process()
-
         if not notes:
             showInfo("No notes found in current context")
             return
 
-        selected_pages = []
-        for i, checkbox in enumerate(self._get_result_checkboxes()):
-            if checkbox.isChecked():
-                selected_pages.append(self.pages_data[i])
-
+        selected_rows  = self._get_selected_rows()
         selected_yields = self.get_selected_yield_tags()
 
-        # Check if user has selected either pages or yields
-        if not selected_pages and not selected_yields:
+        if not selected_rows and not selected_yields:
             showInfo("Please select at least one page or yield level")
             return
 
-        # If only yield is selected (no pages), just update yield
-        if not selected_pages and selected_yields:
+        if not selected_rows and selected_yields:
             return self._update_yield_only(notes, selected_yields)
 
-        # VALIDATION: Check if multiple pages are selected
-        if len(selected_pages) > 1:
-            showInfo("Please select only ONE page at a time when replacing tags.\n\n"
-                    "Multiple pages selected will make tag replacement ambiguous.")
+        if len(selected_rows) > 1:
+            showInfo(
+                "Please select only ONE page at a time when replacing tags.\n\n"
+                "Multiple pages selected will make tag replacement ambiguous."
+            )
             return
 
-        # Get selected database name
-        database_name = self.database_selector.currentText()
+        # Derive database context from the single selected row
+        selected_row     = selected_rows[0]
+        page             = selected_row['page']
+        database_name    = page.get('_database_name', '')
+        possible_subtags = [s for s in self.database_properties.get(database_name, []) if s]
+        user_selected_subtag = self._get_row_property_name(selected_row)
+        all_general      = _is_general_page(page)
 
-        # Define possible subtags
-        possible_subtags = self.database_properties.get(database_name, [])
-        possible_subtags = [s for s in possible_subtags if s]
+        selected_pages = [page]
 
-        # Get user-selected subtag from property selector
-        user_selected_subtag = self.property_selector.currentText()
-
-        # Check if all selected pages are general
-        all_general = all(
-            'ℹ️' in page.get('properties', {}).get('Search Prefix', {}).get('formula', {}).get('string', '')
-            for page in selected_pages
-        )
-
-        # Track statistics
-        total_notes = len(notes)
-        notes_modified = 0
+        total_notes             = len(notes)
+        notes_modified          = 0
         notes_with_yield_issues = 0
-        notes_skipped = 0
-
-        # Check if we're in AddCards context
-        parent = self.parent()
+        notes_skipped           = 0
+        parent   = self.parent()
         is_add_cards = isinstance(parent, AddCards)
 
-        # Process each note
-        for note_index, note in enumerate(notes):
-            # For batch operations, continue to next
-
-            # Handle yield tags
+        for note in notes:
             existing_yields = self.get_existing_yield_tags(note.tags)
-            selected_yields = self.get_selected_yield_tags()
+            sel_yields      = self.get_selected_yield_tags()
 
-            # Validate yield selection
-            if len(selected_yields) > 1:
+            if len(sel_yields) > 1:
                 notes_with_yield_issues += 1
                 continue
 
-            # Determine final yield tags
             final_yield_tags = []
-            if not existing_yields and not selected_yields:
-                # Prompt user to select a yield for this card
+            if not existing_yields and not sel_yields:
                 note_context = None
                 if 'Text' in note:
                     note_context = note['Text']
-                
                 prompted_yield = self._prompt_for_yield_selection(note_context)
-                
                 if prompted_yield is None:
-                    # User cancelled - skip this note
                     notes_skipped += 1
                     continue
-                
                 final_yield_tags = [prompted_yield]
-            elif existing_yields and not selected_yields:
+            elif existing_yields and not sel_yields:
                 final_yield_tags = existing_yields
-            elif selected_yields:
-                final_yield_tags = selected_yields
+            elif sel_yields:
+                final_yield_tags = sel_yields
 
-            # Get current tags
             current_tags = list(note.tags)
-
-            # Find tags matching the selected database
-            database_pattern = f"#Malleus_CM::#{database_name}::"
-            matching_tags = [tag for tag in current_tags if tag.startswith(database_pattern)]
+            tag_frag = DB_TAG_MAPPING.get(database_name, database_name)
+            database_pattern = f"#Malleus_CM::#{tag_frag}::"
+            matching_tags = [t for t in current_tags if t.startswith(database_pattern)]
 
             if not matching_tags:
-                # No tags to replace
                 continue
 
-            # Simplify tags by page and subtag
             simplified_tags = simplify_tags_by_page(matching_tags, database_name)
-
             if not simplified_tags:
                 continue
 
-            # Determine which tags to replace
             tags_to_replace = []
-
             if len(simplified_tags) == 1:
-                # Only one unique page/subtag combination - replace it directly
                 tags_to_replace = simplified_tags[0]['original_tags']
             else:
-                # Multiple tags - show selection dialog
-                # Get context from note's Text field if available
-                note_context = None
-                if 'Text' in note:
-                    note_context = note['Text']
-
-                # Show dialog for this specific note
+                note_context = note['Text'] if 'Text' in note else None
                 dialog = TagSelectionDialog(self, simplified_tags, note_context)
-
                 if dialog.exec() == QDialog.DialogCode.Accepted:
-                    selected_tag_info = dialog.get_selected_tags()
-                    # Collect all original tags from selected items
-                    for tag_info in selected_tag_info:
+                    for tag_info in dialog.get_selected_tags():
                         tags_to_replace.extend(tag_info['original_tags'])
                 else:
-                    # User cancelled - skip this note
                     notes_skipped += 1
                     continue
 
             if not tags_to_replace:
                 continue
 
-            # Now perform the replacement
             result = self._perform_tag_replacement(
-                note, 
-                tags_to_replace, 
-                selected_pages,
-                database_name,
-                possible_subtags,
-                user_selected_subtag,
-                all_general,
-                final_yield_tags,
-                is_add_cards
+                note, tags_to_replace, selected_pages,
+                database_name, possible_subtags, user_selected_subtag,
+                all_general, final_yield_tags, is_add_cards,
             )
-
             if result:
                 notes_modified += 1
 
         if notes_modified > 0:
-            for page in selected_pages:
-                self._save_recent_tag(page, database_name)
+            self._save_recent_tag(page)
 
-        # Refresh the UI
         if isinstance(parent, Browser):
             parent.model.reset()
         elif isinstance(parent, EditCurrent):
@@ -2358,70 +2349,52 @@ class NotionPageSelector(QDialog):
         elif isinstance(parent, AddCards):
             parent.editor.loadNote()
 
-        # Show summary
         if len(notes) > 1:
             summary = f"Successfully processed {total_notes} note(s)\n"
             summary += f"Modified: {notes_modified} note(s)\n"
-
             if notes_with_yield_issues > 0:
                 summary += f"Skipped (multiple yields selected): {notes_with_yield_issues} note(s)\n"
             if notes_skipped > 0:
                 summary += f"Skipped (user cancelled): {notes_skipped} note(s)\n"
-
             showInfo(summary)
-            
+
     def _perform_tag_replacement(self, note, tags_to_replace, selected_pages, database_name,
                                  possible_subtags, user_selected_subtag, all_general,
                                  final_yield_tags, is_add_cards):
         """
-        Perform the actual tag replacement on a note
+        Perform the actual tag replacement on a note.
 
-        FIXED: Now properly handles subtags with number prefixes (e.g., "10_Management")
+        Determines the final subtag to use (from user selection or inferred from
+        existing tags), extracts new tags via _get_tags_for_page directly (no
+        temporary property selector manipulation), then rebuilds the note's tags.
 
-        Args:
-            note: The note to modify
-            tags_to_replace: List of tag strings to replace
-            selected_pages: List of selected page data from Notion
-            database_name: Name of the database
-            possible_subtags: List of possible subtags for this database
-            user_selected_subtag: User's selected subtag from dropdown
-            all_general: Whether all pages are general pages
-            final_yield_tags: The yield tags to use
-            is_add_cards: Whether we're in AddCards context
-
-        Returns:
-            True if successful, False otherwise
+        Returns True on success, False if the user needs to take further action.
         """
-        from ..tag_utils import (get_subtag_from_tag, get_all_subtags_from_tags, 
+        from ..tag_utils import (get_subtag_from_tag, get_all_subtags_from_tags,
                                  normalize_subtag_for_matching, get_subtags_with_normalization)
 
-        # Get current tags
-        current_tags = list(note.tags)
+        current_tags  = list(note.tags)
+        remaining_tags = [t for t in current_tags if t not in tags_to_replace]
 
-        # Remove the tags we're replacing
-        remaining_tags = [tag for tag in current_tags if tag not in tags_to_replace]
-
-        # Determine what subtag to use
+        # ── Determine final subtag ────────────────────────────────────────────
         final_subtag = None
 
         if user_selected_subtag and user_selected_subtag not in ("", "Tag", "Main Tag"):
-            # User explicitly selected a subtag
             final_subtag = user_selected_subtag
         else:
-            # Infer subtag from the tags being replaced
-            # Get the actual subtags from the tags (with number prefixes)
             raw_subtags = get_all_subtags_from_tags(tags_to_replace)
 
             if len(raw_subtags) == 1:
-                # All tags have the same subtag - normalize it to match property selector
-                raw_subtag = list(raw_subtags)[0]
+                raw_subtag   = list(raw_subtags)[0]
                 final_subtag = normalize_subtag_for_matching(raw_subtag, possible_subtags)
             elif len(raw_subtags) == 0:
-                # No subtags in original tags
                 if user_selected_subtag == "":
                     if database_name in ("Subjects", "Pharmacology"):
                         if not all_general:
-                            showInfo("Please select a subtag (Change the dropdown to the right of the searchbox)")
+                            showInfo(
+                                "Please select a subtag (check the result to reveal "
+                                "the subtag dropdown)"
+                            )
                             return False
                         else:
                             final_subtag = "Main Tag"
@@ -2430,160 +2403,133 @@ class NotionPageSelector(QDialog):
                 else:
                     final_subtag = user_selected_subtag
             else:
-                # Multiple different subtags
-                # Try to normalize them and see if they're actually the same
                 normalized_subtags = get_subtags_with_normalization(tags_to_replace, possible_subtags)
-
                 if len(normalized_subtags) == 1:
-                    # After normalization, they're all the same
                     final_subtag = list(normalized_subtags)[0]
                 else:
-                    # They're genuinely different - need user selection
                     if not user_selected_subtag or user_selected_subtag == "":
-                        showInfo("The tags you're replacing have different subtags. Please select a subtag from the dropdown.")
+                        showInfo(
+                            "The tags you're replacing have different subtags. "
+                            "Please select a subtag from the result row's dropdown."
+                        )
                         return False
                     final_subtag = user_selected_subtag
 
-        # Set property selector temporarily to get new tags
-        original_property = self.property_selector.currentText()
-
-        if final_subtag == "Main Tag" or (database_name in ("Subjects", "Pharmacology") and all_general):
-            self.property_selector.setCurrentIndex(0)
-        elif final_subtag and final_subtag not in ("Tag", "Main Tag"):
-            index = self.property_selector.findText(final_subtag)
-            if index >= 0:
-                self.property_selector.setCurrentIndex(index)
-            else:
-                # Try without spaces
-                for i in range(self.property_selector.count()):
-                    item_text = self.property_selector.itemText(i)
-                    if item_text.replace(' ', '').lower() == final_subtag.replace(' ', '').lower():
-                        self.property_selector.setCurrentIndex(i)
-                        break
+        # ── Resolve property name ─────────────────────────────────────────────
+        if final_subtag in (None, "Main Tag"):
+            prop_to_use = "Main Tag" if database_name == "Subjects" else "Tag"
+        elif final_subtag == "Tag":
+            prop_to_use = "Tag"
         else:
-            self.property_selector.setCurrentIndex(0)
+            prop_to_use = final_subtag
 
-        # Get new tags
-        new_tags = self.get_tags_from_selected_pages()
+        # ── Extract new tags directly ─────────────────────────────────────────
+        new_tags = []
+        for page in selected_pages:
+            new_tags.extend(self._get_tags_for_page(page, database_name, prop_to_use))
 
-        # Restore property selector
-        original_index = self.property_selector.findText(original_property)
-        if original_index >= 0:
-            self.property_selector.setCurrentIndex(original_index)
+        # ── Rebuild final tag list ────────────────────────────────────────────
+        remaining_tags = [t for t in remaining_tags if not t.startswith("#Malleus_CM::#Yield::")]
+        all_new_tags   = new_tags + final_yield_tags + self.get_paediatrics_tag()
+        final_tags     = list(set(remaining_tags + all_new_tags))
 
-        # Remove existing yield tags
-        remaining_tags = [tag for tag in remaining_tags if not tag.startswith("#Malleus_CM::#Yield::")]
-
-        # Combine tags
-        all_new_tags = new_tags + final_yield_tags + self.get_paediatrics_tag()
-        final_tags = list(set(remaining_tags + all_new_tags))
-
-        # Final validation
-        yield_tags_in_final = [tag for tag in final_tags if tag.startswith("#Malleus_CM::#Yield::")]
-        if len(yield_tags_in_final) > 1:
-            showInfo(f"Error: Multiple yield tags detected in final result:\n" + "\n".join(yield_tags_in_final))
+        yield_in_final = [t for t in final_tags if t.startswith("#Malleus_CM::#Yield::")]
+        if len(yield_in_final) > 1:
+            showInfo(f"Error: Multiple yield tags detected:\n" + "\n".join(yield_in_final))
             return False
-        elif len(yield_tags_in_final) == 0:
+        elif len(yield_in_final) == 0:
             showInfo("No yield tag. Please select a yield level.")
             return False
 
-        # Update note
         note.tags = final_tags
 
-        # Populate Extra (Synced) field from SE array
+        selected_db_names = {p.get('_database_name', '') for p in selected_pages}
         self._schedule_extra_synced(
             note, self.notion_cache,
-            subjects_db=(self.database_selector.currentText() == "Subjects")
+            subjects_db=bool(selected_db_names & {"Subjects", "eTG"}),
         )
 
-        # Only flush if not in AddCards dialog
         if not is_add_cards:
             note.flush()
 
         return True
 
+    # ── Misc helpers ──────────────────────────────────────────────────────────
+
     def _normalize_for_comparison(self, text):
-        """Normalize text for comparison - handle spaces, slashes, underscores"""
+        """Normalize text for comparison — handle spaces, slashes, underscores."""
         return text.replace(' ', '_').replace('/', '_').replace('&', '_').lower()
 
     def _prompt_for_yield_selection(self, note_context=None):
         """
-        Show a dialog to prompt user for yield selection
-        
-        Args:
-            note_context: Optional context from note's Text field to help identify the card
-            
-        Returns:
-            Selected yield tag as string, or None if cancelled
+        Show a dialog to prompt user for yield selection.
+
+        Returns the selected yield tag string, or None if cancelled.
         """
         from aqt.qt import QDialog, QVBoxLayout, QLabel, QRadioButton, QButtonGroup, QDialogButtonBox, QFrame
-        
+
         dialog = QDialog(self)
         dialog.setWindowTitle("Select Yield Level")
         dialog.setMinimumWidth(400)
         apply_malleus_style(dialog)
 
         layout = QVBoxLayout()
-        
-        # Info label
+
         info_label = QLabel("This card has no yield level. Please select one:")
         info_label.setWordWrap(True)
         info_label.setStyleSheet("font-weight: bold; margin-bottom: 10px;")
         layout.addWidget(info_label)
-        
-        # Show note context if available
+
         if note_context:
             context_frame = QFrame()
             context_frame.setFrameShape(QFrame.Shape.StyledPanel)
-            context_frame.setStyleSheet("background-color: palette(alternateBase); padding: 10px; border-radius: 7px; border: 1px solid rgba(74,130,204,0.30);")
+            context_frame.setStyleSheet(
+                "background-color: palette(alternateBase); padding: 10px; "
+                "border-radius: 7px; border: 1px solid rgba(74,130,204,0.30);"
+            )
             context_layout = QVBoxLayout()
-            
+
             context_title = QLabel("Card Context:")
             context_title.setStyleSheet("font-weight: bold; font-size: 11px;")
             context_layout.addWidget(context_title)
-            
+
             context_text = QLabel(note_context[:200] + ("..." if len(note_context) > 200 else ""))
             context_text.setWordWrap(True)
             context_text.setStyleSheet("font-size: 10px;")
             context_layout.addWidget(context_text)
-            
+
             context_frame.setLayout(context_layout)
             layout.addWidget(context_frame)
-        
-        # Yield selection radio buttons
-        button_group = QButtonGroup(dialog)
+
+        button_group  = QButtonGroup(dialog)
         radio_buttons = {}
-        
+
         yield_options = {
-            "High Yield": "#Malleus_CM::#Yield::High",
-            "Medium Yield": "#Malleus_CM::#Yield::Medium",
-            "Low Yield": "#Malleus_CM::#Yield::Low",
-            "Beyond Medical Student Level": "#Malleus_CM::#Yield::Beyond_medical_student_level"
+            "High Yield":                   "#Malleus_CM::#Yield::High",
+            "Medium Yield":                 "#Malleus_CM::#Yield::Medium",
+            "Low Yield":                    "#Malleus_CM::#Yield::Low",
+            "Beyond Medical Student Level": "#Malleus_CM::#Yield::Beyond_medical_student_level",
         }
-        
+
         for display_text, tag_value in yield_options.items():
             radio = QRadioButton(display_text)
             radio_buttons[display_text] = (radio, tag_value)
             button_group.addButton(radio)
             layout.addWidget(radio)
-        
-        # Set High Yield as default
+
         radio_buttons["High Yield"][0].setChecked(True)
-        
-        # OK and Cancel buttons
+
         buttons = QDialogButtonBox()
         buttons.addButton(QDialogButtonBox.StandardButton.Ok)
         buttons.addButton(QDialogButtonBox.StandardButton.Cancel)
         buttons.accepted.connect(dialog.accept)
         buttons.rejected.connect(dialog.reject)
         layout.addWidget(buttons)
-        
+
         dialog.setLayout(layout)
-        
-        # Show dialog and return result
+
         if dialog.exec() == QDialog.DialogCode.Accepted:
             for display_text, (radio, tag_value) in radio_buttons.items():
                 if radio.isChecked():
                     return tag_value
-        
         return None
