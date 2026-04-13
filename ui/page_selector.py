@@ -1157,6 +1157,10 @@ class NotionPageSelector(QDialog):
             # Otherwise open a new browser window
             open_browser_with_search(search_query)
 
+        database_name = self.database_selector.currentText()
+        for page in selected_pages:
+            self._save_recent_tag(page, database_name)
+
         self.accept()
 
     def get_property_content(self, page, property_name):
@@ -2341,6 +2345,10 @@ class NotionPageSelector(QDialog):
 
             if result:
                 notes_modified += 1
+
+        if notes_modified > 0:
+            for page in selected_pages:
+                self._save_recent_tag(page, database_name)
 
         # Refresh the UI
         if isinstance(parent, Browser):

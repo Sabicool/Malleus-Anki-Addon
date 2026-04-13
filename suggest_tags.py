@@ -820,7 +820,7 @@ def suggest_subtag(card_text: str, extra: str = '') -> Optional[str]:
 
 def _cutoff_at_knee(
     scores: List[float],
-    ratio_threshold: float = 0.4,
+    ratio_threshold: float = 0.5,
     min_score: float = 0.3,
 ) -> int:
     """
