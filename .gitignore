@@ -11,6 +11,7 @@ readme for ankiweb.md
 #cache/*
 *.zip
 .env
+recent_tags.json
 
 # Optional: Ignore node_modules, if relevant to the project
 node_modules/
