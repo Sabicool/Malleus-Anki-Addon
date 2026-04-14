@@ -7,7 +7,8 @@ from aqt.qt import (QDialog, QVBoxLayout, QHBoxLayout, QComboBox,
                     QLineEdit, QPushButton, QGroupBox, QScrollArea,
                     QWidget, QCheckBox, QButtonGroup, QRadioButton,
                     QLabel, QFrame, QTimer, Qt, QUrl, QWidget as QWidgetBase,
-                    QKeyEvent, QColor, QPalette, QPixmap, QIcon, QSize)
+                    QKeyEvent, QColor, QPalette, QPixmap, QIcon, QSize, QMenu,
+                    QSizePolicy)
 from aqt.browser import Browser
 from aqt.addcards import AddCards
 from aqt.editcurrent import EditCurrent
@@ -49,71 +50,75 @@ _DB_EMOJI = {
     "Guidelines": "🖊️",
 }
 
-# ── Result row widget (supports right-edge overlay for subtag combo) ──────────
+# ── Inline subtag chip ────────────────────────────────────────────────────────
 
-class _ResultRowWidget(QWidget):
-    """A result row that positions the subtag QComboBox as a right-edge overlay.
+class _SubtagChip(QPushButton):
+    """Compact inline tag-chip for subtag selection.
 
-    The combo is a direct child of this widget but *not* part of the layout,
-    so it overlays the checkbox text without expanding the row width.
+    Appears to the right of the checkbox text when the row is checked.
+    Clicking opens a QMenu listing all subtag options; the selected option
+    is shown on the chip as "Selection  ▾".
 
-    Call `reserve_right(px)` for each fixed-width widget added to the right side
-    of the layout (e.g. count label, confidence dots) so the combo stays clear
-    of those widgets.
+    Exposes the same minimal API that the rest of the code uses on subtag
+    controls: currentText(), findText(), setCurrentIndex().
     """
-    _COMBO_W = 170
-    _BASE_MARGIN = 4   # pixels between combo right edge and row right edge
 
-    def __init__(self, parent=None):
+    _MAX_W = 170
+
+    def __init__(self, options: list, parent=None):
         super().__init__(parent)
-        self._overlay_combo = None
-        self._combo_h = 32       # updated to combo's actual sizeHint in set_overlay_combo
-        self._right_reserved = 0  # pixels used by fixed right-side layout items
+        self._options  = options
+        self._selection = options[0] if options else ''
+        self._refresh_label()
+        self.setMaximumWidth(self._MAX_W)
+        self.setStyleSheet(
+            "QPushButton {"
+            "  border: 1px solid #4a82cc; border-radius: 9px;"
+            "  padding: 2px 10px 2px 10px; font-size: 11px;"
+            "  background: rgba(74,130,204,0.15); color: #4a82cc;"
+            "  text-align: left;"
+            "}"
+            "QPushButton:hover  { background: rgba(74,130,204,0.28); }"
+            "QPushButton:pressed { background: rgba(74,130,204,0.40); }"
+        )
+        self.setToolTip("Click to choose a subtag")
+        self.clicked.connect(self._open_menu)
 
-    def reserve_right(self, px: int):
-        """Reserve additional right-side pixels (count label, dots, etc.)."""
-        self._right_reserved += px
+    # ── QComboBox-compatible API ───────────────────────────────────────────
 
-    def set_overlay_combo(self, combo):
-        self._overlay_combo = combo
-        combo.setParent(self)
-        combo.raise_()
-        # Use the combo's preferred height; fall back to 32 if not yet known.
-        hint_h = combo.sizeHint().height()
-        self._combo_h = hint_h if hint_h > 8 else 32
-        self._position_combo()
+    def currentText(self) -> str:
+        return self._selection
 
-    # ── Size hints — ensure the row is always tall enough to fit the overlay ──
+    def findText(self, text: str) -> int:
+        for i, opt in enumerate(self._options):
+            if opt == text:
+                return i
+        return -1
 
-    def sizeHint(self):
-        sh = super().sizeHint()
-        if self._overlay_combo is not None:
-            from aqt.qt import QSize
-            return QSize(sh.width(), max(sh.height(), self._combo_h + 4))
-        return sh
+    def setCurrentIndex(self, idx: int):
+        if 0 <= idx < len(self._options):
+            self._selection = self._options[idx]
+            self._refresh_label()
 
-    def minimumSizeHint(self):
-        msh = super().minimumSizeHint()
-        if self._overlay_combo is not None:
-            from aqt.qt import QSize
-            return QSize(msh.width(), max(msh.height(), self._combo_h + 4))
-        return msh
+    # ── Internal ──────────────────────────────────────────────────────────
 
-    def resizeEvent(self, event):
-        super().resizeEvent(event)
-        self._position_combo()
+    def _refresh_label(self):
+        label = self._selection or 'Select…'
+        # Truncate long labels so the chip stays compact
+        if len(label) > 22:
+            label = label[:20] + '…'
+        self.setText(f"{label}  ▾")
 
-    def _position_combo(self):
-        if self._overlay_combo is None or not self._overlay_combo.isVisible():
-            return
-        h = self.height()
-        if h < self._combo_h:          # row hasn't been sized yet — defer
-            from aqt.qt import QTimer
-            QTimer.singleShot(0, self._position_combo)
-            return
-        x = max(0, self.width() - self._COMBO_W - self._BASE_MARGIN - self._right_reserved)
-        y = max(0, (h - self._combo_h) // 2)
-        self._overlay_combo.setGeometry(x, y, self._COMBO_W, self._combo_h)
+    def _open_menu(self):
+        menu = QMenu(self)
+        for opt in self._options:
+            action = menu.addAction(opt)
+            action.setCheckable(True)
+            action.setChecked(opt == self._selection)
+        chosen = menu.exec(self.mapToGlobal(self.rect().bottomLeft()))
+        if chosen:
+            self._selection = chosen.text()
+            self._refresh_label()
 
 
 # Maps the UI database name to the fragment used in Anki tag strings.
@@ -257,7 +262,7 @@ class NotionPageSelector(QDialog):
         self.search_timer.timeout.connect(self.perform_search)
 
         self.search_input = QLineEdit()
-        self.search_input.setPlaceholderText("🔍  Search all databases…")
+        self.search_input.setPlaceholderText("🔍  Search…")
         self.search_input.textChanged.connect(self.on_search_text_changed)
         self.search_input.setMinimumHeight(34)
         content_layout.addWidget(self.search_input)
@@ -322,6 +327,7 @@ class NotionPageSelector(QDialog):
             if db_name == "eTG" and _etg_chip_icon:
                 btn.setIcon(_etg_chip_icon)
                 btn.setIconSize(QSize(16, 16))
+                btn.setText("  eTG")  # leading spaces add gap between icon and label
             btn.setCheckable(True)
             btn.setChecked(True)   # all active by default
             btn.setStyleSheet(_chip_style)
@@ -720,9 +726,8 @@ class NotionPageSelector(QDialog):
         """
         Build a single result row widget.
 
-        Layout: [db indicator] [checkbox (stretch)] [card count pill] [confidence dots]
-                Subtag combo is a right-edge overlay on the row (not in the layout),
-                so it appears over the checkbox text without expanding the row width.
+        Layout: [db indicator] [checkbox (stretch)] [subtag chip (hidden until checked)]
+                [card count pill] [confidence dots]
 
         Returns (row_widget, checkbox, subtag_combo_or_None).
         The subtag_combo is None for databases that have no subtag options
@@ -730,7 +735,7 @@ class NotionPageSelector(QDialog):
         """
         db_name = page.get('_database_name', '')
 
-        row = _ResultRowWidget()
+        row = QWidget()
         row_layout = QHBoxLayout(row)
         row_layout.setContentsMargins(0, 0, 4, 0)
         row_layout.setSpacing(6)
@@ -782,33 +787,31 @@ class NotionPageSelector(QDialog):
 
         # ── Checkbox ───────────────────────────────────────────────────────
         cb = QCheckBox(display_text)
+        # Allow the checkbox to be compressed below its text's natural width so
+        # fixed-width widgets to its right (subtag chip, count, dots) are never
+        # pushed off-screen by a long title.
+        cb.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        cb.setMinimumWidth(60)
         row_layout.addWidget(cb, stretch=1)
 
-        # ── Per-result subtag ComboBox (overlay, not in layout) ────────────
-        # Shown overlaid on the right edge of the row when the checkbox is checked.
+        # ── Subtag chip (inline, shown when checkbox is checked) ───────────
         # Applies to Subjects/Pharmacology 🩺/💊 pages and all eTG pages.
+        # ℹ️ general Subjects/Pharmacology pages skip it (no subtag needed).
         subtag_combo = None
         has_subtag_options = db_name in ("Subjects", "Pharmacology", "eTG")
         is_general = _is_general_page(page)
         skip_combo = (db_name in ("Subjects", "Pharmacology") and is_general)
 
         if has_subtag_options and not skip_combo:
-            subtag_combo = QComboBox()
-            subtag_combo.setVisible(False)
             props = DATABASE_PROPERTIES.get(db_name, [""])
-            subtag_combo.addItems(props)
-            subtag_combo.setToolTip("Select a subtag for this result")
-            # Attach as overlay — positions itself over the right edge of the row
-            row.set_overlay_combo(subtag_combo)
+            subtag_combo = _SubtagChip(props)
+            subtag_combo.setVisible(False)
 
-            def _toggle_subtag(state, sc=subtag_combo, r=row):
-                if state == 2:  # Qt.CheckState.Checked
-                    sc.setVisible(True)
-                    r._position_combo()
-                else:
-                    sc.setVisible(False)
+            def _toggle_subtag(state, sc=subtag_combo):
+                sc.setVisible(state == 2)  # show on check, hide on uncheck
 
             cb.stateChanged.connect(_toggle_subtag)
+            row_layout.addWidget(subtag_combo, stretch=0)
 
         # ── Card count pill ────────────────────────────────────────────────
         if show_count:
@@ -824,9 +827,6 @@ class NotionPageSelector(QDialog):
                     "color: #58a6ff; font-size: 11px; font-weight: 600; padding: 1px 6px;"
                 )
             row_layout.addWidget(count_label, stretch=0)
-            # Reserve space so the overlay combo doesn't cover this label
-            if subtag_combo is not None:
-                row.reserve_right(count_label.sizeHint().width() + 6)
 
         # ── Confidence dots (suggestions only) ────────────────────────────
         if score is not None:
@@ -837,8 +837,6 @@ class NotionPageSelector(QDialog):
                 "font-size: 11px; letter-spacing: 2px; color: #f0a500; padding: 1px 4px;"
             )
             row_layout.addWidget(dots_label, stretch=0)
-            if subtag_combo is not None:
-                row.reserve_right(dots_label.sizeHint().width() + 4)
 
         return row, cb, subtag_combo
 
@@ -997,9 +995,10 @@ class NotionPageSelector(QDialog):
         self._load_note_tag_strings()
 
         for suggestion in suggestions:
-            page  = suggestion['page']
-            title = suggestion['title']
-            score = suggestion['score']
+            page          = suggestion['page']
+            title         = suggestion['title']
+            score         = suggestion['score']
+            matched_terms = suggestion.get('matched_terms', [])
 
             # Stamp database so _make_result_row can show the correct badge/combo
             page['_database_name'] = 'Subjects'
@@ -1023,6 +1022,20 @@ class NotionPageSelector(QDialog):
                 'subtag_combo': subtag_combo,
                 'row_widget': row,
             })
+
+            # ── Matched-terms hint ─────────────────────────────────────────
+            if matched_terms:
+                hint_text = "matched: " + "  ·  ".join(matched_terms)
+                hint_lbl = QLabel(hint_text)
+                hint_lbl.setStyleSheet(
+                    "color: rgba(128,128,128,0.75); font-size: 10px;"
+                    " font-style: italic; background: transparent;"
+                    " padding-left: 38px; padding-bottom: 2px;"
+                )
+                hint_lbl.setToolTip(
+                    "Terms from this card that matched the suggested page"
+                )
+                self.checkbox_layout.addWidget(hint_lbl)
 
         # Pre-set the suggested subtag on every combo (visible once user checks the row)
         subtag = suggestions[0].get('suggested_subtag')
