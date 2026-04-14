@@ -400,7 +400,7 @@ def _topic_search_scores(
     notion_cache,
     extra: str = '',
     source: str = '',
-) -> Dict[str, float]:
+) -> Tuple[Dict[str, float], Dict[str, List[str]]]:
     """
     Stage 1: search for the card topic using topic phrases, stem-frequency
     words, useful cloze answers, plus signals from the Extra and Source fields.
@@ -412,8 +412,14 @@ def _topic_search_scores(
 
     Scores are combined with max(), so a strong primary hit is never downgraded
     by a weaker supplementary one.
+
+    Returns:
+        (scores, matched_by_pid) — scores dict as before, plus a dict mapping
+        each matched page id to the stem-group query phrases that found it.
+        Stem queries only (most readable); cloze/extra/source queries omitted.
     """
     scores: Dict[str, float] = {}
+    matched_by_pid: Dict[str, List[str]] = {}   # pid → readable matched queries
 
     # Each entry: (query_list, weight_multiplier)
     query_groups: List[Tuple[List[str], float]] = []
@@ -471,7 +477,12 @@ def _topic_search_scores(
           f"(stem={len(query_groups[0][0])}, "
           f"cloze={len(query_groups[1][0]) if len(query_groups) > 1 and query_groups[1][1] == CLOZE_TOPIC_WEIGHT else 0})")
 
-    for queries, weight in query_groups:
+    # Only stem queries (index 0) are tracked for matched_terms — they are
+    # extracted directly from the question text and read most naturally.
+    stem_queries_set = set(q.lower() for q in query_groups[0][0]) if query_groups else set()
+
+    for group_idx, (queries, weight) in enumerate(query_groups):
+        is_stem_group = (group_idx == 0)
         for query in queries:
             if len(query.replace(' ', '')) < 3:
                 continue
@@ -480,9 +491,13 @@ def _topic_search_scores(
                 if pid:
                     s = page.get('_composite_score', 0.0) * TOPIC_SEARCH_BONUS * weight
                     scores[pid] = max(scores.get(pid, 0.0), s)
+                    if is_stem_group:
+                        existing = matched_by_pid.setdefault(pid, [])
+                        if query.lower() not in [t.lower() for t in existing]:
+                            existing.append(query)
 
     print(f"[SuggestTags] Stage 1: {len(scores)} pages matched")
-    return scores
+    return scores, matched_by_pid
 
 
 # ── Stage 2: Inverted index + body candidate scoring ──────────────────────────
@@ -890,8 +905,8 @@ def suggest_subject_tags(
 
     page_by_id: Dict[str, Dict] = {p.get('id', ''): p for p in pages}
 
-    stage1 = _topic_search_scores(card_text, pages, notion_cache,
-                                   extra=extra, source=source)
+    stage1, stage1_matched = _topic_search_scores(card_text, pages, notion_cache,
+                                                   extra=extra, source=source)
     candidates = _body_candidates(card_text,
                                   extra=extra,
                                   additional_resources=additional_resources,
@@ -934,11 +949,22 @@ def suggest_subject_tags(
     for score, pid in ranked[:max_results]:
         page = page_by_id.get(pid)
         if page:
+            # Collect the human-readable query phrases that drove the stage-1 match.
+            # Prefer multi-word phrases (more specific), then single words.
+            # Cap at 4 terms so the hint stays compact.
+            raw_terms = stage1_matched.get(pid, [])
+            phrases  = [t for t in raw_terms if ' ' in t]
+            singles  = [t for t in raw_terms if ' ' not in t]
+            terms = (phrases + singles)[:4]
+            # Title-case single words so they read naturally
+            terms = [t.title() if ' ' not in t else t for t in terms]
+
             results.append({
                 'title':            _page_display_name(page),
                 'page':             page,
                 'score':            round(score, 2),
                 'suggested_subtag': subtag,
+                'matched_terms':    terms,
             })
     return results
 
