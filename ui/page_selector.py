@@ -8,7 +8,7 @@ from aqt.qt import (QDialog, QVBoxLayout, QHBoxLayout, QComboBox,
                     QWidget, QCheckBox, QButtonGroup, QRadioButton,
                     QLabel, QFrame, QTimer, Qt, QUrl, QWidget as QWidgetBase,
                     QKeyEvent, QColor, QPalette, QPixmap, QIcon, QSize, QMenu,
-                    QSizePolicy)
+                    QSizePolicy, QApplication)
 from aqt.browser import Browser
 from aqt.addcards import AddCards
 from aqt.editcurrent import EditCurrent
@@ -65,10 +65,11 @@ class _SubtagChip(QPushButton):
 
     _MAX_W = 170
 
-    def __init__(self, options: list, parent=None):
+    def __init__(self, options: list, apply_all_callback=None, parent=None):
         super().__init__(parent)
-        self._options  = options
-        self._selection = options[0] if options else ''
+        self._options            = options
+        self._selection          = options[0] if options else ''
+        self._apply_all_callback = apply_all_callback   # callable(selection) or None
         self._refresh_label()
         self.setMaximumWidth(self._MAX_W)
         self.setStyleSheet(
@@ -81,7 +82,7 @@ class _SubtagChip(QPushButton):
             "QPushButton:hover  { background: rgba(74,130,204,0.28); }"
             "QPushButton:pressed { background: rgba(74,130,204,0.40); }"
         )
-        self.setToolTip("Click to choose a subtag")
+        self.setToolTip("Click to set subtag · Shift+click to apply to all checked rows")
         self.clicked.connect(self._open_menu)
 
     # ── QComboBox-compatible API ───────────────────────────────────────────
@@ -104,21 +105,47 @@ class _SubtagChip(QPushButton):
 
     def _refresh_label(self):
         label = self._selection or 'Select…'
-        # Truncate long labels so the chip stays compact
         if len(label) > 22:
             label = label[:20] + '…'
         self.setText(f"{label}  ▾")
 
     def _open_menu(self):
         menu = QMenu(self)
+
+        # ── "Apply to all" shortcut at the top ────────────────────────────
+        apply_action = None
+        if self._apply_all_callback:
+            cur = self._selection or 'current subtag'
+            apply_action = menu.addAction(f"↕  Apply '{cur}' to all checked rows")
+            menu.addSeparator()
+
+        # ── Per-row subtag options (skip blank placeholder) ───────────────
         for opt in self._options:
+            if not opt:
+                continue
             action = menu.addAction(opt)
             action.setCheckable(True)
             action.setChecked(opt == self._selection)
-        chosen = menu.exec(self.mapToGlobal(self.rect().bottomLeft()))
-        if chosen:
-            self._selection = chosen.text()
+
+        # Use triggered signal (fires while the user's finger is still on the
+        # mouse/keyboard) so queryKeyboardModifiers() reliably catches Shift.
+        def _on_action(action):
+            if action is apply_action:
+                self._apply_all_callback(self._selection)
+                return
+
+            self._selection = action.text()
             self._refresh_label()
+
+            shift_held = bool(
+                QApplication.queryKeyboardModifiers()
+                & Qt.KeyboardModifier.ShiftModifier
+            )
+            if shift_held and self._apply_all_callback:
+                self._apply_all_callback(self._selection)
+
+        menu.triggered.connect(_on_action)
+        menu.exec(self.mapToGlobal(self.rect().bottomLeft()))
 
 
 # Maps the UI database name to the fragment used in Anki tag strings.
@@ -804,11 +831,22 @@ class NotionPageSelector(QDialog):
 
         if has_subtag_options and not skip_combo:
             props = DATABASE_PROPERTIES.get(db_name, [""])
-            subtag_combo = _SubtagChip(props)
+
+            def _apply_all(selection, rows_ref=self._result_rows):
+                """Propagate *selection* to every currently checked chip."""
+                for rd in rows_ref:
+                    chip = rd.get('subtag_combo')
+                    chk  = rd.get('checkbox')
+                    if chip is not None and chk is not None and chk.isChecked():
+                        idx = chip.findText(selection)
+                        if idx >= 0:
+                            chip.setCurrentIndex(idx)
+
+            subtag_combo = _SubtagChip(props, apply_all_callback=_apply_all)
             subtag_combo.setVisible(False)
 
             def _toggle_subtag(state, sc=subtag_combo):
-                sc.setVisible(state == 2)  # show on check, hide on uncheck
+                sc.setVisible(state == 2)
 
             cb.stateChanged.connect(_toggle_subtag)
             row_layout.addWidget(subtag_combo, stretch=0)
