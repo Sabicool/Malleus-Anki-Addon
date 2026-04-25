@@ -112,6 +112,42 @@ class _SubtagChip(QPushButton):
     def _open_menu(self):
         menu = QMenu(self)
 
+        # QMenu is a top-level popup window and does not inherit the dialog's
+        # stylesheet, so we must apply colours explicitly.
+        try:
+            pal = QApplication.instance().palette()
+            dark = pal.color(QPalette.ColorRole.Window).lightness() < 128
+            base   = "#1e2236" if dark else "#ffffff"
+            text   = "#dce0ef" if dark else "#1a1d28"
+            border = "rgba(74,130,204,0.50)"
+            sel    = "rgba(74,130,204,0.18)"
+            sep    = "rgba(74,130,204,0.28)"
+            menu.setStyleSheet(f"""
+                QMenu {{
+                    background-color: {base};
+                    border: 1.5px solid {border};
+                    border-radius: 7px;
+                    padding: 4px;
+                    color: {text};
+                }}
+                QMenu::item {{
+                    padding: 6px 14px;
+                    border-radius: 4px;
+                    color: {text};
+                }}
+                QMenu::item:selected {{
+                    background-color: {sel};
+                    color: {text};
+                }}
+                QMenu::separator {{
+                    height: 1px;
+                    background: {sep};
+                    margin: 3px 8px;
+                }}
+            """)
+        except Exception:
+            pass
+
         # ── "Apply to all" shortcut at the top ────────────────────────────
         apply_action = None
         if self._apply_all_callback:
@@ -312,17 +348,17 @@ class NotionPageSelector(QDialog):
 
         _chip_style = (
             "QPushButton {"
-            "  border: 1px solid palette(mid); border-radius: 10px;"
-            "  padding: 2px 9px; font-size: 11px; background: transparent;"
-            "  color: palette(windowText);"   # explicit colour — stays readable in light mode
+            "  border: 1px solid rgba(74,130,204,0.35); border-radius: 13px;"
+            "  padding: 3px 11px 3px 8px; font-size: 11px; background: transparent;"
+            "  color: palette(placeholderText); font-weight: 500;"
             "}"
             "QPushButton:checked {"
-            "  background: rgba(74,130,204,0.20); border-color: #4a82cc; color: #4a82cc;"
+            "  background: #4a82cc; border-color: #4a82cc; color: white; font-weight: 600;"
             "}"
-            "QPushButton:!checked {"
-            "  color: palette(placeholderText);"   # dimmed but legible when off
+            "QPushButton:!checked:hover {"
+            "  background: rgba(74,130,204,0.10); color: #4a82cc;"
+            "  border-color: rgba(74,130,204,0.55);"
             "}"
-            "QPushButton:hover { background: rgba(74,130,204,0.10); }"
         )
 
         # Chip labels — emoji prefix for all databases; eTG gets an image icon
@@ -399,30 +435,48 @@ class NotionPageSelector(QDialog):
         content_layout.addLayout(chips_row)
 
         # ── Results section ─────────────────────────────────────────────────
-        self.results_group = QGroupBox("Search Results")
-        results_layout = QVBoxLayout()
+        results_header_layout = QHBoxLayout()
+        results_header_layout.setContentsMargins(2, 0, 2, 0)
+        self._results_section_label = QLabel("Search Results")
+        self._results_section_label.setStyleSheet(
+            "QLabel { font-size: 10px; font-weight: 700; letter-spacing: 0.8px;"
+            " color: palette(placeholderText); background: transparent;"
+            " text-transform: uppercase; }"
+        )
+        self._results_count_label = QLabel("")
+        self._results_count_label.setStyleSheet(
+            "QLabel { font-size: 11px; color: palette(placeholderText); background: transparent; }"
+        )
+        results_header_layout.addWidget(self._results_section_label)
+        results_header_layout.addStretch()
+        results_header_layout.addWidget(self._results_count_label)
+        content_layout.addLayout(results_header_layout)
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setMinimumHeight(220)
         scroll_widget = QWidget()
         self.checkbox_layout = QVBoxLayout()
+        self.checkbox_layout.setSpacing(0)
+        self.checkbox_layout.setContentsMargins(0, 0, 0, 0)
+        self.checkbox_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
         scroll_widget.setLayout(self.checkbox_layout)
         scroll.setWidget(scroll_widget)
+        content_layout.addWidget(scroll, stretch=1)
 
-        results_layout.addWidget(scroll)
-        self.results_group.setLayout(results_layout)
-        content_layout.addWidget(self.results_group, stretch=1)
+        # Shim so setTitle() calls update the section label text
+        class _SectionLabelShim:
+            def __init__(self_, lbl): self_._lbl = lbl
+            def setTitle(self_, text): self_._lbl.setText(text)
+        self.results_group = _SectionLabelShim(self._results_section_label)
 
-        # ── Yield selection ─────────────────────────────────────────────────
-        yield_group = QGroupBox("Yield Level")
-        yield_layout = QVBoxLayout()
-        yield_layout.setSpacing(2)
-        yield_layout.setContentsMargins(6, 4, 6, 6)
-
-        yield_title_layout = QHBoxLayout()
-        yield_title_label = QLabel("Yield Level")
-        yield_title_label.setStyleSheet("font-weight: 700; font-size: 13px; background: transparent;")
+        # ── Yield selection — segmented control ─────────────────────────────
+        _YIELD_DEFS = [
+            ("High Yield",                   "High",      "#3a9e6a"),
+            ("Medium Yield",                 "Medium",    "#c8902a"),
+            ("Low Yield",                    "Low",       "#c06030"),
+            ("Beyond Medical Student Level", "Beyond\nMedical School", "#7a5ab8"),
+        ]
 
         combined_tooltip = """<p style="margin: 0; padding: 4px;">
         <b style="font-size: 14px;">High Yield</b> <span>(~50% cards)</span><br><br>
@@ -459,93 +513,129 @@ class NotionPageSelector(QDialog):
         <span style="margin-left: 12px;">◦ Niche pharmacology including half-lives and pharmacokinetics of drugs</span>
         </p>"""
 
+        # Card panel
+        yield_panel = QFrame()
+        yield_panel.setObjectName("card_panel")
+        yield_panel.setFrameShape(QFrame.Shape.NoFrame)
+        yield_panel_layout = QVBoxLayout(yield_panel)
+        yield_panel_layout.setContentsMargins(10, 10, 10, 10)
+        yield_panel_layout.setSpacing(8)
+
+        # Title row: label + badge + info icon
+        yield_header_row = QHBoxLayout()
+        yield_header_row.setSpacing(6)
+        yield_title_label = QLabel("Yield Level")
+        yield_title_label.setStyleSheet("font-size: 12px; font-weight: 700; background: transparent;")
+        self._yield_badge = QLabel("None selected")
+        self._yield_badge.setStyleSheet(
+            "font-size: 10px; color: palette(placeholderText);"
+            " background: palette(midlight); border: 1px solid rgba(128,128,128,0.25);"
+            " border-radius: 5px; padding: 1px 6px;"
+        )
         info_label = QLabel("ℹ️")
         info_label.setToolTip(combined_tooltip)
         info_label.setStyleSheet("QLabel { color: #4a82cc; font-size: 14px; margin-left: 5px; background: transparent; }")
         info_label.setFixedSize(20, 20)
         info_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         info_label.setCursor(Qt.CursorShape.WhatsThisCursor)
+        yield_header_row.addWidget(yield_title_label)
+        yield_header_row.addWidget(self._yield_badge)
+        yield_header_row.addWidget(info_label)
+        yield_header_row.addStretch()
+        yield_panel_layout.addLayout(yield_header_row)
 
-        yield_title_layout.addWidget(yield_title_label)
-        yield_title_layout.addWidget(info_label)
-        yield_title_layout.addStretch()
-
-        yield_group.setTitle("")
-        yield_layout.addLayout(yield_title_layout)
-
-        separator = QFrame()
-        separator.setFrameShape(QFrame.Shape.HLine)
-        separator.setFrameShadow(QFrame.Shadow.Sunken)
-        yield_layout.addWidget(separator)
-
-        self.yield_button_group = QButtonGroup(self)
-        self.yield_button_group.setExclusive(True)
+        # Segmented control
+        yield_segment = QWidget()
+        yield_segment.setObjectName("yield_segment")
+        yield_segment_layout = QHBoxLayout(yield_segment)
+        yield_segment_layout.setContentsMargins(0, 0, 0, 0)
+        yield_segment_layout.setSpacing(0)
+        yield_segment.setFixedHeight(44)
 
         self.yield_radio_buttons = {}
-        yield_options = [
-            "High Yield",
-            "Medium Yield",
-            "Low Yield",
-            "Beyond Medical Student Level"
-        ]
-
-        for yield_option in yield_options:
-            radio_button = QRadioButton(yield_option)
-            self.yield_radio_buttons[yield_option] = radio_button
-            self.yield_button_group.addButton(radio_button)
-            yield_layout.addWidget(radio_button)
-            radio_button.clicked.connect(lambda checked, opt=yield_option: self.handle_yield_click(opt))
-
+        self._yield_btn_colors = {}
         self._last_checked_yield = None
 
-        if NotionPageSelector.last_yield_selection:
-            if NotionPageSelector.last_yield_selection in self.yield_radio_buttons:
-                self.yield_radio_buttons[NotionPageSelector.last_yield_selection].setChecked(True)
-                self._last_checked_yield = NotionPageSelector.last_yield_selection
+        for i, (full_name, short_name, color) in enumerate(_YIELD_DEFS):
+            btn = QPushButton(short_name)
+            btn.setFixedHeight(44)
+            is_last = (i == len(_YIELD_DEFS) - 1)
+            sep_r = "" if is_last else "border-right: 1px solid rgba(128,128,128,0.25);"
+            inactive = (
+                "QPushButton {"
+                "  background: transparent; border: none; border-radius: 0px;"
+                f"  {sep_r}"
+                "  color: palette(placeholderText);"
+                "  font-size: 11px; font-weight: 600; letter-spacing: 0.2px;"
+                "}"
+                "QPushButton:hover { background: rgba(74,130,204,0.08); }"
+            )
+            r, g, b = int(color[1:3], 16), int(color[3:5], 16), int(color[5:7], 16)
+            sep_r_active = "" if is_last else f"border-right: 1px solid rgba({r},{g},{b},0.6);"
+            active = (
+                "QPushButton {"
+                f"  background: {color}; border: none; border-radius: 0px;"
+                f"  {sep_r_active}"
+                "  color: white;"
+                "  font-size: 11px; font-weight: 600; letter-spacing: 0.2px;"
+                "}"
+            )
+            btn.setStyleSheet(inactive)
+            btn._inactive_style = inactive
+            btn._active_style = active
+            btn._yield_color = color
+            btn._yield_rgb = (r, g, b)
+            self.yield_radio_buttons[full_name] = btn
+            self._yield_btn_colors[full_name] = color
+            btn.clicked.connect(lambda _, opt=full_name: self.handle_yield_click(opt))
+            yield_segment_layout.addWidget(btn)
 
-        yield_group.setLayout(yield_layout)
+        yield_panel_layout.addWidget(yield_segment)
+
+        # Restore previous yield selection if any
+        if NotionPageSelector.last_yield_selection in self.yield_radio_buttons:
+            self._last_checked_yield = NotionPageSelector.last_yield_selection
+            _btn = self.yield_radio_buttons[NotionPageSelector.last_yield_selection]
+            _btn.setStyleSheet(_btn._active_style)
+            _r, _g, _b = _btn._yield_rgb
+            _short = {"High Yield": "High Yield", "Medium Yield": "Medium Yield",
+                      "Low Yield": "Low Yield", "Beyond Medical Student Level": "Beyond MS"}
+            self._yield_badge.setText(_short.get(NotionPageSelector.last_yield_selection, ""))
+            self._yield_badge.setStyleSheet(
+                f"font-size: 10px; color: {_btn._yield_color}; font-weight: 600;"
+                f" background: rgba({_r},{_g},{_b},0.12);"
+                f" border: 1px solid rgba({_r},{_g},{_b},0.30);"
+                " border-radius: 5px; padding: 1px 6px;"
+            )
 
         # ── Paediatrics / Specialty Tags ────────────────────────────────────
-        paeds_group = QGroupBox("Specialty Tags")
-        paeds_layout = QVBoxLayout()
-        paeds_layout.setSpacing(2)
-        paeds_layout.setContentsMargins(6, 4, 6, 6)
+        paeds_panel = QFrame()
+        paeds_panel.setObjectName("card_panel")
+        paeds_panel.setFrameShape(QFrame.Shape.NoFrame)
+        paeds_layout = QVBoxLayout(paeds_panel)
+        paeds_layout.setContentsMargins(10, 10, 10, 10)
+        paeds_layout.setSpacing(6)
 
-        paeds_title_layout = QHBoxLayout()
-        paeds_title_layout.setContentsMargins(0, 0, 0, 0)
-        paeds_title_layout.setSpacing(0)
         paeds_title = QLabel("Specialty Tags")
-        paeds_title.setStyleSheet("font-weight: 700; font-size: 13px; background: transparent;")
-        paeds_title_layout.addWidget(paeds_title)
-        paeds_title_layout.addStretch()
+        paeds_title.setStyleSheet("font-size: 12px; font-weight: 700; background: transparent;")
+        paeds_layout.addWidget(paeds_title)
 
-        paeds_group.setTitle("")
-        paeds_layout.addLayout(paeds_title_layout)
-
-        paeds_separator = QFrame()
-        paeds_separator.setFrameShape(QFrame.Shape.HLine)
-        paeds_separator.setFrameShadow(QFrame.Shadow.Sunken)
-        paeds_layout.addWidget(paeds_separator)
-
-        paeds_layout.addSpacing(6)
-
-        paeds_question = QLabel("Is this a card on paediatrics?")
+        paeds_question = QLabel("Is this a paediatrics card?")
+        paeds_question.setStyleSheet("font-size: 11px; color: palette(placeholderText); background: transparent;")
         paeds_question.setWordWrap(True)
         paeds_layout.addWidget(paeds_question)
 
-        self.paeds_checkbox = QCheckBox("Yes")
+        self.paeds_checkbox = QCheckBox("Paediatrics")
         paeds_layout.addWidget(self.paeds_checkbox)
         paeds_layout.addStretch()
 
-        paeds_group.setLayout(paeds_layout)
-
         # Yield + Paediatrics side by side
-        from aqt.qt import QSizePolicy
         yield_paeds_widget = QWidget()
         yield_paeds_layout = QHBoxLayout(yield_paeds_widget)
         yield_paeds_layout.setContentsMargins(0, 0, 0, 0)
-        yield_paeds_layout.addWidget(yield_group, stretch=2)
-        yield_paeds_layout.addWidget(paeds_group, stretch=1)
+        yield_paeds_layout.setSpacing(10)
+        yield_paeds_layout.addWidget(yield_panel, stretch=2)
+        yield_paeds_layout.addWidget(paeds_panel, stretch=1)
         yield_paeds_widget.setSizePolicy(
             QSizePolicy.Policy.Expanding,
             QSizePolicy.Policy.Fixed
@@ -672,6 +762,17 @@ class NotionPageSelector(QDialog):
 
     # ── Database chip helpers ─────────────────────────────────────────────────
 
+    def _update_selected_count(self):
+        """Refresh the 'X selected' label in the results section header."""
+        try:
+            n = sum(1 for r in self._result_rows if r['checkbox'].isChecked())
+            if n == 0:
+                self._results_count_label.setText("")
+            else:
+                self._results_count_label.setText(f"{n} selected")
+        except Exception:
+            pass
+
     def _get_active_db_names(self) -> list:
         """Return list of database names whose filter chip is currently active."""
         return [db for db, btn in self._db_chips.items() if btn.isChecked()]
@@ -749,22 +850,41 @@ class NotionPageSelector(QDialog):
 
     def _make_result_row(self, display_text: str, page: dict,
                          score: float = None,
-                         show_count: bool = True) -> tuple:
+                         show_count: bool = True,
+                         subtitle: str = None) -> tuple:
         """
         Build a single result row widget.
 
-        Layout: [db indicator] [checkbox (stretch)] [subtag chip (hidden until checked)]
-                [card count pill] [confidence dots]
+        Layout: [3px accent bar] [db indicator] [checkbox indicator]
+                [text block: title / subtitle] [subtag chip] [card count pill] [dots]
 
-        Returns (row_widget, checkbox, subtag_combo_or_None).
+        Returns (outer_widget, checkbox, subtag_combo_or_None).
         The subtag_combo is None for databases that have no subtag options
         (Rotation, Textbooks, Guidelines) and for ℹ️ general pages.
         """
         db_name = page.get('_database_name', '')
 
+        # ── Outer wrapper — holds accent bar + inner row ───────────────────
+        outer = QWidget()
+        # Fixed vertical policy prevents the scroll area from expanding rows
+        # to fill unused viewport height.
+        outer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        outer_layout = QHBoxLayout(outer)
+        outer_layout.setContentsMargins(0, 0, 0, 0)
+        outer_layout.setSpacing(0)
+
+        accent_bar = QFrame()
+        accent_bar.setFixedWidth(3)
+        accent_bar.setFrameShape(QFrame.Shape.NoFrame)
+        accent_bar.setStyleSheet("background: transparent;")
+        outer_layout.addWidget(accent_bar)
+
         row = QWidget()
+        row.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        outer_layout.addWidget(row, stretch=1)
+
         row_layout = QHBoxLayout(row)
-        row_layout.setContentsMargins(0, 0, 4, 0)
+        row_layout.setContentsMargins(4, 4, 4, 4)
         row_layout.setSpacing(6)
 
         # ── Database indicator ─────────────────────────────────────────────
@@ -812,14 +932,45 @@ class NotionPageSelector(QDialog):
 
             row_layout.addWidget(badge, stretch=0)
 
-        # ── Checkbox ───────────────────────────────────────────────────────
-        cb = QCheckBox(display_text)
-        # Allow the checkbox to be compressed below its text's natural width so
-        # fixed-width widgets to its right (subtag chip, count, dots) are never
-        # pushed off-screen by a long title.
-        cb.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
-        cb.setMinimumWidth(60)
-        row_layout.addWidget(cb, stretch=1)
+        # ── Checkbox indicator (no text — text lives in the block below) ───
+        cb = QCheckBox()
+        cb.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Preferred)
+        row_layout.addWidget(cb, stretch=0)
+
+        # ── Text block: title on top, subtitle below ───────────────────────
+        text_block = QWidget()
+        text_block.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        text_block.setMinimumWidth(60)
+        text_block_layout = QVBoxLayout(text_block)
+        text_block_layout.setContentsMargins(0, 0, 0, 0)
+        text_block_layout.setSpacing(1)
+        text_block.setStyleSheet("background: transparent;")
+
+        # QLabel is a plain-text widget — it does NOT interpret && as a literal
+        # ampersand (that escaping is only for accelerator-capable widgets like
+        # QCheckBox / QPushButton).  Strip the double-ampersand here so the
+        # label renders a clean single &.
+        title_lbl = QLabel(display_text.replace('&&', '&'))
+        title_lbl.setStyleSheet(
+            "font-size: 13px; font-weight: 500; background: transparent;"
+        )
+        title_lbl.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        title_lbl.setMinimumWidth(40)
+        text_block_layout.addWidget(title_lbl)
+
+        if subtitle:
+            sub_lbl = QLabel(subtitle.replace('&&', '&'))
+            sub_lbl.setStyleSheet(
+                "font-size: 11px; color: palette(placeholderText); background: transparent;"
+            )
+            sub_lbl.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+            text_block_layout.addWidget(sub_lbl)
+
+        row_layout.addWidget(text_block, stretch=1)
+
+        # Make clicking anywhere on the row toggle the checkbox
+        def _row_press(event, _cb=cb): _cb.toggle()
+        row.mousePressEvent = _row_press
 
         # ── Subtag chip (inline, shown when checkbox is checked) ───────────
         # Applies to Subjects/Pharmacology 🩺/💊 pages and all eTG pages.
@@ -858,11 +1009,13 @@ class NotionPageSelector(QDialog):
             count_label.setToolTip("Number of notes in your collection tagged with this page")
             if card_count == 0:
                 count_label.setStyleSheet(
-                    "color: rgba(128,128,128,0.6); font-size: 11px; padding: 1px 6px;"
+                    "color: rgba(128,128,128,0.55); font-size: 11px;"
+                    " background: transparent; padding: 1px 7px;"
                 )
             else:
                 count_label.setStyleSheet(
-                    "color: #58a6ff; font-size: 11px; font-weight: 600; padding: 1px 6px;"
+                    "color: #4a82cc; font-size: 11px; font-weight: 600;"
+                    " background: rgba(74,130,204,0.12); border-radius: 8px; padding: 1px 7px;"
                 )
             row_layout.addWidget(count_label, stretch=0)
 
@@ -876,7 +1029,21 @@ class NotionPageSelector(QDialog):
             )
             row_layout.addWidget(dots_label, stretch=0)
 
-        return row, cb, subtag_combo
+        # ── Accent bar + row background — update on checkbox state change ──
+        def _on_state_changed(state, _acc=accent_bar, _row=row, _tb=text_block):
+            if state == 2:
+                _acc.setStyleSheet("background: #4a82cc;")
+                _row.setStyleSheet("background: rgba(74,130,204,0.07);")
+                _tb.setStyleSheet("background: transparent;")
+            else:
+                _acc.setStyleSheet("background: transparent;")
+                _row.setStyleSheet("")
+                _tb.setStyleSheet("background: transparent;")
+            self._update_selected_count()
+
+        cb.stateChanged.connect(_on_state_changed)
+
+        return outer, cb, subtag_combo
 
     # ── Keyboard navigation ───────────────────────────────────────────────────
 
@@ -1045,13 +1212,17 @@ class NotionPageSelector(QDialog):
                 suffix = (page['properties']
                           .get('Search Suffix', {})
                           .get('formula', {}).get('string', ''))
-                # Prefix emoji is shown in the badge, not the checkbox text
-                display_text = _fix_amp_display(f"{title} {suffix}".strip())
+                _sub_raw = suffix.lstrip('*').strip()
+                _subtitle = (
+                    _fix_amp_display(_sub_raw.replace(' (', ' · ').rstrip(')'))
+                    if _sub_raw else None
+                )
             except Exception:
-                display_text = title
+                _subtitle = None
 
             row, cb, subtag_combo = self._make_result_row(
-                display_text, page, score=score, show_count=True
+                _fix_amp_display(title), page, score=score, show_count=True,
+                subtitle=_subtitle
             )
             self.checkbox_layout.addWidget(row)
             self._result_rows.append({
@@ -1094,31 +1265,55 @@ class NotionPageSelector(QDialog):
     # ── Yield handlers ────────────────────────────────────────────────────────
 
     def handle_yield_click(self, yield_option):
-        """Handle yield radio button clicks — allow deselection of selected button."""
-        radio_button = self.yield_radio_buttons[yield_option]
+        """Handle yield segment button clicks — allow deselection of selected button."""
+        btn = self.yield_radio_buttons[yield_option]
+        _short = {
+            "High Yield": "High Yield",
+            "Medium Yield": "Medium Yield",
+            "Low Yield": "Low Yield",
+            "Beyond Medical Student Level": "Beyond Medical School",
+        }
 
-        if radio_button.isChecked() and self._last_checked_yield == yield_option:
-            self.yield_button_group.setExclusive(False)
-            radio_button.setChecked(False)
-            self.yield_button_group.setExclusive(True)
+        if self._last_checked_yield == yield_option:
+            # Deselect current
+            btn.setStyleSheet(btn._inactive_style)
             self._last_checked_yield = None
             NotionPageSelector.last_yield_selection = ""
+            self._yield_badge.setText("None selected")
+            self._yield_badge.setStyleSheet(
+                "font-size: 10px; color: palette(placeholderText);"
+                " background: palette(midlight); border: 1px solid rgba(128,128,128,0.25);"
+                " border-radius: 5px; padding: 1px 6px;"
+            )
         else:
+            # Deselect previous
+            if self._last_checked_yield and self._last_checked_yield in self.yield_radio_buttons:
+                old_btn = self.yield_radio_buttons[self._last_checked_yield]
+                old_btn.setStyleSheet(old_btn._inactive_style)
+            # Select new
+            btn.setStyleSheet(btn._active_style)
             self._last_checked_yield = yield_option
             NotionPageSelector.last_yield_selection = yield_option
+            r, g, b = btn._yield_rgb
+            self._yield_badge.setText(_short.get(yield_option, yield_option))
+            self._yield_badge.setStyleSheet(
+                f"font-size: 10px; color: {btn._yield_color}; font-weight: 600;"
+                f" background: rgba({r},{g},{b},0.12);"
+                f" border: 1px solid rgba({r},{g},{b},0.30);"
+                " border-radius: 5px; padding: 1px 6px;"
+            )
 
     def get_selected_yield_tags(self):
-        """Get the selected yield tags from the radio buttons."""
+        """Get the selected yield tags from the segmented control."""
         yield_tag_mapping = {
             "High Yield": "#Malleus_CM::#Yield::High",
             "Medium Yield": "#Malleus_CM::#Yield::Medium",
             "Low Yield": "#Malleus_CM::#Yield::Low",
             "Beyond Medical Student Level": "#Malleus_CM::#Yield::Beyond_medical_student_level"
         }
-        for yield_option, radio_button in self.yield_radio_buttons.items():
-            if radio_button.isChecked():
-                tag = yield_tag_mapping.get(yield_option)
-                return [tag] if tag else []
+        if self._last_checked_yield:
+            tag = yield_tag_mapping.get(self._last_checked_yield)
+            return [tag] if tag else []
         return []
 
     def get_existing_yield_tags(self, tags):
@@ -1134,9 +1329,8 @@ class NotionPageSelector(QDialog):
             "Low Yield": "tag:#Malleus_CM::#Yield::Low",
             "Beyond Medical Student Level": "tag:#Malleus_CM::#Yield::Beyond_medical_student_level"
         }
-        for yield_option, radio_button in self.yield_radio_buttons.items():
-            if radio_button.isChecked():
-                return yield_search_mapping.get(yield_option, "")
+        if self._last_checked_yield:
+            return yield_search_mapping.get(self._last_checked_yield, "")
         return ""
 
     def get_paediatrics_tag(self):
@@ -1234,18 +1428,35 @@ class NotionPageSelector(QDialog):
             db_name = entry.get('database_name', '')
             # Stamp _database_name so the badge and subtag combo render correctly
             page['_database_name'] = db_name
-            display = entry.get('display_text', 'Unknown')
 
-            # Strip any Search Prefix emoji that may have been stored in older
-            # format (before the badge split).  The badge now shows the prefix.
+            # Re-derive clean title from page properties (same logic as search path)
+            if db_name == "Textbooks":
+                title = (page.get('properties', {}).get('Search Term', {})
+                         .get('formula', {}).get('string', '') or 'Untitled')
+            else:
+                title_list = page.get('properties', {}).get('Name', {}).get('title', [])
+                title = title_list[0]['text']['content'] if title_list else 'Untitled'
+
+            # Strip Search Prefix emoji for Subjects / Pharmacology (badge shows it)
             if db_name in ("Subjects", "Pharmacology"):
                 stored_prefix = (page.get('properties', {})
                                  .get('Search Prefix', {})
                                  .get('formula', {}).get('string', ''))
-                if stored_prefix and display.startswith(stored_prefix):
-                    display = display[len(stored_prefix):].lstrip()
+                if stored_prefix and title.startswith(stored_prefix):
+                    title = title[len(stored_prefix):].lstrip()
 
-            row, cb, subtag_combo = self._make_result_row(display, page, show_count=False)
+            # Build subtitle from Search Suffix — same transform as search results
+            suffix = (page.get('properties', {}).get('Search Suffix', {})
+                      .get('formula', {}).get('string', ''))
+            _sub_raw = suffix.lstrip('*').strip()
+            _subtitle = (
+                _fix_amp_display(_sub_raw.replace(' (', ' · ').rstrip(')'))
+                if _sub_raw else None
+            )
+
+            row, cb, subtag_combo = self._make_result_row(
+                _fix_amp_display(title), page, show_count=False, subtitle=_subtitle
+            )
             self.checkbox_layout.addWidget(row)
             self._result_rows.append({
                 'page': page,
@@ -1295,6 +1506,8 @@ class NotionPageSelector(QDialog):
             widget = self.checkbox_layout.itemAt(i).widget()
             if widget:
                 widget.setParent(None)
+        if hasattr(self, '_results_count_label'):
+            self._results_count_label.setText("")
 
     def clear_search_results(self):
         """Clear search results and show recent tags."""
@@ -1372,10 +1585,15 @@ class NotionPageSelector(QDialog):
                                  .get('formula', {}).get('string', ''))
 
                 # Prefix emoji (🩺 💊 ℹ️) lives in the badge, not the checkbox text
-                display_text = _fix_amp_display(f"{title} {search_suffix}".strip())
+                _title_text = _fix_amp_display(title)
+                _sub_raw = search_suffix.lstrip('*').strip()
+                _subtitle = (
+                    _fix_amp_display(_sub_raw.replace(' (', ' · ').rstrip(')'))
+                    if _sub_raw else None
+                )
 
                 row, cb, subtag_combo = self._make_result_row(
-                    display_text, page, show_count=show_count
+                    _title_text, page, show_count=show_count, subtitle=_subtitle
                 )
                 self.checkbox_layout.addWidget(row)
                 self._result_rows.append({

@@ -259,11 +259,25 @@ QRadioButton::indicator:checked:hover {{
 
 /* ── Scroll Areas ────────────────────────────────────── */
 QScrollArea {{
-    border: 1.5px solid {C['border']};
-    border-radius: 8px;
+    border: 1px solid rgba(128, 128, 128, 0.22);
+    border-radius: 9px;
 }}
 QScrollArea > QWidget > QWidget {{
     background-color: transparent;
+}}
+
+/* ── Yield segment container ─────────────────────────── */
+QWidget#yield_segment {{
+    border: 1px solid rgba(128, 128, 128, 0.30);
+    border-radius: 8px;
+    background-color: rgba(128, 128, 128, 0.12);
+}}
+
+/* ── Card-style panels (yield, specialty) ────────────── */
+QFrame#card_panel {{
+    border: 1px solid rgba(128, 128, 128, 0.22);
+    border-radius: 9px;
+    background-color: palette(base);
 }}
 
 QScrollBar:vertical {{
@@ -306,6 +320,28 @@ QLabel {{
 QLabel#tag_missing {{
     color: #d46060;
     font-size: 12px;
+}}
+
+/* ── Menus ───────────────────────────────────────────── */
+QMenu {{
+    background-color: palette(base);
+    border: 1.5px solid {C['border_medium']};
+    border-radius: 7px;
+    padding: 4px;
+    color: palette(text);
+}}
+QMenu::item {{
+    padding: 6px 14px;
+    border-radius: 4px;
+}}
+QMenu::item:selected {{
+    background-color: rgba(74, 130, 204, 0.18);
+    color: palette(text);
+}}
+QMenu::separator {{
+    height: 1px;
+    background: {C['border']};
+    margin: 3px 8px;
 }}
 
 /* ── Separators ──────────────────────────────────────── */
