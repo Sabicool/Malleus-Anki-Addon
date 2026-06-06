@@ -21,7 +21,7 @@ except ImportError:
 addon_dir = os.path.dirname(os.path.realpath(__file__))
 
 # Import submodules
-from .config import load_config, DATABASES
+from .config import load_config, DATABASES, GENERATED_DATABASES
 from .notion_cache import NotionCache
 from .ui.page_selector import NotionPageSelector
 from .ui.randomization_dialog import show_randomization_dialog, setup_editor_buttons
@@ -271,12 +271,19 @@ def init_notion_cache():
 
                 print(f"Checking {name} cache status...")
                 if notion_cache.is_cache_expired(db_id):
+                    # Both ordinary and generated DBs download their freshly-built
+                    # cache from GitHub (the daily CI build commits the generated
+                    # seed too) — cheap, no slow runtime regenerate.
                     print(f"{name} cache is expired, attempting GitHub download...")
                     if notion_cache.download_cache_from_github(db_id):
                         print(f"Successfully updated {name} cache from GitHub")
                         continue
+                    # Fallback: rebuild from Notion (full regenerate for generated
+                    # DBs so we never merge raw pages over the generated cache).
                     print(f"GitHub download failed for {name}, falling back to Notion update...")
-                    notion_cache.update_cache_async(db_id, force=True)
+                    notion_cache.update_cache_async(
+                        db_id, force=True, full=(db_id in GENERATED_DATABASES)
+                    )
                 else:
                     print(f"{name} cache is up to date")
 

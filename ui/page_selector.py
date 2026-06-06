@@ -50,6 +50,35 @@ _DB_EMOJI = {
     "Guidelines": "🖊️",
 }
 
+# ── Related-subject tree gutter ───────────────────────────────────────────────
+
+class _TreeGutter(QWidget):
+    """A thin left gutter that paints the tree line for a related-subject row:
+    a vertical stroke plus a horizontal branch into the row.  The last child's
+    vertical stroke stops at the branch (a true └); others run full height so
+    consecutive rows join into one continuous line."""
+
+    _COLOR = (74, 130, 204, 150)
+    _X = 5          # vertical-stroke x (aligns under the parent's prefix badge)
+
+    def __init__(self, is_last: bool, parent=None):
+        super().__init__(parent)
+        self._is_last = is_last
+        self.setFixedWidth(20)
+        self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)
+
+    def paintEvent(self, event):
+        from aqt.qt import QPainter, QColor, QPen
+        p = QPainter(self)
+        pen = QPen(QColor(*self._COLOR))
+        pen.setWidth(2)
+        p.setPen(pen)
+        h, w, cy = self.height(), self.width(), self.height() // 2
+        p.drawLine(self._X, 0, self._X, cy if self._is_last else h)   # vertical
+        p.drawLine(self._X, cy, w, cy)                                 # branch
+        p.end()
+
+
 # ── Inline subtag chip ────────────────────────────────────────────────────────
 
 class _SubtagChip(QPushButton):
@@ -219,8 +248,26 @@ def _is_general_page(page: dict) -> bool:
     return 'ℹ️' in prefix
 
 
+def _relation_ids(page: dict, property_name: str) -> list:
+    """Return the list of related page IDs for a relation property (may be empty)."""
+    return [r.get('id', '') for r in
+            page.get('properties', {}).get(property_name, {}).get('relation', [])]
+
+
+def _page_needs_subtag(page: dict) -> bool:
+    """
+    True when a result row must have a subtag chosen before tags can be applied:
+    non-general Subjects/Pharmacology pages.  (Guidelines rows never need a
+    subtag — their linked Subjects appear as separate rows that carry their own
+    subtag requirement.)
+    """
+    db = page.get('_database_name', '')
+    return db in ("Subjects", "Pharmacology") and not _is_general_page(page)
+
+
 from ..config import (DATABASE_PROPERTIES, get_database_id, get_database_name,
-                       SUBJECT_DATABASE_ID, PHARMACOLOGY_DATABASE_ID)
+                       SUBJECT_DATABASE_ID, PHARMACOLOGY_DATABASE_ID,
+                       ROTATION_DATABASE_ID, SUBJECT_DATABASE_ID_ORIGINAL)
 from ..utils import open_browser_with_search
 from ..cache_updater import perform_cache_update
 from ..extra_sync import (
@@ -649,10 +696,17 @@ class NotionPageSelector(QDialog):
 
         update_database_button = QPushButton("↻  Update Database")
         update_database_button.setObjectName("secondary")
-        update_database_button.clicked.connect(
-            lambda: (perform_cache_update(self.notion_cache, mw), invalidate_index(),
-                     self._update_cache_age_label())
-        )
+
+        def _on_update_database():
+            full = bool(
+                QApplication.queryKeyboardModifiers()
+                & Qt.KeyboardModifier.ShiftModifier
+            )
+            perform_cache_update(self.notion_cache, mw, full=full)
+            invalidate_index()
+            self._update_cache_age_label()
+
+        update_database_button.clicked.connect(_on_update_database)
         self._update_database_button = update_database_button
         self._update_cache_age_label()
 
@@ -979,6 +1033,8 @@ class NotionPageSelector(QDialog):
         has_subtag_options = db_name in ("Subjects", "Pharmacology", "eTG")
         is_general = _is_general_page(page)
         skip_combo = (db_name in ("Subjects", "Pharmacology") and is_general)
+        # (Guidelines pages get NO subtag combo — their linked Subjects pages are
+        # surfaced as separate checkable rows, each with its own subtag combo.)
 
         if has_subtag_options and not skip_combo:
             props = DATABASE_PROPERTIES.get(db_name, [""])
@@ -1491,11 +1547,13 @@ class NotionPageSelector(QDialog):
             warning = " — consider updating" if oldest_days > 7 else ""
             self._update_database_button.setToolTip(
                 f"Cache: {age_text}{warning}\n"
-                "Download the latest Malleus database cache"
+                "Download the latest Malleus database cache\n"
+                "Shift+click: full rebuild directly from Notion (slower)"
             )
         except Exception:
             self._update_database_button.setToolTip(
-                "Download the latest Malleus database cache"
+                "Download the latest Malleus database cache\n"
+                "Shift+click: full rebuild directly from Notion (slower)"
             )
 
     # ── Search ────────────────────────────────────────────────────────────────
@@ -1602,6 +1660,12 @@ class NotionPageSelector(QDialog):
                     'subtag_combo': subtag_combo,
                     'row_widget': row,
                 })
+                # Pages linked to Subjects pages: offer each linked subject as its
+                # own checkable row, revealed when this row is checked.
+                if db_name == "Pharmacology" and _relation_ids(page, 'Related Subject'):
+                    self._append_related_subject_rows(page, cb, show_count, 'Related Subject')
+                elif db_name == "Guidelines" and _relation_ids(page, 'Subjects'):
+                    self._append_related_subject_rows(page, cb, show_count, 'Subjects')
             except Exception as e:
                 showInfo(f"Error processing page: {e}")
 
@@ -1619,14 +1683,197 @@ class NotionPageSelector(QDialog):
 
     # ── Tag extraction helpers ────────────────────────────────────────────────
 
+    def _load_id_lookup(self, database_id: str) -> dict:
+        """Load a database's cache and index it by page id (dash + dash-less)."""
+        pages, _ = self.notion_cache.load_from_cache(database_id)
+        lookup = {}
+        for p in pages:
+            lookup[p['id']] = p
+            lookup[p['id'].replace('-', '')] = p
+        return lookup
+
+    # ── Related-subject rows (Pharmacology → Subjects) ────────────────────────
+
+    @staticmethod
+    def _page_title(page: dict) -> str:
+        return "".join(t.get('plain_text', '')
+                       for t in page.get('properties', {}).get('Name', {}).get('title', []))
+
+    def _active_subjects_index(self):
+        """(by_id, by_name) index of the ACTIVE Subjects cache (the one the add-on
+        uses — generated for the testing copy, formula-based for the original)."""
+        if getattr(self, '_rs_active_idx', None) is None:
+            by_id, by_name = {}, {}
+            pages, _ = self.notion_cache.load_from_cache(SUBJECT_DATABASE_ID)
+            for p in pages:
+                by_id[p['id']] = p
+                by_id[p['id'].replace('-', '')] = p
+                by_name.setdefault(self._page_title(p), p)
+            self._rs_active_idx = (by_id, by_name)
+        return self._rs_active_idx
+
+    def _original_subjects_byid(self):
+        """id→page index of the ORIGINAL Subjects cache, used only to bridge the
+        testing pharma copy's `Related Subject` ids (which point at original
+        subject ids) to a name we can find in the active cache.  Empty when the
+        active cache already IS the original (release)."""
+        if getattr(self, '_rs_orig_idx', None) is None:
+            idx = {}
+            if SUBJECT_DATABASE_ID_ORIGINAL != SUBJECT_DATABASE_ID:
+                try:
+                    pages, _ = self.notion_cache.load_from_cache(SUBJECT_DATABASE_ID_ORIGINAL)
+                    for p in pages:
+                        idx[p['id']] = p
+                        idx[p['id'].replace('-', '')] = p
+                except Exception as e:
+                    print(f"[RelatedSubject] could not load original subjects cache: {e}")
+            self._rs_orig_idx = idx
+        return self._rs_orig_idx
+
+    def _resolve_related_subjects(self, page: dict, relation_prop: str) -> list:
+        """Resolve a page's subject-relation ids (Pharmacology `Related Subject`
+        or Guidelines `Subjects`) to Subjects page objects, preferring the active
+        (generated) cache — including a name bridge through the original cache so
+        the testing copy resolves to the clean generated page (with proper
+        #Question_Banks eMedici tags)."""
+        ids = _relation_ids(page, relation_prop)
+        if not ids:
+            return []
+        active_by_id, active_by_name = self._active_subjects_index()
+        orig_by_id = self._original_subjects_byid()
+        out, seen = [], set()
+        for rid in ids:
+            sp = active_by_id.get(rid) or active_by_id.get(rid.replace('-', ''))
+            if sp is None:
+                op = orig_by_id.get(rid) or orig_by_id.get(rid.replace('-', ''))
+                if op is not None:
+                    sp = active_by_name.get(self._page_title(op)) or op
+            if sp is not None and id(sp) not in seen:
+                seen.add(id(sp))
+                out.append(sp)
+        return out
+
+    def _append_related_subject_rows(self, parent_page: dict, parent_cb,
+                                     show_count: bool, relation_prop: str):
+        """For a Pharmacology (`Related Subject`) or Guidelines (`Subjects`)
+        result row, render each linked Subjects page as its own indented,
+        independently-checkable row (reusing the Subjects row UI), connected by a
+        left tree line and revealed only while the parent row is checked."""
+        subjects = self._resolve_related_subjects(parent_page, relation_prop)
+        if not subjects:
+            return
+
+        # Group holds the child rows stacked tightly; each row carries its own
+        # tree-gutter so the line is continuous and ends at a └ on the last child.
+        group = QWidget()
+        group.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        gv = QVBoxLayout(group)
+        gv.setContentsMargins(16, 0, 0, 0)       # places the rail under the parent badge
+        gv.setSpacing(0)
+
+        child_cbs = []
+        n = len(subjects)
+        for i, sp in enumerate(subjects):
+            sp = dict(sp)                       # shallow copy — don't mutate cache
+            sp['_database_name'] = 'Subjects'
+            sp['_related_subject'] = True
+
+            title_list = sp.get('properties', {}).get('Name', {}).get('title', [])
+            title = "".join(t.get('plain_text', '') for t in title_list) or "Untitled"
+            suffix = (sp['properties'].get('Search Suffix', {})
+                      .get('formula', {}).get('string', '') or '')
+            _sub_raw = suffix.lstrip('*').strip()
+            subtitle = (_fix_amp_display(_sub_raw.replace(' (', ' · ').rstrip(')'))
+                        if _sub_raw else None)
+
+            row, cb, subtag_combo = self._make_result_row(
+                _fix_amp_display(title), sp, show_count=show_count, subtitle=subtitle
+            )
+
+            row_h = QWidget()
+            row_h.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+            rh = QHBoxLayout(row_h)
+            rh.setContentsMargins(0, 0, 0, 0)
+            rh.setSpacing(0)
+            rh.addWidget(_TreeGutter(is_last=(i == n - 1)), 0)
+            rh.addWidget(row, 1)
+            gv.addWidget(row_h)
+
+            self._result_rows.append({
+                'page': sp,
+                'checkbox': cb,
+                'subtag_combo': subtag_combo,
+                'row_widget': row_h,
+            })
+            child_cbs.append(cb)
+
+        group.setVisible(False)                  # revealed only while parent is checked
+        self.checkbox_layout.addWidget(group)
+
+        def _toggle_related(state, _g=group, _cbs=child_cbs):
+            visible = (state == 2)
+            _g.setVisible(visible)
+            if not visible:
+                for rcb in _cbs:        # collapsing also clears the child selections
+                    rcb.setChecked(False)
+
+        parent_cb.stateChanged.connect(_toggle_related)
+
+    def _get_guidelines_tags_for_page(self, page, rotation_lookup) -> list:
+        """
+        Tags for a single Guidelines page:
+
+          1. its own #Guidelines:: hierarchy tag(s) — precomputed into the cache
+             `Tag` from the `Parent item` graph at build time.
+          2. one rotation tag per linked `Rotation` page (that page's `Tag`).
+
+        Linked Subjects pages are NOT handled here — they are offered as separate
+        checkable rows (see _append_related_subject_rows) so the user can pick
+        each subject's subtag and opt in/out individually.
+        """
+        tags = []
+
+        # 1. own hierarchy tag(s)
+        tag_prop = page['properties'].get('Tag')
+        if tag_prop and tag_prop.get('type') == 'formula':
+            s = tag_prop['formula'].get('string', '').strip()
+            if s:
+                tags.extend(s.split())
+
+        # 2. rotation cross-references
+        for rid in _relation_ids(page, 'Rotation'):
+            rp = rotation_lookup.get(rid) or rotation_lookup.get(rid.replace('-', ''))
+            if not rp:
+                continue
+            rt = rp['properties'].get('Tag')
+            if rt and rt.get('type') == 'formula':
+                s = rt['formula'].get('string', '').strip()
+                if s:
+                    tags.extend(s.split())
+
+        # de-dupe, preserve order
+        out, seen = [], set()
+        for t in tags:
+            if t not in seen:
+                seen.add(t)
+                out.append(t)
+        return out
+
     def _get_tags_for_page(self, page: dict, db_name: str, property_name: str) -> list:
         """
         Extract Anki tag strings for one page using the given property name.
 
         For eTG pages the cross-database Subject/Pharmacology lookup is
-        performed here.  For all other databases the named formula property is
-        read, with a fallback to Main Tag (Subjects) or Tag (others).
+        performed here.  Guidelines pages additionally pull rotation/subject
+        cross-reference tags from their relations.  For all other databases the
+        named formula property is read, with a fallback to Main Tag (Subjects)
+        or Tag (others).
         """
+        if db_name == "Guidelines":
+            rotation_lookup = (self._load_id_lookup(ROTATION_DATABASE_ID)
+                               if _relation_ids(page, 'Rotation') else {})
+            return self._get_guidelines_tags_for_page(page, rotation_lookup)
+
         if db_name == "eTG":
             subjects_subtags    = {s for s in DATABASE_PROPERTIES.get("Subjects", []) if s}
             pharmacology_subtags = {s for s in DATABASE_PROPERTIES.get("Pharmacology", []) if s}
@@ -1689,15 +1936,16 @@ class NotionPageSelector(QDialog):
         if etg_rows:
             used_props = {self._get_row_property_name(r) for r in etg_rows}
             if used_props & etg_subjects_subtags:
-                subject_pages, _ = self.notion_cache.load_from_cache(SUBJECT_DATABASE_ID)
-                for p in subject_pages:
-                    subjects_lookup[p['id']] = p
-                    subjects_lookup[p['id'].replace('-', '')] = p
+                subjects_lookup = self._load_id_lookup(SUBJECT_DATABASE_ID)
             if used_props & etg_pharm_subtags:
-                pharm_pages, _ = self.notion_cache.load_from_cache(PHARMACOLOGY_DATABASE_ID)
-                for p in pharm_pages:
-                    pharmacology_lookup[p['id']] = p
-                    pharmacology_lookup[p['id'].replace('-', '')] = p
+                pharmacology_lookup = self._load_id_lookup(PHARMACOLOGY_DATABASE_ID)
+
+        # Pre-build the Rotation lookup once if any Guidelines rows are selected
+        # (linked Subjects are handled as their own selectable rows, not here).
+        guideline_rows = [r for r in selected_rows if r['page'].get('_database_name') == 'Guidelines']
+        rotation_lookup = {}
+        if guideline_rows and any(_relation_ids(r['page'], 'Rotation') for r in guideline_rows):
+            rotation_lookup = self._load_id_lookup(ROTATION_DATABASE_ID)
 
         tags = []
         for row_data in selected_rows:
@@ -1711,6 +1959,8 @@ class NotionPageSelector(QDialog):
                     etg_subjects_subtags, etg_pharm_subtags,
                     subjects_lookup, pharmacology_lookup,
                 ))
+            elif db_name == 'Guidelines':
+                tags.extend(self._get_guidelines_tags_for_page(page, rotation_lookup))
             else:
                 tags.extend(self._get_tags_for_page(page, db_name, prop))
 
@@ -1827,11 +2077,11 @@ class NotionPageSelector(QDialog):
             showInfo("Please select at least one page")
             return
 
-        # Validate that all 🩺 Subjects/Pharmacology pages have a subtag chosen
+        # Validate that pages needing a subtag (🩺 Subjects/Pharmacology, or
+        # Guidelines linked to Subjects) have one chosen
         for row_data in selected_rows:
             page    = row_data['page']
-            db_name = page.get('_database_name', '')
-            if db_name in ("Subjects", "Pharmacology") and not _is_general_page(page):
+            if _page_needs_subtag(page):
                 sc = row_data.get('subtag_combo')
                 if sc is None or not sc.currentText():
                     try:
@@ -2346,8 +2596,7 @@ class NotionPageSelector(QDialog):
         # Validate subtags
         for row_data in selected_rows:
             page    = row_data['page']
-            db_name = page.get('_database_name', '')
-            if db_name in ("Subjects", "Pharmacology") and not _is_general_page(page):
+            if _page_needs_subtag(page):
                 sc = row_data.get('subtag_combo')
                 if sc is None or not sc.currentText():
                     try:

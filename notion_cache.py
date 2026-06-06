@@ -11,7 +11,7 @@ from typing import List, Dict, Tuple
 from datetime import datetime
 from aqt import mw
 from .utils import malleus_tooltip
-from .config import NOTION_TOKEN, get_database_name
+from .config import NOTION_TOKEN, get_database_name, GENERATED_DATABASES
 
 class NotionCache:
     """Handles caching of Notion database content"""
@@ -22,6 +22,10 @@ class NotionCache:
         self.cache_dir.mkdir(exist_ok=True)
         self.cache_lock = threading.Lock()
         self._sync_thread = None
+        # Short-lived cache of fetched cross-reference DBs (Question Banks,
+        # Rotation) so a multi-database update reuses them instead of re-fetching.
+        self._crossref_cache = {}
+        self._crossref_lock = threading.Lock()
         self.headers = {
             "Authorization": f"Bearer {NOTION_TOKEN}",
             "Notion-Version": "2022-06-28",
@@ -108,7 +112,9 @@ class NotionCache:
                 json.dump(cache_data, f)
 
     def is_cache_expired(self, database_id: str) -> bool:
-        """Check if cache is expired"""
+        """Check if cache is expired (time-based, plus generator-version mismatch
+        for locally-generated databases so an add-on update that changes the tag
+        logic forces a regeneration)."""
         cache_path = self.get_cache_path(database_id)
         if not cache_path.exists():
             return True
@@ -117,13 +123,25 @@ class NotionCache:
             with cache_path.open('r', encoding='utf-8') as f:
                 cache_data = json.load(f)
 
+            if database_id in GENERATED_DATABASES:
+                from . import cache_generation
+                if cache_data.get('generator_version') != cache_generation.GENERATOR_VERSION:
+                    return True
+
             cache_timestamp = float(cache_data.get('timestamp', 0))
             return (time.time() - cache_timestamp) > self.CACHE_EXPIRY
         except Exception:
             return True
 
-    def update_cache_async(self, database_id: str, force: bool = False, callback: callable = None):
-        """Update cache asynchronously with optional callback"""
+    def update_cache_async(self, database_id: str, force: bool = False,
+                           callback: callable = None, full: bool = False):
+        """Update cache asynchronously with optional callback.
+
+        ``full=True`` forces a complete rebuild directly from Notion (Shift+click
+        on 'Update Database'): for locally-generated DBs this fetches the whole
+        graph and regenerates the tags; for ordinary DBs it re-fetches every page.
+        Without it, generated DBs are served from the committed GitHub seed (kept
+        fresh by the daily CI build) and ordinary DBs do an incremental sync."""
         database_name = get_database_name(database_id)
 
         # Check if online first
@@ -138,9 +156,20 @@ class NotionCache:
                 callback()
             return
 
+        # Locally-generated databases.  Only do the slow full fetch-from-Notion +
+        # regenerate when explicitly asked (full=True / Shift+click).  Otherwise
+        # download the freshly-built seed from GitHub — never an incremental fetch
+        # (which would re-pull raw/stripped pages and clobber the generated cache).
+        if database_id in GENERATED_DATABASES:
+            if full:
+                self._regenerate_generated_db(database_id, database_name, callback)
+            else:
+                self._github_download_thread(database_id, database_name, callback)
+            return
+
         if force:
-            # Direct update without GitHub download
-            self._update_cache_thread(database_id, database_name, callback)
+            # Direct update from Notion (incremental, or full re-fetch when full=True)
+            self._update_cache_thread(database_id, database_name, callback, full=full)
         else:
             # Download from GitHub
             def download_thread():
@@ -157,8 +186,30 @@ class NotionCache:
             self._sync_thread = threading.Thread(target=download_thread, daemon=True)
             self._sync_thread.start()
 
-    def _update_cache_thread(self, database_id: str, database_name: str, callback: callable = None):
-        """Internal method to update cache in a thread"""
+    def _github_download_thread(self, database_id: str, database_name: str,
+                                callback: callable = None):
+        """Download a single database's committed cache from GitHub in a thread."""
+        def worker():
+            try:
+                if self.download_cache_from_github(database_id):
+                    mw.taskman.run_on_main(
+                        lambda: malleus_tooltip(f"{database_name} database updated")
+                    )
+                else:
+                    print(f"Failed to download cache from GitHub for {database_name}")
+            except Exception as e:
+                print(f"Error during GitHub cache download for {database_name}: {e}")
+            finally:
+                if callback:
+                    mw.taskman.run_on_main(callback)
+
+        self._sync_thread = threading.Thread(target=worker, daemon=True)
+        self._sync_thread.start()
+
+    def _update_cache_thread(self, database_id: str, database_name: str,
+                             callback: callable = None, full: bool = False):
+        """Internal method to update cache in a thread.  ``full=True`` ignores the
+        last-sync timestamp and re-fetches every page from Notion."""
         def sync_thread():
             try:
                 # Check online status
@@ -169,6 +220,8 @@ class NotionCache:
                     return
 
                 cached_pages, last_sync_timestamp = self.load_from_cache(database_id, warn_if_expired=False)
+                if full:
+                    last_sync_timestamp = 0
                 pages = self.fetch_updated_pages(database_id, last_sync_timestamp)
                 
                 if pages:
@@ -191,6 +244,77 @@ class NotionCache:
                     mw.taskman.run_on_main(callback)
 
         self._sync_thread = threading.Thread(target=sync_thread, daemon=True)
+        self._sync_thread.start()
+
+    # ── Locally-generated databases (full fetch + regenerate) ─────────────────
+
+    def _write_generated_cache(self, database_id: str, pages: List[Dict]):
+        """Replace a generated database's cache outright (no merge) and stamp the
+        generator version."""
+        from . import cache_generation
+        cache_data = {
+            'version': self.CACHE_VERSION,
+            'generator_version': cache_generation.GENERATOR_VERSION,
+            'timestamp': time.time(),
+            'pages': pages,
+        }
+        with self.cache_lock:
+            with self.get_cache_path(database_id).open('w', encoding='utf-8') as f:
+                json.dump(cache_data, f)
+
+    def _get_crossref_pages(self, db_id: str, max_age: float = 600) -> List[Dict]:
+        """Fetch a cross-reference database (Question Banks / Rotation), reusing a
+        recent in-memory copy so it isn't re-fetched once per generated DB."""
+        from . import cache_generation
+        with self._crossref_lock:
+            entry = self._crossref_cache.get(db_id)
+            if entry and (time.time() - entry[1]) < max_age:
+                return entry[0]
+        pages = cache_generation.fetch_all_pages(db_id, NOTION_TOKEN)
+        with self._crossref_lock:
+            self._crossref_cache[db_id] = (pages, time.time())
+        return pages
+
+    def _regenerate_generated_db(self, database_id: str, database_name: str,
+                                 callback: callable = None):
+        """Fetch the full database (+ its cross-ref databases) from Notion and
+        rebuild the cache locally.  The main DB and cross-ref DBs are fetched
+        concurrently, and cross-ref DBs are cached across generated DBs.  On any
+        failure the existing cache is kept."""
+        import concurrent.futures
+        cfg = GENERATED_DATABASES[database_id]
+
+        def worker():
+            try:
+                if not self.is_online():
+                    print(f"Offline: keeping cached {database_name}")
+                    if callback:
+                        mw.taskman.run_on_main(callback)
+                    return
+                from . import cache_generation
+                with concurrent.futures.ThreadPoolExecutor(max_workers=3) as ex:
+                    main_f = ex.submit(cache_generation.fetch_all_pages, database_id, NOTION_TOKEN)
+                    qb_f = ex.submit(self._get_crossref_pages, cfg['qb']) if cfg.get('qb') else None
+                    rot_f = ex.submit(self._get_crossref_pages, cfg['rotation']) if cfg.get('rotation') else None
+                    main_pages = main_f.result()
+                    qb_pages = qb_f.result() if qb_f else None
+                    rotation_pages = rot_f.result() if rot_f else None
+                pages = cache_generation.generate_from_pages(
+                    cfg['kind'], main_pages, qb_pages, rotation_pages
+                )
+                if pages:
+                    self._write_generated_cache(database_id, pages)
+                    mw.taskman.run_on_main(
+                        lambda: malleus_tooltip(f"{database_name} database updated")
+                    )
+            except Exception as e:
+                # Offline fallback: never wipe — keep whatever is cached.
+                print(f"Error regenerating {database_name}; keeping existing cache: {e}")
+            finally:
+                if callback:
+                    mw.taskman.run_on_main(callback)
+
+        self._sync_thread = threading.Thread(target=worker, daemon=True)
         self._sync_thread.start()
 
     def _build_query_payload(
@@ -458,6 +582,8 @@ class NotionCache:
 
         success = True
         for database_id, _ in DATABASES:
+            # Generated DBs are committed to GitHub by the daily CI build too, so
+            # they download like any other (full regenerate is Shift+click only).
             if not self.download_cache_from_github(database_id):
                 success = False
 

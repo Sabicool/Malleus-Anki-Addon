@@ -4,14 +4,44 @@ Configuration management for Malleus Addon
 from aqt import mw
 
 # Hard coded environment variables
-SUBJECT_DATABASE_ID = '2674b67cbdf84a11a057a29cc24c524f'
+# Subjects database switch-point (keep in sync with update_cache.py).
+# Tags/search are generated locally (subjects_tags.py) from the relation graph for
+# whichever id is active — so the active DB's Notion formulas can be deleted.
+# _TESTING is the old duplicated copy, kept only as a fallback.
+SUBJECT_DATABASE_ID_ORIGINAL = '2674b67cbdf84a11a057a29cc24c524f'
+SUBJECT_DATABASE_ID_TESTING  = '3755964e68a480d29cc3e3ddf808344c'
+SUBJECT_DATABASE_ID = SUBJECT_DATABASE_ID_ORIGINAL   # active database (generated)
 SYNCED_EXTRA_DATABASE_ID = '2dc5964e68a480909c4ac1dc169b16fb'
 SYNCED_ADDITIONAL_RESOURCES_DATABASE_ID = '31b5964e68a48023b1c1c7b23fbdec64'
-PHARMACOLOGY_DATABASE_ID = '9ff96451736d43909d49e3b9d60971f8'
+# Pharmacology database switch-point (keep in sync with update_cache.py).
+PHARMACOLOGY_DATABASE_ID_ORIGINAL = '9ff96451736d43909d49e3b9d60971f8'
+PHARMACOLOGY_DATABASE_ID_TESTING  = '3765964e68a480b38067c6e19c08cff4'
+PHARMACOLOGY_DATABASE_ID = PHARMACOLOGY_DATABASE_ID_ORIGINAL   # active database (generated)
 ETG_DATABASE_ID = '22282971487f4f559dce199476709b03'
 ROTATION_DATABASE_ID = '69b3e7fdce1548438b26849466d7c18e'
 TEXTBOOKS_DATABASE_ID = '13d5964e68a480bfb07cf7e2f1786075'
 GUIDELINES_DATABASE_ID = '13d5964e68a48056b40de8148dd91a06'
+QUESTION_BANKS_DATABASE_ID = 'bf443eb7144c46aba3106a4b915959d7'   # eMedici etc.
+
+# Databases whose cache is generated locally (in Python) from the relation graph
+# rather than trusting Notion formulas.  For these, "update" = a FULL fetch from
+# Notion + regeneration (not an incremental fetch or GitHub download), because an
+# incremental fetch would re-pull the raw/stripped pages and clobber the cache.
+# Each entry: kind + the extra databases the generator needs.
+GENERATED_DATABASES = {
+    SUBJECT_DATABASE_ID: {
+        'kind': 'subjects',
+        'qb': QUESTION_BANKS_DATABASE_ID,
+        'rotation': ROTATION_DATABASE_ID,
+    },
+    PHARMACOLOGY_DATABASE_ID: {
+        'kind': 'pharmacology',
+        'qb': QUESTION_BANKS_DATABASE_ID,
+    },
+    GUIDELINES_DATABASE_ID: {
+        'kind': 'guidelines',
+    },
+}
 
 # List of all databases with their IDs and names
 DATABASES = [

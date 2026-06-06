@@ -193,8 +193,20 @@ class MissingPageDialog(QDialog):
         # Update database button (left-aligned, secondary style)
         update_db_btn = QPushButton("↻  Update Database")
         update_db_btn.setObjectName("secondary")
-        update_db_btn.setToolTip("Download the latest Malleus database cache")
-        update_db_btn.clicked.connect(lambda: perform_cache_update(self.notion_cache, mw))
+        update_db_btn.setToolTip(
+            "Download the latest Malleus database cache\n"
+            "Shift+click: full rebuild directly from Notion (slower)"
+        )
+
+        def _on_update_db():
+            from aqt.qt import QApplication, Qt
+            full = bool(
+                QApplication.queryKeyboardModifiers()
+                & Qt.KeyboardModifier.ShiftModifier
+            )
+            perform_cache_update(self.notion_cache, mw, full=full)
+
+        update_db_btn.clicked.connect(_on_update_db)
         btn_layout.addWidget(update_db_btn)
 
         btn_layout.addStretch()

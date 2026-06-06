@@ -16,4 +16,10 @@ recent_tags.json
 # Optional: Ignore node_modules, if relevant to the project
 node_modules/
 
+# Local virtualenv for testing
+.venv/
+
+# Hierarchy-tag test scratch artifacts
+tests/_out/
+
 test.py

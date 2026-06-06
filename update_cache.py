@@ -8,12 +8,26 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from pathlib import Path
 
+from hierarchy_tags import GUIDELINES_PREFIX_SEGMENTS
+from cache_generation import generate_from_pages
+
 NOTION_TOKEN = os.environ.get('NOTION_TOKEN')
 if not NOTION_TOKEN:
     raise ValueError("NOTION_TOKEN environment variable is required")
 
-SUBJECT_DATABASE_ID      = '2674b67cbdf84a11a057a29cc24c524f'
-PHARMACOLOGY_DATABASE_ID = '9ff96451736d43909d49e3b9d60971f8'
+# ── Subjects database: switch-point ───────────────────────────────────────
+# Tags/search are generated locally (subjects_tags.py) from the relation graph for
+# whichever id is active, so the active DB's Notion formulas can be deleted.
+# _TESTING is the old duplicated copy, kept only as a fallback.  Keep this in sync
+# with config.py.
+SUBJECT_DATABASE_ID_ORIGINAL = '2674b67cbdf84a11a057a29cc24c524f'
+SUBJECT_DATABASE_ID_TESTING  = '3755964e68a480d29cc3e3ddf808344c'
+SUBJECT_DATABASE_ID = SUBJECT_DATABASE_ID_ORIGINAL   # active database (generated)
+
+# Pharmacology database switch-point (same pattern as Subjects; sync with config.py).
+PHARMACOLOGY_DATABASE_ID_ORIGINAL = '9ff96451736d43909d49e3b9d60971f8'
+PHARMACOLOGY_DATABASE_ID_TESTING  = '3765964e68a480b38067c6e19c08cff4'
+PHARMACOLOGY_DATABASE_ID = PHARMACOLOGY_DATABASE_ID_ORIGINAL   # active database (generated)
 ETG_DATABASE_ID          = '22282971487f4f559dce199476709b03'
 ROTATION_DATABASE_ID     = '69b3e7fdce1548438b26849466d7c18e'
 TEXTBOOKS_DATABASE_ID    = '13d5964e68a480bfb07cf7e2f1786075'
@@ -34,8 +48,12 @@ USES_FOR_SEARCH = {
 # eTG has heavy rollups that make each row expensive to return — use page_size=5 so
 # Notion only computes rollups for 5 rows per request instead of 25/100.
 PAGE_SIZE_OVERRIDE = {
-    SUBJECT_DATABASE_ID:      25,
-    PHARMACOLOGY_DATABASE_ID: 25,
+    # The original Subjects/Pharmacology DBs are throttled while they still carry
+    # the heavy Notion formulas (generation fetches every page).  Once those
+    # formula properties are deleted the DBs are light — bump these to 100 (or
+    # remove the entries) for faster generation.
+    SUBJECT_DATABASE_ID_ORIGINAL: 25,
+    PHARMACOLOGY_DATABASE_ID_ORIGINAL: 25,
     ETG_DATABASE_ID:          100,
     GUIDELINES_DATABASE_ID:   25,
 }
@@ -44,6 +62,37 @@ DEFAULT_PAGE_SIZE = 100
 # No databases currently need client-side-only filtering, but this set is kept
 # for future use if a database's formula scan is too expensive even at page_size=5.
 SERVER_SIDE_FILTER_SKIP: set = set()
+
+# Databases whose hierarchy (#…::…) tags are generated locally by traversing the
+# `Parent item` graph instead of trusting the Notion `Tag` formula (which drops
+# multi-parent paths and truncates names at commas).  For these we must fetch the
+# FULL database (ancestors are not `For Search`) to build the graph, inject the
+# corrected tags into the `For Search` leaves, then save only the leaves.
+HIERARCHY_TAG_DATABASES = {
+    GUIDELINES_DATABASE_ID: GUIDELINES_PREFIX_SEGMENTS,
+}
+
+# Databases whose FULL tag/search property set is generated locally
+# (subjects_tags.generate_and_inject) from the relation graph + cross-ref DBs.
+# Keyed by the ACTIVE database id, so generation follows whichever DB config.py
+# points at.  We fetch the full database (no `For Search`/leaf filter — leaves are
+# pages with no `Sub-item`), plus the Question Banks (eMedici) and Rotation
+# databases for cross-references.
+QUESTION_BANKS_DATABASE_ID = 'bf443eb7144c46aba3106a4b915959d7'
+SUBJECTS_GENERATE = {
+    SUBJECT_DATABASE_ID: {
+        'qb_database_id':       QUESTION_BANKS_DATABASE_ID,
+        'rotation_database_id': ROTATION_DATABASE_ID,
+    },
+}
+
+# Same idea for Pharmacology (pharmacology_tags.generate_and_inject).  Needs the
+# full graph + Question Banks (eMedici).  No rotation/related-subject in the tag.
+PHARMACOLOGY_GENERATE = {
+    PHARMACOLOGY_DATABASE_ID: {
+        'qb_database_id': QUESTION_BANKS_DATABASE_ID,
+    },
+}
 
 TIMEOUT = 120  # seconds — large databases need time
 
@@ -305,9 +354,72 @@ class NotionCache:
                 else:
                     raise
 
+    def fetch_all(self, database_id: str, use_for_search: bool = False) -> list:
+        """Fetch every page of a database (handling pagination)."""
+        pages, start_cursor, has_more = [], None, True
+        while has_more:
+            data = self.fetch_pages_batch(database_id, start_cursor, use_for_search=use_for_search)
+            pages.extend(data["results"])
+            has_more = data.get("has_more", False)
+            start_cursor = data.get("next_cursor")
+        return pages
+
+    def update_subjects(self, database_id: str, name: str):
+        """Generate the Subjects cache locally from the relation graph + the
+        Question Banks (eMedici) and Rotation databases, then save the leaf pages
+        (those with no `Sub-item`).  Injects the same property names the old
+        Notion formulas produced, so the add-on is unchanged."""
+        cfg = SUBJECTS_GENERATE[database_id]
+        print(f"  [{name}] Fetching full Subjects graph...")
+        all_pages = self.fetch_all(database_id)
+        print(f"  [{name}] Fetched {len(all_pages)} pages; fetching Question Banks...")
+        qb_pages = self.fetch_all(cfg["qb_database_id"])
+        print(f"  [{name}] Fetched {len(qb_pages)} QB pages; fetching Rotation...")
+        rotation_pages = self.fetch_all(cfg["rotation_database_id"])
+        print(f"  [{name}] Generating tags from {len(all_pages)} pages...")
+        leaves = generate_from_pages('subjects', all_pages, qb_pages, rotation_pages)
+        cache_path = self.cache_dir / f"{database_id}.json"
+        with cache_path.open("w", encoding="utf-8") as f:
+            json.dump({"version": 1, "timestamp": time.time(), "pages": leaves}, f)
+        print(f"  [{name}] Generated + saved {len(leaves)} leaf pages → {cache_path}")
+
+    def update_pharmacology(self, database_id: str, name: str):
+        """Generate the Pharmacology cache locally from the relation graph + the
+        Question Banks (eMedici).  Saves the For-Search pages (leaf drugs +
+        one-level-above-leaf categories).  Same injected property names as the
+        old Notion formulas, so the add-on is unchanged."""
+        cfg = PHARMACOLOGY_GENERATE[database_id]
+        print(f"  [{name}] Fetching full Pharmacology graph...")
+        all_pages = self.fetch_all(database_id)
+        print(f"  [{name}] Fetched {len(all_pages)} pages; fetching Question Banks...")
+        qb_pages = self.fetch_all(cfg["qb_database_id"])
+        print(f"  [{name}] Generating tags from {len(all_pages)} pages...")
+        leaves = generate_from_pages('pharmacology', all_pages, qb_pages)
+        cache_path = self.cache_dir / f"{database_id}.json"
+        with cache_path.open("w", encoding="utf-8") as f:
+            json.dump({"version": 1, "timestamp": time.time(), "pages": leaves}, f)
+        print(f"  [{name}] Generated + saved {len(leaves)} pages → {cache_path}")
+
     def update_cache(self, database_id: str, name: str):
+        # Locally-generated databases (formulas stripped) — dedicated paths.
+        if database_id in SUBJECTS_GENERATE:
+            self.update_subjects(database_id, name)
+            return
+        if database_id in PHARMACOLOGY_GENERATE:
+            self.update_pharmacology(database_id, name)
+            return
+
         use_for_search = database_id in USES_FOR_SEARCH
-        server_side_filter = use_for_search and database_id not in SERVER_SIDE_FILTER_SKIP
+        use_for_search = database_id in USES_FOR_SEARCH
+        generate_hierarchy = database_id in HIERARCHY_TAG_DATABASES
+        # When generating hierarchy tags locally we need the FULL graph (ancestor
+        # pages are not `For Search`), so disable both server- and client-side
+        # `For Search` filtering during the fetch and re-apply it after injection.
+        server_side_filter = (
+            use_for_search
+            and not generate_hierarchy
+            and database_id not in SERVER_SIDE_FILTER_SKIP
+        )
         is_synced_extra = database_id in (SYNCED_EXTRA_DATABASE_ID, SYNCED_ADDITIONAL_RESOURCES_DATABASE_ID)
         pages = []
         has_more = True
@@ -319,7 +431,7 @@ class NotionCache:
             print(f"  [{name}] Fetching batch {batch}...")
             data = self.fetch_pages_batch(database_id, start_cursor, use_for_search=server_side_filter)
             results = data['results']
-            if use_for_search:
+            if use_for_search and not generate_hierarchy:
                 # Always filter client-side — for server_side_filter DBs this is a no-op
                 # (server already filtered), for SERVER_SIDE_FILTER_SKIP DBs this does the work
                 results = [
@@ -330,6 +442,14 @@ class NotionCache:
             has_more = data.get('has_more', False)
             start_cursor = data.get('next_cursor')
             print(f"  [{name}] Batch {batch}: {len(results)} pages (total: {len(pages)})")
+
+        # Generate hierarchy tags from the full `Parent item` graph (shared
+        # dispatch), keeping only the `For Search` leaves.
+        if generate_hierarchy:
+            leaves = generate_from_pages('guidelines', pages)
+            print(f"  [{name}] Built hierarchy tags from {len(pages)} pages; "
+                  f"{len(leaves)} leaves kept")
+            pages = leaves
 
         # For Synced Extra, fetch block content and embed as HTML
         if is_synced_extra:
@@ -370,6 +490,10 @@ def _run_one(db_id: str, name: str):
                 raise
 
 def update_notion_cache():
+    # The daily CI run builds ALL databases — including the locally-generated ones
+    # (Subjects/Pharmacology/Guidelines) — and commits their caches to GitHub, so
+    # the add-on can download a fresh generated seed cheaply instead of doing the
+    # slow full regenerate-from-Notion at runtime (that's reserved for Shift+click).
     databases = [
         (SUBJECT_DATABASE_ID,      "Subjects"),
         (PHARMACOLOGY_DATABASE_ID, "Pharmacology"),
