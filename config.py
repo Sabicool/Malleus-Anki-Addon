@@ -43,6 +43,15 @@ GENERATED_DATABASES = {
     },
 }
 
+# Databases that still have a "For Search" formula property, so the runtime
+# incremental sync can pre-filter on it.  Others (the locally-generated DBs and the
+# synced DBs) lack it — filtering them would 400, so we don't try.
+FOR_SEARCH_DATABASES = {
+    ETG_DATABASE_ID,
+    ROTATION_DATABASE_ID,
+    TEXTBOOKS_DATABASE_ID,
+}
+
 # List of all databases with their IDs and names
 DATABASES = [
     (SUBJECT_DATABASE_ID, "Subjects"),

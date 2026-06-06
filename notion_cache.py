@@ -11,7 +11,7 @@ from typing import List, Dict, Tuple
 from datetime import datetime
 from aqt import mw
 from .utils import malleus_tooltip
-from .config import NOTION_TOKEN, get_database_name, GENERATED_DATABASES
+from .config import NOTION_TOKEN, get_database_name, GENERATED_DATABASES, FOR_SEARCH_DATABASES
 
 class NotionCache:
     """Handles caching of Notion database content"""
@@ -361,7 +361,9 @@ class NotionCache:
         pages = []
         has_more = True
         start_cursor = None
-        use_for_search_filter = True   # start optimistic; disabled on 400
+        # Only attempt the "For Search" filter on databases that have that property
+        # (others would 400); the 400 fallback below remains as a safety net.
+        use_for_search_filter = database_id in FOR_SEARCH_DATABASES
 
         if last_sync_timestamp <= 0:
             last_sync_timestamp = time.time() - self.CACHE_EXPIRY
