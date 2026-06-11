@@ -136,16 +136,20 @@ class _MalleusProgressDialog(QDialog):
         super().close()
 
 
-def perform_cache_update(notion_cache, main_window, full=False):
+def perform_cache_update(notion_cache, main_window, full=False, on_complete=None):
     """Refresh the database caches.
 
     Normal (full=False): download every cache from GitHub — including the
-    generated DBs, whose seed the daily CI build keeps fresh — then sync new pages
-    from Notion for the ordinary DBs.  Generated DBs do no Notion work here.
+    generated DBs, whose seed the daily CI build keeps fresh — then sync new
+    pages from Notion.
 
-    Full (full=True, Shift+click): skip GitHub entirely and rebuild every database
-    directly from Notion — a complete re-fetch for ordinary DBs and a full
-    graph regenerate for the generated DBs (slower, but guaranteed current)."""
+    Full (full=True, Shift+click): generated DBs are regenerated directly from
+    the full Notion graph (slower, but guaranteed current).  Ordinary DBs never
+    do a full Notion re-fetch (too expensive) — they always use the GitHub seed
+    plus an incremental edits sync, full or not.
+
+    ``on_complete`` is invoked on the main thread once the whole update chain
+    finishes (success or error)."""
 
     n = len(DATABASES)          # number of databases
     total_steps = n * 2         # phase 1: n GitHub DLs  + phase 2: n Notion syncs
@@ -202,17 +206,19 @@ def perform_cache_update(notion_cache, main_window, full=False):
             db_id, name = DATABASES[idx]
             # Phase-2 step = n + idx  (picks up right after all GitHub downloads)
             notion_step = n + idx
-            # Rebuild from Notion when explicitly asked (Shift+click) or when the
-            # GitHub seed was missing/failed in Phase 1.
-            needs_rebuild = full or (db_id in failed_downloads)
+            # Full Notion rebuilds apply to GENERATED databases only — when
+            # explicitly asked (Shift+click) or when their GitHub seed failed in
+            # Phase 1.  Ordinary DBs always sync incrementally on top of the seed.
+            needs_rebuild = (db_id in GENERATED_DATABASES
+                             and (full or db_id in failed_downloads))
             if not db_id:
-                on_notion_update_complete()
-            elif db_id in GENERATED_DATABASES and not needs_rebuild:
-                # Already refreshed from the GitHub seed in Phase 1 — no Notion work.
                 on_notion_update_complete()
             else:
                 if needs_rebuild:
                     msg = f"Rebuilding {name} from Notion…"
+                elif db_id in GENERATED_DATABASES:
+                    # Smart refresh: regenerate only if Notion changed since the seed.
+                    msg = f"Checking {name} for changes…"
                 else:
                     msg = f"Syncing new {name} pages from Notion…"
                 start_pulse(idx, msg)
@@ -222,15 +228,16 @@ def perform_cache_update(notion_cache, main_window, full=False):
                 )
         else:
             def complete():
-                if progress[0] is None:
-                    return
-                progress[0].unset_pulse(total_steps)
-                progress[0].setLabelText("Done!")
-                # Brief pause so the user sees 100 % before the window closes
-                QTimer.singleShot(600, progress[0].close)
-                QTimer.singleShot(700, lambda: malleus_tooltip(
-                    "Cache successfully downloaded and updated"
-                ))
+                if progress[0] is not None:
+                    progress[0].unset_pulse(total_steps)
+                    progress[0].setLabelText("Done!")
+                    # Brief pause so the user sees 100 % before the window closes
+                    QTimer.singleShot(600, progress[0].close)
+                    QTimer.singleShot(700, lambda: malleus_tooltip(
+                        "Cache successfully downloaded and updated"
+                    ))
+                if on_complete:
+                    on_complete()
             main_window.taskman.run_on_main(complete)
 
     def on_notion_update_complete():
@@ -239,9 +246,12 @@ def perform_cache_update(notion_cache, main_window, full=False):
         db_name = DATABASES[idx][1] if idx < n else ""
         stop_pulse(notion_step, f"{db_name} synced ✓" if db_name else "Synced ✓")
         current_notion_update[0] += 1
-        # Small breathing room so the step is visible before the next starts
-        time.sleep(0.15)
-        process_next_notion_update()
+        # Small breathing room so the step is visible before the next starts —
+        # scheduled via QTimer (this callback runs on the main thread; sleeping
+        # here would freeze the UI).
+        def _next():
+            main_window.taskman.run_on_main(process_next_notion_update)
+        QTimer.singleShot(150, _next)
 
     # ── Phase 1: GitHub downloads (blocking, runs in background thread) ───────
 
@@ -251,22 +261,29 @@ def perform_cache_update(notion_cache, main_window, full=False):
                 return
             progress[0].close()
             malleus_tooltip(msg)
+            if on_complete:
+                on_complete()
         main_window.taskman.run_on_main(_err)
 
     def download_thread():
         for idx, (db_id, name) in enumerate(DATABASES):
-            # Full (Shift+click): skip GitHub entirely — everything is rebuilt
-            # directly from Notion in Phase 2.
-            if full:
+            # Full (Shift+click) rebuilds from Notion apply to generated DBs only;
+            # ordinary DBs still seed from GitHub below (a full Notion re-fetch
+            # of them is too expensive — seed + incremental sync is the model).
+            if full and db_id in GENERATED_DATABASES:
                 update_progress(idx, f"{name}: will rebuild from Notion…")
                 time.sleep(0.1)
                 continue
+            # Generated DBs included: their seed download is ETag-conditional
+            # (304 = no transfer) and never touches the local raw graph, and on a
+            # first run after an add-on update it's what makes Phase 2 cheap —
+            # without it the missing raw graph would force a slow Notion rebuild.
             update_progress(idx, f"Downloading {name} from GitHub…")
             success = notion_cache.download_cache_from_github(db_id)
             if not success:
                 # Missing seed (e.g. not yet committed) — don't abort the whole
-                # update; flag it to be rebuilt from Notion in Phase 2.
-                print(f"No GitHub seed for {name}; will rebuild from Notion.")
+                # update; generated DBs get rebuilt from Notion in Phase 2.
+                print(f"No GitHub seed for {name}.")
                 failed_downloads.add(db_id)
             time.sleep(0.2)   # brief pause makes each step visible
 

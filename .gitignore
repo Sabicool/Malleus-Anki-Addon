@@ -9,6 +9,11 @@ ui/__pycache__/*
 meta.json
 readme for ankiweb.md
 #cache/*
+# Local-only raw graph + cross-ref caches for incremental generation (never seeds)
+cache/_raw_*.json
+cache/_xref_*.json
+# GitHub conditional-download metadata (ETags / last-verified) — local only
+cache/_github_meta.json
 *.zip
 .env
 recent_tags.json

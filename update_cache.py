@@ -9,7 +9,7 @@ from urllib3.util.retry import Retry
 from pathlib import Path
 
 from hierarchy_tags import GUIDELINES_PREFIX_SEGMENTS
-from cache_generation import generate_from_pages
+from cache_generation import generate_from_pages, GENERATOR_VERSION
 
 NOTION_TOKEN = os.environ.get('NOTION_TOKEN')
 if not NOTION_TOKEN:
@@ -380,7 +380,8 @@ class NotionCache:
         leaves = generate_from_pages('subjects', all_pages, qb_pages, rotation_pages)
         cache_path = self.cache_dir / f"{database_id}.json"
         with cache_path.open("w", encoding="utf-8") as f:
-            json.dump({"version": 1, "timestamp": time.time(), "pages": leaves}, f)
+            json.dump({"version": 1, "generator_version": GENERATOR_VERSION,
+                       "timestamp": time.time(), "pages": leaves}, f)
         print(f"  [{name}] Generated + saved {len(leaves)} leaf pages → {cache_path}")
 
     def update_pharmacology(self, database_id: str, name: str):
@@ -397,7 +398,8 @@ class NotionCache:
         leaves = generate_from_pages('pharmacology', all_pages, qb_pages)
         cache_path = self.cache_dir / f"{database_id}.json"
         with cache_path.open("w", encoding="utf-8") as f:
-            json.dump({"version": 1, "timestamp": time.time(), "pages": leaves}, f)
+            json.dump({"version": 1, "generator_version": GENERATOR_VERSION,
+                       "timestamp": time.time(), "pages": leaves}, f)
         print(f"  [{name}] Generated + saved {len(leaves)} pages → {cache_path}")
 
     def update_cache(self, database_id: str, name: str):
@@ -409,7 +411,6 @@ class NotionCache:
             self.update_pharmacology(database_id, name)
             return
 
-        use_for_search = database_id in USES_FOR_SEARCH
         use_for_search = database_id in USES_FOR_SEARCH
         generate_hierarchy = database_id in HIERARCHY_TAG_DATABASES
         # When generating hierarchy tags locally we need the FULL graph (ancestor
@@ -466,8 +467,11 @@ class NotionCache:
                     print(f"    [{name}] Warning: could not fetch blocks for {page_id}: {e}")
 
         cache_path = self.cache_dir / f"{database_id}.json"
+        cache_obj = {'version': 1, 'timestamp': time.time(), 'pages': pages}
+        if generate_hierarchy:   # locally-generated (Guidelines) — stamp the generator
+            cache_obj['generator_version'] = GENERATOR_VERSION
         with cache_path.open('w', encoding='utf-8') as f:
-            json.dump({'version': 1, 'timestamp': time.time(), 'pages': pages}, f)
+            json.dump(cache_obj, f)
         print(f"  [{name}] Saved {len(pages)} pages → {cache_path}")
 
 def _run_one(db_id: str, name: str):

@@ -702,9 +702,18 @@ class NotionPageSelector(QDialog):
                 QApplication.queryKeyboardModifiers()
                 & Qt.KeyboardModifier.ShiftModifier
             )
-            perform_cache_update(self.notion_cache, mw, full=full)
-            invalidate_index()
-            self._update_cache_age_label()
+
+            def _after_update():
+                # Runs once the async update chain finishes — refreshing the
+                # suggestion index / age label any earlier would read stale data.
+                invalidate_index()
+                try:
+                    self._update_cache_age_label()
+                except RuntimeError:
+                    pass   # dialog was closed while the update ran
+
+            perform_cache_update(self.notion_cache, mw, full=full,
+                                 on_complete=_after_update)
 
         update_database_button.clicked.connect(_on_update_database)
         self._update_database_button = update_database_button
@@ -1253,7 +1262,9 @@ class NotionPageSelector(QDialog):
         self._result_rows = []
         self._showing_recent = False
 
-        self._load_note_tag_strings()
+        show_count = self.config.get('show_card_counts', False)
+        if show_count:
+            self._load_note_tag_strings()
 
         for suggestion in suggestions:
             page          = suggestion['page']
@@ -1277,7 +1288,7 @@ class NotionPageSelector(QDialog):
                 _subtitle = None
 
             row, cb, subtag_combo = self._make_result_row(
-                _fix_amp_display(title), page, score=score, show_count=True,
+                _fix_amp_display(title), page, score=score, show_count=show_count,
                 subtitle=_subtitle
             )
             self.checkbox_layout.addWidget(row)
@@ -1532,19 +1543,28 @@ class NotionPageSelector(QDialog):
             from ..config import DATABASES
             oldest_days = 0
             oldest_name = ""
+            missing_name = None
             for db_id, db_name in DATABASES:
                 _, ts = self.notion_cache.load_from_cache(db_id, warn_if_expired=False)
+                if ts <= 0:   # no cache file yet (e.g. right after an add-on update)
+                    missing_name = db_name
+                    break
                 age_days = int((_time.time() - ts) / 86400)
                 if age_days > oldest_days:
                     oldest_days = age_days
                     oldest_name = db_name
-            if oldest_days == 0:
+            if missing_name:
+                age_text = f"{missing_name}: not downloaded yet"
+                warning = " — click to download"
+            elif oldest_days == 0:
                 age_text = "all databases updated today"
+                warning = ""
             elif oldest_days == 1:
                 age_text = f"{oldest_name}: 1 day old"
+                warning = ""
             else:
                 age_text = f"{oldest_name}: {oldest_days} days old"
-            warning = " — consider updating" if oldest_days > 7 else ""
+                warning = " — consider updating" if oldest_days > 7 else ""
             self._update_database_button.setToolTip(
                 f"Cache: {age_text}{warning}\n"
                 "Download the latest Malleus database cache\n"
@@ -1624,8 +1644,11 @@ class NotionPageSelector(QDialog):
                 malleus_tooltip("No results found. Try a different search term")
             return
 
+        # Card counts are opt-in (config: show_card_counts) — computing them
+        # scans every note's tags and slows results down on large collections.
         threshold = self.config.get('card_count_threshold', 10)
-        show_count = len(all_results) <= threshold
+        show_count = (self.config.get('show_card_counts', False)
+                      and len(all_results) <= threshold)
         if show_count:
             self._load_note_tag_strings()
 
@@ -1664,8 +1687,8 @@ class NotionPageSelector(QDialog):
                 # own checkable row, revealed when this row is checked.
                 if db_name == "Pharmacology" and _relation_ids(page, 'Related Subject'):
                     self._append_related_subject_rows(page, cb, show_count, 'Related Subject')
-                elif db_name == "Guidelines" and _relation_ids(page, 'Subjects'):
-                    self._append_related_subject_rows(page, cb, show_count, 'Subjects')
+                elif db_name == "Guidelines" and _relation_ids(page, 'Related Subjects'):
+                    self._append_related_subject_rows(page, cb, show_count, 'Related Subjects')
             except Exception as e:
                 showInfo(f"Error processing page: {e}")
 
@@ -1732,7 +1755,7 @@ class NotionPageSelector(QDialog):
 
     def _resolve_related_subjects(self, page: dict, relation_prop: str) -> list:
         """Resolve a page's subject-relation ids (Pharmacology `Related Subject`
-        or Guidelines `Subjects`) to Subjects page objects, preferring the active
+        or Guidelines `Related Subjects`) to Subjects page objects, preferring the active
         (generated) cache — including a name bridge through the original cache so
         the testing copy resolves to the clean generated page (with proper
         #Question_Banks eMedici tags)."""
@@ -1755,7 +1778,7 @@ class NotionPageSelector(QDialog):
 
     def _append_related_subject_rows(self, parent_page: dict, parent_cb,
                                      show_count: bool, relation_prop: str):
-        """For a Pharmacology (`Related Subject`) or Guidelines (`Subjects`)
+        """For a Pharmacology (`Related Subject`) or Guidelines (`Related Subjects`)
         result row, render each linked Subjects page as its own indented,
         independently-checkable row (reusing the Subjects row UI), connected by a
         left tree line and revealed only while the parent row is checked."""

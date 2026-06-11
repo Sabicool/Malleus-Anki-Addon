@@ -132,7 +132,13 @@ def load_config():
         mw.addonManager.writeConfig(__name__.split('.')[0], config)
     
     if 'cache_expiry' not in config:
-        config['cache_expiry'] = 7  # days
+        config['cache_expiry'] = 1  # days (matches the daily GitHub rebuild)
+        config['_expiry_default_migrated'] = True
+        mw.addonManager.writeConfig(__name__.split('.')[0], config)
+    elif config['cache_expiry'] == 7 and not config.get('_expiry_default_migrated'):
+        # One-time migration: the old default was 7 days, predating the daily build.
+        config['cache_expiry'] = 1
+        config['_expiry_default_migrated'] = True
         mw.addonManager.writeConfig(__name__.split('.')[0], config)
     
     if 'autosearch' not in config:
@@ -151,10 +157,14 @@ def load_config():
         config['request_timeout'] = 30  # seconds - increased from 10
         mw.addonManager.writeConfig(__name__.split('.')[0], config)
 
+    if 'show_card_counts' not in config:
+        config['show_card_counts'] = False  # per-result note counts are opt-in (slow on big collections)
+        mw.addonManager.writeConfig(__name__.split('.')[0], config)
+
     if 'card_count_threshold' not in config:
         config['card_count_threshold'] = 10  # show card counts only when results ≤ this
         mw.addonManager.writeConfig(__name__.split('.')[0], config)
-    
+
     return config
 
 def get_database_id(database_name):

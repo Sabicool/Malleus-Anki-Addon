@@ -28,13 +28,15 @@ Use standard Anki key notation, e.g. `"Ctrl+Shift+M"`, `"Alt+M"`.
 ---
 
 ## `cache_expiry`
-**Default:** `7` (days)
+**Default:** `1` (days)
 
-How many days before the local database cache is considered stale and a refresh is prompted.
-Lower values keep you more in sync with the Notion database; higher values reduce network activity.
+How many days before the local database cache is considered stale and the add-on re-checks
+GitHub on startup. The check is conditional (it only downloads a database if it actually
+changed since last time), so a short value keeps you in sync with the daily rebuild at little
+network cost. Higher values reduce how often the add-on checks.
 
 ```
-"cache_expiry": 7
+"cache_expiry": 1
 ```
 
 ---
@@ -75,12 +77,25 @@ Increase this if you are on a slow connection and cache updates are timing out.
 
 ---
 
+## `show_card_counts`
+**Default:** `false`
+
+When `true`, each search result shows how many notes in your collection are already
+tagged with that page. Computing the counts scans every note's tags, which can slow
+down search results appearing on large collections — hence off by default.
+
+```
+"show_card_counts": false
+```
+
+---
+
 ## `card_count_threshold`
 **Default:** `10`
 
-Maximum number of search results for which per-result note counts are shown.
-When results exceed this number the counts are hidden to keep the UI fast.
-Set to `0` to always hide counts, or a high number (e.g. `50`) to always show them.
+Only applies when `show_card_counts` is `true`. Maximum number of search results for
+which per-result note counts are shown. When results exceed this number the counts
+are hidden to keep the UI fast. Set to a high number (e.g. `50`) to always show them.
 
 ```
 "card_count_threshold": 10

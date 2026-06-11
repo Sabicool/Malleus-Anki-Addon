@@ -1,9 +1,10 @@
 {
   "shortcut": "Ctrl+Alt+M",
-  "cache_expiry": 7,
+  "cache_expiry": 1,
   "autosearch": true,
   "search_delay": 300,
   "deck_name": "Default",
   "request_timeout": 30,
+  "show_card_counts": false,
   "card_count_threshold": 10
 }
