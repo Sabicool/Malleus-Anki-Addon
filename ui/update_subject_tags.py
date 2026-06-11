@@ -4,8 +4,7 @@ Feature to update subject tags by re-searching the database cache
 """
 from aqt.qt import (QDialog, QVBoxLayout, QHBoxLayout, QLineEdit,
                     QPushButton, QLabel, QScrollArea, QWidget,
-                    QFrame, QComboBox, QRadioButton,
-                    QButtonGroup, QGroupBox, QTimer, Qt, QKeyEvent)
+                    QFrame, QCheckBox, QGroupBox, QTimer, Qt, QKeyEvent)
 from aqt.utils import showInfo
 from ..utils import malleus_tooltip
 from aqt import mw
@@ -22,6 +21,7 @@ from ..extra_sync import (
 from .synced_extra_dialog import SyncedExtraSelectionDialog
 from ..tag_utils import parse_tag, normalize_subtag_for_matching
 from ..suggest_tags import suggest_subject_tags
+from .page_selector import _SubtagChip
 try:
     from ..ui.styles import apply_malleus_style, make_header, COLORS
 except Exception:
@@ -36,7 +36,12 @@ except Exception:
 import unicodedata
 
 class MissingPageDialog(QDialog):
-    """Dialog shown when a subject tag's page cannot be found in the cache."""
+    """Dialog shown when a subject tag's page cannot be found in the cache.
+
+    Mirrors the Page Selector's result UI: each result is a checkable row with
+    its own inline subtag chip (pre-selected from the missing tag's subtag, or
+    the suggestion's subtag).  Multiple pages can be selected — every checked
+    page contributes its tags as the replacement."""
 
     def __init__(self, parent, missing_tag: str, note_context: str, notion_cache, config):
         super().__init__(parent)
@@ -44,12 +49,21 @@ class MissingPageDialog(QDialog):
         self.note_context = note_context
         self.notion_cache = notion_cache
         self.config = config
-        self.selected_page = None
-        self.selected_subtag = None
-        self.action = None  # 'ignore' or 'replace'
+        self.selections = []   # [(page, subtag_property_name), ...] on 'replace'
+        self.action = None     # 'ignore' or 'replace'
 
         self.parsed_tag = parse_tag(missing_tag)
-        self.pages_data = []
+        self._result_rows = []  # [{page, checkbox, chip}, ...]
+
+        # Subtag options + the default chip pre-selection derived from the
+        # missing tag's own subtag (e.g. '05_Pathophysiology' → 'Pathophysiology').
+        self._subtag_options = DATABASE_PROPERTIES.get("Subjects", [""])
+        self._default_subtag = ''
+        if self.parsed_tag and self.parsed_tag.get('subtag'):
+            possible = [s for s in self._subtag_options if s]
+            normalized = normalize_subtag_for_matching(self.parsed_tag['subtag'], possible)
+            if normalized:
+                self._default_subtag = normalized
 
         self.setup_ui()
         apply_malleus_style(self)
@@ -137,20 +151,6 @@ class MissingPageDialog(QDialog):
         self.search_input.textChanged.connect(self.on_search_text_changed)
         search_controls.addWidget(self.search_input)
 
-        # Subtag selector – pre-select to match the missing tag's subtag
-        self.subtag_selector = QComboBox()
-        properties = DATABASE_PROPERTIES.get("Subjects", [])
-        self.subtag_selector.addItems(properties)
-        if self.parsed_tag and self.parsed_tag.get('subtag'):
-            raw = self.parsed_tag['subtag']
-            possible = [s for s in properties if s]
-            normalized = normalize_subtag_for_matching(raw, possible)
-            if normalized:
-                idx = self.subtag_selector.findText(normalized)
-                if idx >= 0:
-                    self.subtag_selector.setCurrentIndex(idx)
-        search_controls.addWidget(self.subtag_selector)
-
         suggest_btn = QPushButton("✦ Suggest")
         suggest_btn.setObjectName("secondary")
         suggest_btn.setToolTip(
@@ -166,7 +166,7 @@ class MissingPageDialog(QDialog):
         self.search_timer.setSingleShot(True)
         self.search_timer.timeout.connect(self.perform_search)
 
-        results_label = QLabel("Results:")
+        results_label = QLabel("Results:  (check one or more — each row has its own subtag chip)")
         results_label.setStyleSheet("font-weight: bold; margin-top: 6px;")
         search_layout.addWidget(results_label)
 
@@ -175,16 +175,14 @@ class MissingPageDialog(QDialog):
         scroll.setMinimumHeight(180)
         scroll_widget = QWidget()
         self.results_layout = QVBoxLayout()
+        self.results_layout.setSpacing(0)
+        self.results_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
         scroll_widget.setLayout(self.results_layout)
         scroll.setWidget(scroll_widget)
         search_layout.addWidget(scroll)
 
         search_group.setLayout(search_layout)
         content_layout.addWidget(search_group)
-
-        # Button group for radio buttons (created here so clear_results can reference it)
-        self.button_group = QButtonGroup(self)
-        self.button_group.setExclusive(True)
 
         # ── Action buttons ───────────────────────────────────────────
         btn_layout = QHBoxLayout()
@@ -216,7 +214,7 @@ class MissingPageDialog(QDialog):
         ignore_btn.clicked.connect(self.ignore_tag)
         btn_layout.addWidget(ignore_btn)
 
-        replace_btn = QPushButton("Use this tag instead")
+        replace_btn = QPushButton("Use selected page(s) instead")
         replace_btn.setDefault(True)
         replace_btn.clicked.connect(self.replace_tag)
         btn_layout.addWidget(replace_btn)
@@ -241,52 +239,83 @@ class MissingPageDialog(QDialog):
             self.clear_results()
 
     def clear_results(self):
-        """Remove all result radio buttons from both the layout and the button group."""
-        for btn in self.button_group.buttons():
-            self.button_group.removeButton(btn)
+        """Remove all result rows from the layout."""
         for i in reversed(range(self.results_layout.count())):
             widget = self.results_layout.itemAt(i).widget()
             if widget:
                 widget.setParent(None)
-        self.pages_data = []
+        self._result_rows = []
 
-    def _get_result_radios(self) -> list:
-        """Return all QRadioButton widgets currently in the results area."""
-        radios = []
-        for i in range(self.results_layout.count()):
-            item = self.results_layout.itemAt(i)
-            if item and item.widget() and isinstance(item.widget(), QRadioButton):
-                radios.append(item.widget())
-        return radios
+    def _add_result_row(self, page: dict, preset_subtag: str = None):
+        """Add one checkable result row with its own inline subtag chip
+        (mirrors the Page Selector).  General ℹ️ pages get no chip — they
+        always use the 'Main Tag' property."""
+        try:
+            title = (
+                page['properties']['Name']['title'][0]['text']['content']
+                if page['properties']['Name']['title'] else "Untitled"
+            )
+            suffix = page['properties'].get('Search Suffix', {}).get('formula', {}).get('string', '')
+            prefix = page['properties'].get('Search Prefix', {}).get('formula', {}).get('string', '')
+            # Escape & as && so QCheckBox renders a literal ampersand rather
+            # than treating it as a Qt mnemonic prefix.
+            display = f"{prefix} {title} {suffix}".strip().replace('&', '&&')
+        except Exception:
+            display = "Untitled"
+
+        row = QWidget()
+        row_layout = QHBoxLayout(row)
+        row_layout.setContentsMargins(2, 1, 2, 1)
+        row_layout.setSpacing(6)
+
+        cb = QCheckBox(display)
+        row_layout.addWidget(cb, stretch=1)
+
+        chip = None
+        if not is_general_page(page):
+            chip = _SubtagChip(self._subtag_options)
+            sel = preset_subtag or self._default_subtag
+            if sel:
+                idx = chip.findText(sel)
+                if idx >= 0:
+                    chip.setCurrentIndex(idx)
+            chip.setVisible(False)   # revealed when the row is checked
+            cb.stateChanged.connect(lambda state, c=chip: c.setVisible(state == 2))
+            row_layout.addWidget(chip, stretch=0)
+
+        self.results_layout.addWidget(row)
+        self._result_rows.append({'page': page, 'checkbox': cb, 'chip': chip})
+
+    def _get_result_checkboxes(self) -> list:
+        return [r['checkbox'] for r in self._result_rows]
 
     def keyPressEvent(self, event: QKeyEvent):
         """
         Keyboard shortcuts:
-          Up / Down    — move between result radio buttons (and check them)
+          Up / Down    — move focus between result rows
+          Space        — toggle the focused row (Qt default)
           Enter/Return — confirm selection (when focus is outside the search box)
           Escape       — close the dialog
         """
         key = event.key()
-        radios = self._get_result_radios()
+        checkboxes = self._get_result_checkboxes()
 
         if key in (Qt.Key.Key_Down, Qt.Key.Key_Up):
-            if not radios:
+            if not checkboxes:
                 super().keyPressEvent(event)
                 return
-            # Find current focus / checked index
             focused = None
-            for i, r in enumerate(radios):
-                if r.hasFocus() or r.isChecked():
+            for i, cb in enumerate(checkboxes):
+                if cb.hasFocus():
                     focused = i
                     break
             if key == Qt.Key.Key_Down:
                 next_idx = (focused + 1) if focused is not None else 0
-                next_idx = min(next_idx, len(radios) - 1)
+                next_idx = min(next_idx, len(checkboxes) - 1)
             else:
-                next_idx = (focused - 1) if focused is not None else len(radios) - 1
+                next_idx = (focused - 1) if focused is not None else len(checkboxes) - 1
                 next_idx = max(next_idx, 0)
-            radios[next_idx].setChecked(True)
-            radios[next_idx].setFocus()
+            checkboxes[next_idx].setFocus()
             event.accept()
             return
 
@@ -314,32 +343,11 @@ class MissingPageDialog(QDialog):
             self.results_layout.addWidget(no_res)
             return
 
-        self.pages_data = [s['page'] for s in suggestions]
-
+        # Pre-set each row's chip to the suggested subtag (falls back to the
+        # missing tag's subtag, then to no selection).
+        suggested_subtag = suggestions[0].get('suggested_subtag')
         for suggestion in suggestions:
-            page = suggestion['page']
-            try:
-                title = (
-                    page['properties']['Name']['title'][0]['text']['content']
-                    if page['properties']['Name']['title'] else "Untitled"
-                )
-                suffix = page['properties'].get('Search Suffix', {}).get('formula', {}).get('string', '')
-                prefix = page['properties'].get('Search Prefix', {}).get('formula', {}).get('string', '')
-                display = f"{prefix} {title} {suffix}".strip().replace('&', '&&')
-            except Exception:
-                display = suggestion.get('title', 'Untitled')
-
-            radio = QRadioButton(display)
-            radio.page_data = page
-            self.button_group.addButton(radio)
-            self.results_layout.addWidget(radio)
-
-        # Pre-select the suggested subtag if one was returned
-        subtag = suggestions[0].get('suggested_subtag')
-        if subtag:
-            idx = self.subtag_selector.findText(subtag)
-            if idx >= 0:
-                self.subtag_selector.setCurrentIndex(idx)
+            self._add_result_row(suggestion['page'], preset_subtag=suggested_subtag)
 
         malleus_tooltip(f"Found {len(suggestions)} suggestion(s)")
 
@@ -359,36 +367,23 @@ class MissingPageDialog(QDialog):
         database_id = get_database_id("Subjects")
         try:
             cached_pages, _ = self.notion_cache.load_from_cache(database_id)
-            self.pages_data = (
+            pages = (
                 self.notion_cache.filter_pages(cached_pages, search_term_normalised)
                 if cached_pages else []
             )
         except Exception as e:
             showInfo(f"Error searching: {e}")
-            self.pages_data = []
+            pages = []
 
-        if not self.pages_data:
+        if not pages:
             no_res = QLabel("No results found")
             no_res.setStyleSheet("font-style: italic; padding: 8px; color: palette(placeholderText);")
             self.results_layout.addWidget(no_res)
             return
 
-        for page in self.pages_data:
+        for page in pages:
             try:
-                title = (
-                    page['properties']['Name']['title'][0]['text']['content']
-                    if page['properties']['Name']['title'] else "Untitled"
-                )
-                suffix = page['properties'].get('Search Suffix', {}).get('formula', {}).get('string', '')
-                prefix = page['properties'].get('Search Prefix', {}).get('formula', {}).get('string', '')
-                # Escape & as && so QRadioButton renders it as a literal
-                # ampersand rather than treating it as a Qt mnemonic prefix.
-                display = f"{prefix} {title} {suffix}".strip().replace('&', '&&')
-
-                radio = QRadioButton(display)
-                radio.page_data = page
-                self.button_group.addButton(radio)
-                self.results_layout.addWidget(radio)
+                self._add_result_row(page)
             except Exception as e:
                 print(f"Error processing page result: {e}")
 
@@ -399,38 +394,41 @@ class MissingPageDialog(QDialog):
         self.accept()
 
     def replace_tag(self):
-        selected = self.button_group.checkedButton()
-        if not selected:
-            showInfo("Please select a page, or click 'Ignore and Remove Tag'.")
+        checked = [r for r in self._result_rows if r['checkbox'].isChecked()]
+        if not checked:
+            showInfo("Please select at least one page, or click 'Ignore and Remove Tag'.")
             return
 
-        selected_page = selected.page_data
-        selected_subtag = self.subtag_selector.currentText().strip()
-
-        # For Subject pages a numbered subtag is required unless the page is
-        # general (general pages only have a 'Main Tag' property — no subtag).
-        page_is_general = is_general_page(selected_page)
-
-        if not selected_subtag:
-            if page_is_general:
-                # General pages: use the Main Tag property directly
-                selected_subtag = "Main_Tag"
-            else:
+        selections = []
+        for row in checked:
+            page = row['page']
+            chip = row['chip']
+            if chip is None:
+                # General ℹ️ page — no subtag needed, uses 'Main Tag'
+                selections.append((page, "Main_Tag"))
+                continue
+            subtag = chip.currentText().strip()
+            if not subtag:
+                try:
+                    title = page['properties']['Name']['title'][0]['text']['content']
+                except Exception:
+                    title = "this page"
                 showInfo(
-                    "Please select a subtag — this page is not a general page.\n\n"
-                    "Use the dropdown next to the search box to choose a category "
-                    "(e.g. Management, Clinical Features)."
+                    f"Please select a subtag for:\n{title}\n\n"
+                    "(Use the chip next to the checked result to choose a "
+                    "category, e.g. Management, Clinical Features)"
                 )
                 return
+            selections.append((page, subtag))
 
-        self.selected_page = selected_page
-        self.selected_subtag = selected_subtag
+        self.selections = selections
         self.action = 'replace'
         self.accept()
 
-    def get_result(self) -> Tuple[str, Optional[Dict], Optional[str]]:
-        """Returns (action, page_data, subtag_property_name)."""
-        return (self.action, self.selected_page, self.selected_subtag)
+    def get_result(self) -> Tuple[str, List[Tuple[Dict, str]]]:
+        """Returns (action, selections) where selections is a list of
+        (page_data, subtag_property_name) — one entry per checked row."""
+        return (self.action, self.selections)
 
 
 # ── Standalone helpers ───────────────────────────────────────────────────────
@@ -693,9 +691,22 @@ def update_subject_tags_for_browser(browser, notion_cache, config):
       3. Remove the old subject tags.
       4. For each (page_name, raw_subtag), do an exact-match cache lookup.
          - Found  → replace with the fresh tag from get_tags_for_page().
-         - Missing → show MissingPageDialog; user picks a replacement or ignores.
+         - Missing → show MissingPageDialog; user picks replacement(s) or ignores.
       5. Write final tags back to the note.
+
+    Shift+invoke = silent mode: the yield prompt and the Extra (Synced)
+    selection dialog are skipped (notes missing a yield are left without one;
+    Extra (Synced) content is left untouched).  The Tag-Not-Found dialog still
+    appears — it needs user input to resolve.  The run can be cancelled from
+    the progress dialog; already-processed notes keep their changes and can be
+    reverted with Undo from the summary.
     """
+    from aqt.qt import QApplication, Qt
+    silent = bool(
+        QApplication.queryKeyboardModifiers()
+        & Qt.KeyboardModifier.ShiftModifier
+    )
+
     selected_card_ids = browser.selectedCards()
     if not selected_card_ids:
         showInfo("No cards selected")
@@ -724,12 +735,12 @@ def update_subject_tags_for_browser(browser, notion_cache, config):
     # Snapshot tags before any changes for undo support
     tag_snapshot = {note.id: list(note.tags) for note in notes}
 
-    replacement_cache = {}  # page_name → (action, page, subtag)
+    replacement_cache = {}  # page_name → (action, selections)
 
-    from aqt.qt import QProgressDialog, Qt, QApplication
+    from aqt.qt import QProgressDialog
     _progress = QProgressDialog(
         f"Updating subject tags (0/{total_notes})...",
-        None,          # no cancel button
+        "Cancel",      # cancellable — large batch updates can be aborted
         0,
         total_notes,
         browser,
@@ -750,7 +761,14 @@ def update_subject_tags_for_browser(browser, notion_cache, config):
     def _progress_finish():
         _progress.close()
 
+    cancelled = False
+    notes_processed = 0
+
     for note_index, note in enumerate(notes):
+        if _progress.wasCanceled():
+            cancelled = True
+            break
+        notes_processed = note_index + 1
         _progress_update(note_index)
         current_tags = list(note.tags)
         subject_tags = [t for t in current_tags if t.startswith("#Malleus_CM::#Subjects::")]
@@ -803,12 +821,12 @@ def update_subject_tags_for_browser(browser, notion_cache, config):
                 use_cache = (page_name in replacement_cache) and not is_improper
 
                 if use_cache:
-                    action, selected_page, selected_subtag = replacement_cache[page_name]
-                    if action == 'replace' and selected_page:
+                    action, selections = replacement_cache[page_name]
+                    if action == 'replace' and selections:
                         # Use raw_subtag from the current tag (e.g. '06_Clinical_Features')
                         # so each legitimate occurrence gets the right property.
-                        tags = get_tags_for_page(selected_page, raw_subtag)
-                        new_tags.extend(tags)
+                        for sel_page, _sel_subtag in selections:
+                            new_tags.extend(get_tags_for_page(sel_page, raw_subtag))
                         total_tags_updated += 1
                     elif action == 'cancel':
                         # Never restore an improper tag (is_improper is False here,
@@ -823,16 +841,16 @@ def update_subject_tags_for_browser(browser, notion_cache, config):
                         browser, original_tag, note_context, notion_cache, config
                     )
                     if dialog.exec():
-                        action, selected_page, selected_subtag = dialog.get_result()
-                        if action == 'replace' and selected_page:
-                            tags = get_tags_for_page(selected_page, selected_subtag)
-                            new_tags.extend(tags)
+                        action, selections = dialog.get_result()
+                        if action == 'replace' and selections:
+                            for sel_page, sel_subtag in selections:
+                                new_tags.extend(get_tags_for_page(sel_page, sel_subtag))
                             total_tags_updated += 1
                         else:  # ignore
                             total_tags_removed += 1
                     else:
                         # Dialog cancelled via X
-                        action, selected_page, selected_subtag = ('cancel', None, None)
+                        action, selections = ('cancel', [])
                         if not is_improper:
                             remaining_tags.append(original_tag)
                         # if improper, drop it — it was a bad tag and the user closed the dialog
@@ -840,14 +858,15 @@ def update_subject_tags_for_browser(browser, notion_cache, config):
                     # Only cache the result for non-improper tags so the same
                     # user choice can be reused for other legitimate missing pages.
                     if not is_improper:
-                        replacement_cache[page_name] = (action, selected_page, selected_subtag)
+                        replacement_cache[page_name] = (action, selections)
                     _progress.show()
 
         final_tags = list(set(remaining_tags + new_tags))
 
-        # Check for yield tag — prompt if missing
+        # Check for yield tag — prompt if missing (skipped in silent mode:
+        # the note is left without a yield tag rather than interrupting).
         has_yield = any(t.startswith("#Malleus_CM::#Yield::") for t in final_tags)
-        if not has_yield:
+        if not has_yield and not silent:
             _progress.hide()
             yield_tag = prompt_for_yield_selection(browser, note_context)
             if yield_tag:
@@ -860,8 +879,11 @@ def update_subject_tags_for_browser(browser, notion_cache, config):
             note['Additional Resources (Synced)'] = _additional
 
         # ── Extra (Synced) — selection dialog ────────────────────────────────
+        # Silent mode leaves Extra (Synced) content and SE tags entirely
+        # untouched (no dialog, and no silent clearing either).
         _se_changed = False
-        entries = get_matching_se_entries(list(final_tags), notion_cache, SYNCED_EXTRA_DATABASE_ID)
+        entries = ([] if silent else
+                   get_matching_se_entries(list(final_tags), notion_cache, SYNCED_EXTRA_DATABASE_ID))
         if entries:
             try:
                 current_extra = note[EXTRA_FIELD]
@@ -890,7 +912,7 @@ def update_subject_tags_for_browser(browser, notion_cache, config):
                 final_tags = list(set(final_tags))
                 _se_changed = True
             # If cancelled, leave existing Extra (Synced) content untouched
-        else:
+        elif not silent:
             # No matches — clear field and strip SE tags
             try:
                 if note[EXTRA_FIELD].strip():
@@ -908,9 +930,18 @@ def update_subject_tags_for_browser(browser, notion_cache, config):
     _progress_finish()
     browser.model.reset()
 
+    if cancelled:
+        headline = (
+            f"Update Malleus Subject Tags Cancelled\n"
+            f"(stopped after {notes_processed} of {total_notes} notes — "
+            f"changes already made are kept; use Undo to revert them)\n\n"
+        )
+    else:
+        headline = "Update Malleus Subject Tags Complete\n\n"
+
     summary = (
-        f"Update Malleus Subject Tags Complete\n\n"
-        f"Total notes processed: {total_notes}\n"
+        headline +
+        f"Total notes processed: {notes_processed if cancelled else total_notes}\n"
         f"Notes modified: {notes_modified}\n"
         f"Notes with no subject tags: {notes_with_no_subject_tags}\n"
         f"Tags successfully updated: {total_tags_updated}\n"

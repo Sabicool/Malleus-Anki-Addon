@@ -6,5 +6,7 @@
   "deck_name": "Default",
   "request_timeout": 30,
   "show_card_counts": false,
-  "card_count_threshold": 10
+  "card_count_threshold": 10,
+  "remember_yield_selection": false,
+  "remember_subtag_selection": false
 }

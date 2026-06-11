@@ -165,6 +165,14 @@ def load_config():
         config['card_count_threshold'] = 10  # show card counts only when results ≤ this
         mw.addonManager.writeConfig(__name__.split('.')[0], config)
 
+    if 'remember_yield_selection' not in config:
+        config['remember_yield_selection'] = False  # restore last yield on dialog open
+        mw.addonManager.writeConfig(__name__.split('.')[0], config)
+
+    if 'remember_subtag_selection' not in config:
+        config['remember_subtag_selection'] = False  # pre-select last subtag on result rows
+        mw.addonManager.writeConfig(__name__.split('.')[0], config)
+
     return config
 
 def get_database_id(database_name):

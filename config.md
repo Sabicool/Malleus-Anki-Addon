@@ -100,3 +100,29 @@ are hidden to keep the UI fast. Set to a high number (e.g. `50`) to always show 
 ```
 "card_count_threshold": 10
 ```
+
+---
+
+## `remember_yield_selection`
+**Default:** `false`
+
+When `true`, the Page Selector re-selects the yield level you last chose whenever it
+opens (remembered for the rest of the Anki session). Useful when making many cards
+at the same yield in a row.
+
+```
+"remember_yield_selection": false
+```
+
+---
+
+## `remember_subtag_selection`
+**Default:** `false`
+
+When `true`, new search results have their subtag chip pre-set to the subtag you last
+picked (remembered for the rest of the Anki session). Useful when tagging many cards
+under the same subtag (e.g. a Management run).
+
+```
+"remember_subtag_selection": false
+```

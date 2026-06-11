@@ -94,11 +94,13 @@ class _SubtagChip(QPushButton):
 
     _MAX_W = 170
 
-    def __init__(self, options: list, apply_all_callback=None, parent=None):
+    def __init__(self, options: list, apply_all_callback=None, parent=None,
+                 on_select=None):
         super().__init__(parent)
         self._options            = options
         self._selection          = options[0] if options else ''
         self._apply_all_callback = apply_all_callback   # callable(selection) or None
+        self._on_select          = on_select            # callable(selection) or None
         self._refresh_label()
         self.setMaximumWidth(self._MAX_W)
         self.setStyleSheet(
@@ -201,6 +203,8 @@ class _SubtagChip(QPushButton):
 
             self._selection = action.text()
             self._refresh_label()
+            if self._on_select:
+                self._on_select(self._selection)
 
             shift_held = bool(
                 QApplication.queryKeyboardModifiers()
@@ -283,7 +287,7 @@ try:
     from .styles import apply_malleus_style, make_header, COLORS
 except Exception:
     def apply_malleus_style(w): pass
-    def make_header(title="Malleus Clinical Medicine", subtitle=None, logo_path=None):
+    def make_header(title="Malleus Clinical Medicine", subtitle=None, logo_path=None, **kwargs):
         from aqt.qt import QWidget, QHBoxLayout, QLabel
         h = QWidget(); h.setFixedHeight(48 if not subtitle else 62)
         lay = QHBoxLayout(h); lay.setContentsMargins(12, 0, 12, 0)
@@ -296,7 +300,11 @@ from ..tag_utils import (simplify_tags_by_page, get_subtag_from_tag,
 
 
 class NotionPageSelector(QDialog):
-    last_yield_selection = ""  # Class variable to remember last selection
+    # Session-level memory (class variables persist across dialog instances
+    # until Anki closes).  Restoring them on open is gated behind the
+    # remember_yield_selection / remember_subtag_selection config options.
+    last_yield_selection = ""
+    last_subtag_selection = ""
 
     def __init__(self, parent, notion_cache, config):
         if parent is not None and not isinstance(parent, QWidget):
@@ -353,10 +361,12 @@ class NotionPageSelector(QDialog):
         _logo = _os.path.join(self._addon_dir, "logo.png")
         if not _os.path.exists(_logo):
             _logo = _os.path.join(self._addon_dir, "logo.jpg")
+        _sponsor = _os.path.join(self._addon_dir, "images", "emedici.svg")
         header = make_header(
             title="Malleus Clinical Medicine",
             subtitle="Find, create and tag Anki cards",
             logo_path=_logo if _os.path.exists(_logo) else None,
+            sponsor_svg_path=_sponsor if _os.path.exists(_sponsor) else None,
         )
         layout.addWidget(header)
 
@@ -639,8 +649,9 @@ class NotionPageSelector(QDialog):
 
         yield_panel_layout.addWidget(yield_segment)
 
-        # Restore previous yield selection if any
-        if NotionPageSelector.last_yield_selection in self.yield_radio_buttons:
+        # Restore previous yield selection (opt-in via remember_yield_selection)
+        if (self.config.get('remember_yield_selection', False)
+                and NotionPageSelector.last_yield_selection in self.yield_radio_buttons):
             self._last_checked_yield = NotionPageSelector.last_yield_selection
             _btn = self.yield_radio_buttons[NotionPageSelector.last_yield_selection]
             _btn.setStyleSheet(_btn._active_style)
@@ -822,6 +833,11 @@ class NotionPageSelector(QDialog):
 
         # Show recent tags on first open
         self._show_recent_tags()
+
+    def _remember_subtag(self, selection: str):
+        """Record the user's subtag pick (always stored; restored on new rows
+        only when remember_subtag_selection is enabled)."""
+        NotionPageSelector.last_subtag_selection = selection
 
     # ── Database chip helpers ─────────────────────────────────────────────────
 
@@ -1058,7 +1074,15 @@ class NotionPageSelector(QDialog):
                         if idx >= 0:
                             chip.setCurrentIndex(idx)
 
-            subtag_combo = _SubtagChip(props, apply_all_callback=_apply_all)
+            subtag_combo = _SubtagChip(props, apply_all_callback=_apply_all,
+                                       on_select=self._remember_subtag)
+            # Pre-select the last subtag the user chose this session
+            # (opt-in via remember_subtag_selection).
+            if (self.config.get('remember_subtag_selection', False)
+                    and NotionPageSelector.last_subtag_selection):
+                idx = subtag_combo.findText(NotionPageSelector.last_subtag_selection)
+                if idx >= 0:
+                    subtag_combo.setCurrentIndex(idx)
             subtag_combo.setVisible(False)
 
             def _toggle_subtag(state, sc=subtag_combo):

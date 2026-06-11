@@ -438,10 +438,106 @@ QToolTip {{
     widget.setStyleSheet(MALLEUS_STYLE + tooltip_override)
 
 
+# ── Sponsor logo widget ───────────────────────────────────────────────────────
+def make_sponsor_widget(svg_path: str,
+                        url: str = "https://emedici.com",
+                        caption: str = "SPONSORED BY",
+                        logo_height: int = 17) -> "QWidget":
+    """
+    Small theme-aware sponsor block: a tiny uppercase caption above the sponsor
+    logo, clickable through to the sponsor's website.
+
+    The SVG's ``currentColor`` fills are substituted with the current theme's
+    text colour at render time, so a wordmark that uses currentColor (like the
+    eMedici logo) stays legible in both Anki's light and dark modes; fixed
+    brand colours in the SVG are left untouched.
+
+    Falls back to a plain text label if Qt's SVG module or the file is
+    unavailable.  Returns None only if even the fallback cannot be built.
+    """
+    from aqt.qt import (QWidget, QVBoxLayout, QLabel, Qt, QApplication,
+                        QPalette, QPixmap, QUrl)
+    from PyQt6.QtGui import QDesktopServices
+
+    # Theme text colour for the wordmark; caption uses the muted placeholder tone.
+    try:
+        pal = QApplication.instance().palette()
+        text_hex = pal.color(QPalette.ColorRole.WindowText).name()
+    except Exception:
+        text_hex = "#808080"
+
+    logo_label = None
+    try:
+        from PyQt6.QtSvg import QSvgRenderer
+        from aqt.qt import QPainter
+        with open(svg_path, encoding="utf-8") as f:
+            svg = f.read()
+        renderer = QSvgRenderer(svg.replace("currentColor", text_hex).encode("utf-8"))
+        if renderer.isValid():
+            vb = renderer.defaultSize()                     # e.g. 300 × 63
+            w = round(logo_height * vb.width() / max(vb.height(), 1))
+            # Render at the screen's device pixel ratio so it's crisp on retina.
+            try:
+                dpr = QApplication.instance().devicePixelRatio()
+            except Exception:
+                dpr = 1.0
+            pm = QPixmap(round(w * dpr), round(logo_height * dpr))
+            pm.fill(Qt.GlobalColor.transparent)
+            painter = QPainter(pm)
+            renderer.render(painter)
+            painter.end()
+            pm.setDevicePixelRatio(dpr)
+            logo_label = QLabel()
+            logo_label.setPixmap(pm)
+            logo_label.setFixedSize(w, logo_height)
+    except Exception as e:
+        print(f"[Malleus] sponsor SVG unavailable, using text fallback: {e}")
+
+    # NOTE: every stylesheet below is scoped to an object name.  Selector-less
+    # rules also restyle the widget's own QToolTip (Qt applies them to the
+    # tooltip raised for the widget), which made the tooltip background
+    # transparent.  Scoped rules leave the tooltip to the dialog-level
+    # QToolTip style from apply_malleus_style().
+    if logo_label is None:                                  # text fallback
+        logo_label = QLabel("eMedici")
+        logo_label.setObjectName("sponsor_logo_text")
+        logo_label.setStyleSheet(
+            f"#sponsor_logo_text {{ color: {text_hex}; font-size: 13px;"
+            " font-weight: 700; background: transparent; border: none; }}"
+        )
+
+    caption_label = QLabel(caption)
+    caption_label.setObjectName("sponsor_caption")
+    caption_label.setStyleSheet(
+        "#sponsor_caption { color: palette(placeholderText); font-size: 8px;"
+        " font-weight: 600; letter-spacing: 1.2px;"
+        " background: transparent; border: none; }"
+    )
+
+    sponsor = QWidget()
+    sponsor.setObjectName("sponsor_block")
+    sponsor.setStyleSheet("#sponsor_block { background: transparent; border: none; }")
+    lay = QVBoxLayout(sponsor)
+    lay.setContentsMargins(0, 0, 0, 0)
+    lay.setSpacing(2)
+    lay.addWidget(caption_label, alignment=Qt.AlignmentFlag.AlignHCenter)
+    lay.addWidget(logo_label, alignment=Qt.AlignmentFlag.AlignHCenter)
+
+    sponsor.setToolTip(f"eMedici — proud sponsor of the Malleus project.\nClick to visit {url}")
+    sponsor.setCursor(Qt.CursorShape.PointingHandCursor)
+
+    def _open(event, _url=url):
+        QDesktopServices.openUrl(QUrl(_url))
+    sponsor.mousePressEvent = _open
+
+    return sponsor
+
+
 # ── Reusable header widget ────────────────────────────────────────────────────
 def make_header(title: str = "Malleus Clinical Medicine",
                 subtitle: str = None,
-                logo_path: str = None) -> "QWidget":
+                logo_path: str = None,
+                sponsor_svg_path: str = None) -> "QWidget":
     """
     Compact branded header bar for Malleus dialogs.
 
@@ -450,24 +546,31 @@ def make_header(title: str = "Malleus Clinical Medicine",
     themes.
 
     Args:
-        title:      Primary text.
-        subtitle:   Smaller secondary line (optional).
-        logo_path:  Absolute path to the Malleus logo image.
-                    Typically: os.path.join(addon_dir, 'logo.png')
+        title:            Primary text.
+        subtitle:         Smaller secondary line (optional).
+        logo_path:        Absolute path to the Malleus logo image.
+                          Typically: os.path.join(addon_dir, 'logo.png')
+        sponsor_svg_path: Absolute path to a sponsor SVG (optional).  Shown as a
+                          small clickable "SPONSORED BY" block right of centre.
     """
     from aqt.qt import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,
                         Qt, QPixmap, QSize)
 
     # ── Header container — no fixed height so subtitle can wrap ────────────
+    # Transparency rules are scoped under the header's object name: a bare
+    # "QWidget" selector would also match QToolTip (a QWidget subclass) and
+    # render every tooltip raised inside the header with no background.
     header = QWidget()
-    header.setStyleSheet("QWidget { background: transparent; }")
+    header.setObjectName("malleus_header")
+    header.setStyleSheet(
+        "#malleus_header, #malleus_header QWidget { background: transparent; }"
+    )
 
     outer_layout = QVBoxLayout(header)
     outer_layout.setContentsMargins(0, 0, 0, 0)
     outer_layout.setSpacing(0)
 
     inner = QWidget()
-    inner.setStyleSheet("background: transparent;")
     h_layout = QHBoxLayout(inner)
     h_layout.setContentsMargins(16, 8, 12, 8)
     h_layout.setSpacing(10)
@@ -505,6 +608,16 @@ def make_header(title: str = "Malleus Clinical Medicine",
     h_layout.addLayout(text_layout)
     h_layout.addStretch()
 
+    # ── Sponsor block (right of centre, before the Malleus logo) ───────────
+    if sponsor_svg_path:
+        try:
+            sponsor = make_sponsor_widget(sponsor_svg_path)
+            if sponsor is not None:
+                h_layout.addWidget(sponsor)
+                h_layout.addSpacing(18)
+        except Exception as e:
+            print(f"[Malleus] could not build sponsor widget: {e}")
+
     # ── Logo (top-right) ────────────────────────────────────────────────────
     logo_shown = False
     if logo_path:
@@ -518,10 +631,11 @@ def make_header(title: str = "Malleus Clinical Medicine",
                     Qt.TransformationMode.SmoothTransformation,
                 )
                 logo_label = QLabel()
+                logo_label.setObjectName("malleus_header_logo")
                 logo_label.setPixmap(pixmap)
                 logo_label.setFixedSize(logo_size, logo_size)
                 logo_label.setStyleSheet(
-                    "background: transparent; border: none; cursor: pointer;"
+                    "#malleus_header_logo { background: transparent; border: none; }"
                 )
                 logo_label.setAlignment(
                     Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
