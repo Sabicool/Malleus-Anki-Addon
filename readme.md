@@ -13,7 +13,9 @@
 
 <br />
 
-This is an Anki addon that integrates with the Malleus notion database to seamlessly manage Malleus clinical medicine cards. The addon allows you to *search the Malleus Notion database, find existing cards with matching tags, and create new cards with proper tagging*.
+This is an Anki addon that integrates with the Malleus Notion databases to seamlessly manage Malleus clinical medicine cards. The addon allows you to *search across all of the Malleus Notion databases at once, find existing cards with matching tags, and create new cards with proper tagging*.
+
+A single search surfaces the best matches from every database — Subjects, Pharmacology, eTG, Rotation, Textbooks and Guidelines — and you can narrow it down with per-database filter chips. Tags (including subtags and yield levels) are applied automatically, and the local cache stays in sync with the daily Notion rebuild.
 
 <br />
 
@@ -38,12 +40,12 @@ This is an Anki addon that integrates with the Malleus notion database to seamle
 
 ### Finding Existing Cards
 
-1.  Click the &ldquo;Malleus&rdquo; button in the browser toolbar or editor
-2.  Select your database (Subjects or Pharmacology)
-3.  Enter a search term
-4.  Select the subtag you want to search for (leave as Tag to ignore subtag)
-5.  Choose the relevant pages from the search results
-6.  Click &ldquo;Find Cards&rdquo; to search for existing cards with matching tags
+1.  Click the Malleus button in the browser toolbar or editor (or use the keyboard shortcut, `Ctrl+Alt+M` by default)
+2.  Enter a search term — results from every database appear together, ranked by relevance
+3.  (Optional) Toggle the database filter chips to narrow results to specific databases
+4.  Check the relevant pages from the search results
+5.  For pages that support subtags, pick the subtag from the chip that appears on each checked row (leave as Main Tag to tag the whole topic)
+6.  Click Find Cards to search for existing cards with matching tags
 
 
 <a id="org3f69585"></a>
@@ -51,10 +53,11 @@ This is an Anki addon that integrates with the Malleus notion database to seamle
 ### Creating New Cards
 
 1.  Follow steps 1-5 above
-2.  Click &ldquo;Create Cards&rdquo; to open the Add Cards window
-3.  The cards will be pre-filled with the appropriate tags
+2.  (Optional) Choose a yield level for the new cards
+3.  Click Create Cards to open the Add Cards window
+4.  The cards will be pre-filled with the appropriate tags
 
-Note that you want to select a subject tag for the cards you are creating on. If you are unsure of what particular subtag to use, you can select Main Tag. Additionally you can access the menu from the add card dialogue.
+If you are unsure of what particular subtag to use, leave the row set to Main Tag. You can also open the page selector directly from the Add Cards dialogue.
 
 
 <a id="org335319f"></a>
@@ -107,7 +110,9 @@ Now on ankiweb: <https://ankiweb.net/shared/info/620451841>. To download this ad
 
 3. Restart Anki
 
-If need be, you can also manually update the cache yourself using the python script `update_notion_cache.py` (takes a little bit of time)
+The add-on keeps a local cache of the databases and refreshes it automatically — on startup it checks GitHub and only downloads a database if it has actually changed since last time (see `cache_expiry` below). You normally never need to update it by hand.
+
+If need be, you can also rebuild the cache directly from Notion yourself using the python script `update_notion_cache.py` (takes a little bit of time):
 
 ``` sh
 python3 ./update_notion_cache.py
@@ -117,9 +122,13 @@ python3 ./update_notion_cache.py
 
 ## Configuration
 
-If you have renamed or moved the Malleus deck it is worthwhile to change `deck_name` in the add on configuration manager to the correct name. This way the create card button will open to the correct deck.
+Settings are edited via **Tools → Add-ons → Malleus Clinical Medicine → Config**. The most common ones to change:
 
-The `cache_expiry` is the number of days after which the local database copy of the notion database will expire and any pages updated since the local database copy will be updated.
+-   `deck_name` — if you have renamed or moved the Malleus deck, set this to the correct name (use `::` for subdecks) so the create card button opens to the right deck.
+-   `shortcut` — keyboard shortcut to open the Page Selector (default `Ctrl+Alt+M`).
+-   `cache_expiry` — number of days before the local cache is considered stale and the add-on re-checks GitHub. The check is conditional, so a short value keeps you in sync cheaply.
+
+Other options control auto-search behaviour, network timeouts, per-result card counts, and whether the yield/subtag selections are remembered between cards. See [config.md](./config.md) for the full reference.
 
 
 <a id="org3262658"></a>
@@ -138,6 +147,7 @@ The `cache_expiry` is the number of days after which the local database copy of 
 -   [X] Add guidelines database
 -   [X] Integrate full database syncs using python script
 -   [X] Add yield tags
+-   [X] Unified search across all databases with filter chips
 -   [ ] Integrate with local LLM or neural network to suggest tags
 -   [ ] Add note type customisation options
 
