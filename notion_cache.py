@@ -24,8 +24,14 @@ class NotionCache:
     GENERATED_GRAPH_MAX_AGE = 7 * 24 * 60 * 60
 
     def __init__(self, addon_dir: str, config: dict):
-        self.cache_dir = Path(addon_dir) / "cache"
-        self.cache_dir.mkdir(exist_ok=True)
+        self.addon_dir = Path(addon_dir)
+        # Live data goes in user_files/ — the one directory Anki preserves
+        # across add-on updates.  Keeping caches (and the local raw graphs)
+        # there means an add-on update no longer wipes them, so the first
+        # database update after upgrading stays on the fast incremental path.
+        self.cache_dir = self.addon_dir / "user_files" / "cache"
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
+        self._migrate_legacy_cache()
         self.cache_lock = threading.Lock()
         self._sync_thread = None
         # Stale-cache warning is shown at most once per session (typing in the
@@ -45,6 +51,29 @@ class NotionCache:
         self.REQUEST_TIMEOUT = config.get('request_timeout', 30)  # Use config value
         self.github_repo = "Sabicool/Malleus-Anki-Addon"
         self.github_branch = "main"
+
+    def _migrate_legacy_cache(self):
+        """One-time migration from the pre-user_files layout (<addon>/cache/).
+
+        Copies (never moves) any cache file the new location doesn't have yet:
+        copying is idempotent, and in a development checkout the old cache/ is
+        the git-committed seed directory, which must not be emptied.  For
+        normal installs the leftover old directory disappears at the next
+        add-on update anyway."""
+        old_dir = self.addon_dir / "cache"
+        try:
+            if not old_dir.is_dir() or old_dir == self.cache_dir:
+                return
+            import shutil
+            for src in old_dir.glob("*.json"):
+                dest = self.cache_dir / src.name
+                if not dest.exists():
+                    try:
+                        shutil.copy2(src, dest)
+                    except OSError as e:
+                        print(f"[Malleus] could not migrate {src.name}: {e}")
+        except Exception as e:
+            print(f"[Malleus] legacy cache migration skipped: {e}")
 
     def get_cache_path(self, database_id: str) -> Path:
         """Get the path for a specific database's cache file"""

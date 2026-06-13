@@ -14,6 +14,9 @@ cache/_raw_*.json
 cache/_xref_*.json
 # GitHub conditional-download metadata (ETags / last-verified) — local only
 cache/_github_meta.json
+# Runtime user data (caches, raw graphs, recents) — preserved by Anki across
+# add-on updates, never committed or packaged
+user_files/
 *.zip
 .env
 recent_tags.json

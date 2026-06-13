@@ -609,10 +609,10 @@ def prompt_for_yield_selection(parent, note_context: str = None) -> Optional[str
     radio_buttons["High Yield"][0].setChecked(True)
 
     buttons = QDialogButtonBox()
-    buttons.addButton(QDialogButtonBox.StandardButton.Ok)
     buttons.addButton(QDialogButtonBox.StandardButton.Cancel)
-    buttons.accepted.connect(dialog.accept)
+    buttons.addButton(QDialogButtonBox.StandardButton.Ok)
     buttons.rejected.connect(dialog.reject)
+    buttons.accepted.connect(dialog.accept)
     layout.addWidget(buttons)
 
     dialog.setLayout(layout)

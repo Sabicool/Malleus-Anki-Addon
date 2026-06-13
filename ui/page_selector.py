@@ -322,7 +322,10 @@ class NotionPageSelector(QDialog):
         self.notion_cache = notion_cache
         self.config = config
         import os
-        self._addon_dir = str(notion_cache.cache_dir.parent)
+        # cache_dir now lives at <addon>/user_files/cache — use the explicit
+        # addon_dir attribute rather than deriving from the cache path.
+        self._addon_dir = str(getattr(notion_cache, 'addon_dir',
+                                      notion_cache.cache_dir.parent.parent))
 
         self.database_properties = DATABASE_PROPERTIES
         # _result_rows: list of dicts {page, checkbox, subtag_combo, row_widget}
@@ -1433,8 +1436,19 @@ class NotionPageSelector(QDialog):
     # ── Recent tags ───────────────────────────────────────────────────────────
 
     def _recent_tags_path(self):
-        import os
-        return os.path.join(self._addon_dir, "recent_tags.json")
+        """Recents live in user_files/ so they survive add-on updates.
+        Migrates the legacy <addon>/recent_tags.json on first use."""
+        import os, shutil
+        user_files = os.path.join(self._addon_dir, "user_files")
+        new_path = os.path.join(user_files, "recent_tags.json")
+        old_path = os.path.join(self._addon_dir, "recent_tags.json")
+        try:
+            os.makedirs(user_files, exist_ok=True)
+            if not os.path.exists(new_path) and os.path.exists(old_path):
+                shutil.copy2(old_path, new_path)
+        except OSError as e:
+            print(f"[Malleus] recent-tags migration skipped: {e}")
+        return new_path
 
     def _load_recent_tags(self):
         """Load the list of recently used page selections from disk."""
