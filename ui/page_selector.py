@@ -8,7 +8,7 @@ from aqt.qt import (QDialog, QVBoxLayout, QHBoxLayout, QComboBox,
                     QWidget, QCheckBox, QButtonGroup, QRadioButton,
                     QLabel, QFrame, QTimer, Qt, QUrl, QWidget as QWidgetBase,
                     QKeyEvent, QColor, QPalette, QPixmap, QIcon, QSize, QMenu,
-                    QSizePolicy, QApplication)
+                    QSizePolicy, QApplication, QLayout, QRect, QPoint)
 from aqt.browser import Browser
 from aqt.addcards import AddCards
 from aqt.editcurrent import EditCurrent
@@ -45,10 +45,84 @@ def _fix_amp_display(text: str) -> str:
 # Subjects and Pharmacology use the page's Search Prefix property (🩺 / 💊 / ℹ️).
 # eTG uses a logo image (loaded lazily in _make_result_row).
 _DB_EMOJI = {
-    "Rotation":   "🏥",
     "Textbooks":  "📖",
     "Guidelines": "🖊️",
 }
+
+# Prefix shared by every rotation tag.  Rotation tags are selected via the
+# Rotations panel (not search results) — the panel is the single source of
+# truth, so tag strings embedded in Subjects/eTG page properties are stripped
+# and replaced by the panel's checked chips at apply time.
+ROTATION_TAG_PREFIX = "#Malleus_CM::#Resources_by_Rotation"
+
+
+# ── Flow layout (wrapping chip rows) ─────────────────────────────────────────
+
+class _FlowLayout(QLayout):
+    """Left-to-right layout that wraps items onto new rows as needed.
+    Standard Qt flow-layout pattern, used for the rotation chip cloud."""
+
+    def __init__(self, parent=None, hspacing=4, vspacing=4):
+        super().__init__(parent)
+        self._items = []
+        self._h = hspacing
+        self._v = vspacing
+        self.setContentsMargins(0, 0, 0, 0)
+
+    def addItem(self, item):
+        self._items.append(item)
+
+    def count(self):
+        return len(self._items)
+
+    def itemAt(self, index):
+        return self._items[index] if 0 <= index < len(self._items) else None
+
+    def takeAt(self, index):
+        return self._items.pop(index) if 0 <= index < len(self._items) else None
+
+    def expandingDirections(self):
+        return Qt.Orientation(0)
+
+    def hasHeightForWidth(self):
+        return True
+
+    def heightForWidth(self, width):
+        return self._do_layout(QRect(0, 0, width, 0), test_only=True)
+
+    def setGeometry(self, rect):
+        super().setGeometry(rect)
+        self._do_layout(rect, test_only=False)
+
+    def sizeHint(self):
+        return self.minimumSize()
+
+    def minimumSize(self):
+        size = QSize()
+        for item in self._items:
+            size = size.expandedTo(item.minimumSize())
+        m = self.contentsMargins()
+        size += QSize(m.left() + m.right(), m.top() + m.bottom())
+        return size
+
+    def _do_layout(self, rect, test_only):
+        m = self.contentsMargins()
+        x = rect.x() + m.left()
+        y = rect.y() + m.top()
+        line_height = 0
+        for item in self._items:
+            if item.isEmpty():          # skip hidden widgets
+                continue
+            hint = item.sizeHint()
+            if x + hint.width() > rect.right() - m.right() + 1 and line_height > 0:
+                x = rect.x() + m.left()
+                y += line_height + self._v
+                line_height = 0
+            if not test_only:
+                item.setGeometry(QRect(QPoint(x, y), hint))
+            x += hint.width() + self._h
+            line_height = max(line_height, hint.height())
+        return y + line_height + m.bottom() - rect.y()
 
 # ── Related-subject tree gutter ───────────────────────────────────────────────
 
@@ -237,7 +311,6 @@ _DB_SCORE_BIAS = {
     "Subjects":     1.30,
     "Pharmacology": 1.10,
     "eTG":          1.00,
-    "Rotation":     0.85,
     "Textbooks":    0.80,
     "Guidelines":   0.85,
 }
@@ -422,11 +495,12 @@ class NotionPageSelector(QDialog):
         )
 
         # Chip labels — emoji prefix for all databases; eTG gets an image icon
+        # (Rotation is intentionally absent: rotations are picked via the
+        # Rotations panel below, not searched as result rows.)
         _chip_labels = {
             "Subjects":     "🩺 Subjects",
             "Pharmacology": "💊 Pharmacology",
             "eTG":          "eTG",          # icon set separately below
-            "Rotation":     "🏥 Rotation",
             "Textbooks":    "📖 Textbooks",
             "Guidelines":   "🖊️ Guidelines",
         }
@@ -445,7 +519,7 @@ class NotionPageSelector(QDialog):
         except Exception:
             pass
 
-        for db_name in ["Subjects", "Pharmacology", "eTG", "Rotation", "Textbooks", "Guidelines"]:
+        for db_name in ["Subjects", "Pharmacology", "eTG", "Textbooks", "Guidelines"]:
             btn = QPushButton(_chip_labels.get(db_name, db_name))
             if db_name == "eTG" and _etg_chip_icon:
                 btn.setIcon(_etg_chip_icon)
@@ -669,39 +743,15 @@ class NotionPageSelector(QDialog):
                 " border-radius: 5px; padding: 1px 6px;"
             )
 
-        # ── Paediatrics / Specialty Tags ────────────────────────────────────
-        paeds_panel = QFrame()
-        paeds_panel.setObjectName("card_panel")
-        paeds_panel.setFrameShape(QFrame.Shape.NoFrame)
-        paeds_layout = QVBoxLayout(paeds_panel)
-        paeds_layout.setContentsMargins(10, 10, 10, 10)
-        paeds_layout.setSpacing(6)
-
-        paeds_title = QLabel("Specialty Tags")
-        paeds_title.setStyleSheet("font-size: 12px; font-weight: 700; background: transparent;")
-        paeds_layout.addWidget(paeds_title)
-
-        paeds_question = QLabel("Is this a paediatrics card?")
-        paeds_question.setStyleSheet("font-size: 11px; color: palette(placeholderText); background: transparent;")
-        paeds_question.setWordWrap(True)
-        paeds_layout.addWidget(paeds_question)
-
-        self.paeds_checkbox = QCheckBox("Paediatrics")
-        paeds_layout.addWidget(self.paeds_checkbox)
-        paeds_layout.addStretch()
-
-        # Yield + Paediatrics side by side
-        yield_paeds_widget = QWidget()
-        yield_paeds_layout = QHBoxLayout(yield_paeds_widget)
-        yield_paeds_layout.setContentsMargins(0, 0, 0, 0)
-        yield_paeds_layout.setSpacing(10)
-        yield_paeds_layout.addWidget(yield_panel, stretch=2)
-        yield_paeds_layout.addWidget(paeds_panel, stretch=1)
-        yield_paeds_widget.setSizePolicy(
+        yield_panel.setSizePolicy(
             QSizePolicy.Policy.Expanding,
             QSizePolicy.Policy.Fixed
         )
-        content_layout.addWidget(yield_paeds_widget, stretch=0)
+        content_layout.addWidget(yield_panel, stretch=0)
+
+        # ── Rotations panel (replaces the old Paediatrics checkbox) ─────────
+        rotations_panel = self._build_rotations_panel()
+        content_layout.addWidget(rotations_panel, stretch=0)
 
         # ── Buttons ─────────────────────────────────────────────────────────
         has_notes = self.has_notes_to_process()
@@ -841,6 +891,12 @@ class NotionPageSelector(QDialog):
         """Record the user's subtag pick (always stored; restored on new rows
         only when remember_subtag_selection is enabled)."""
         NotionPageSelector.last_subtag_selection = selection
+
+    def _on_subtag_selected(self, selection: str):
+        """Per-row subtag pick: remember it and re-derive the pre-selected
+        rotations (an eTG row's rotations depend on the chosen subtag)."""
+        self._remember_subtag(selection)
+        self._recompute_rotation_autoselect()
 
     # ── Database chip helpers ─────────────────────────────────────────────────
 
@@ -1076,9 +1132,10 @@ class NotionPageSelector(QDialog):
                         idx = chip.findText(selection)
                         if idx >= 0:
                             chip.setCurrentIndex(idx)
+                self._recompute_rotation_autoselect()
 
             subtag_combo = _SubtagChip(props, apply_all_callback=_apply_all,
-                                       on_select=self._remember_subtag)
+                                       on_select=self._on_subtag_selected)
             # Pre-select the last subtag the user chose this session
             # (opt-in via remember_subtag_selection).
             if (self.config.get('remember_subtag_selection', False)
@@ -1132,6 +1189,7 @@ class NotionPageSelector(QDialog):
                 _row.setStyleSheet("")
                 _tb.setStyleSheet("background: transparent;")
             self._update_selected_count()
+            self._recompute_rotation_autoselect()
 
         cb.stateChanged.connect(_on_state_changed)
 
@@ -1288,6 +1346,7 @@ class NotionPageSelector(QDialog):
         self._clear_checkbox_layout()
         self._result_rows = []
         self._showing_recent = False
+        self._recompute_rotation_autoselect()
 
         show_count = self.config.get('show_card_counts', False)
         if show_count:
@@ -1427,11 +1486,301 @@ class NotionPageSelector(QDialog):
             return yield_search_mapping.get(self._last_checked_yield, "")
         return ""
 
-    def get_paediatrics_tag(self):
-        """Get the paediatrics rotation tag if the paediatrics checkbox is checked."""
-        if hasattr(self, 'paeds_checkbox') and self.paeds_checkbox.isChecked():
-            return ["#Malleus_CM::#Resources_by_Rotation::Paediatrics"]
-        return []
+    # ── Rotations panel ───────────────────────────────────────────────────────
+
+    _ROT_BADGE_OFF = (
+        "font-size: 10px; color: palette(placeholderText);"
+        " background: palette(midlight); border: 1px solid rgba(128,128,128,0.25);"
+        " border-radius: 5px; padding: 1px 6px;"
+    )
+    _ROT_BADGE_ON = (
+        "font-size: 10px; color: #4a82cc; font-weight: 600;"
+        " background: rgba(74,130,204,0.12); border: 1px solid rgba(74,130,204,0.30);"
+        " border-radius: 5px; padding: 1px 6px;"
+    )
+    _ROT_CHIP_STYLE = (
+        "QPushButton {"
+        "  border: 1px solid rgba(74,130,204,0.35); border-radius: 12px;"
+        "  padding: 3px 10px; font-size: 11px; background: transparent;"
+        "  color: palette(placeholderText); font-weight: 500;"
+        "}"
+        "QPushButton:checked {"
+        "  background: #4a82cc; border-color: #4a82cc; color: white; font-weight: 600;"
+        "}"
+        "QPushButton:!checked:hover {"
+        "  background: rgba(74,130,204,0.10); color: #4a82cc;"
+        "  border-color: rgba(74,130,204,0.55);"
+        "}"
+        "QPushButton:checked:hover { background: #3a6aaa; border-color: #3a6aaa; }"
+    )
+    _ROT_SUMMARY_CHIP_STYLE = (
+        "QPushButton {"
+        "  border: 1px solid #4a82cc; border-radius: 12px;"
+        "  padding: 3px 10px; font-size: 11px;"
+        "  background: #4a82cc; color: white; font-weight: 600;"
+        "}"
+        "QPushButton:hover { background: #3a6aaa; border-color: #3a6aaa; }"
+    )
+
+    def _load_rotation_defs(self) -> list:
+        """[{name, tag, group}] for every Rotation page, ordered for display:
+        General first, then Internal Medicine and Surgery, each group headed by
+        its parent rotation (whose tag has no sub-level) and then alphabetical."""
+        try:
+            pages, _ = self.notion_cache.load_from_cache(
+                ROTATION_DATABASE_ID, warn_if_expired=False)
+        except Exception:
+            pages = []
+
+        defs = []
+        for p in pages or []:
+            props = p.get('properties', {})
+            title_list = props.get('Name', {}).get('title', [])
+            name = title_list[0]['text']['content'] if title_list else ''
+            tag_prop = props.get('Tag', {})
+            tag = ''
+            if tag_prop.get('type') == 'formula':
+                tag = (tag_prop.get('formula', {}).get('string', '') or '').strip()
+            elif tag_prop.get('type') == 'rich_text':
+                tag = ''.join(t.get('plain_text', '')
+                              for t in tag_prop.get('rich_text', [])).strip()
+            if not (name and tag.startswith(ROTATION_TAG_PREFIX)):
+                continue
+            levels = tag[len(ROTATION_TAG_PREFIX):].lstrip(':').split('::')
+            group = levels[0].replace('_', ' ') if len(levels) > 1 else "General"
+            defs.append({'name': name, 'tag': tag, 'group': group, 'parent': False})
+
+        # A rotation whose name matches another rotation's group (e.g.
+        # 'Internal Medicine') heads that group instead of sitting in General.
+        group_names = {d['group'] for d in defs}
+        for d in defs:
+            if d['group'] == "General" and d['name'] in group_names:
+                d['group'] = d['name']
+                d['parent'] = True
+
+        order = {"General": 0, "Internal Medicine": 1, "Surgery": 2}
+        defs.sort(key=lambda d: (order.get(d['group'], 99), d['group'],
+                                 not d['parent'], d['name'].lower()))
+        return defs
+
+    def _build_rotations_panel(self) -> QFrame:
+        """
+        Collapsible full-width panel with every rotation as a checkable chip.
+
+        Chips are pre-selected from the rotation tags embedded in the checked
+        result rows (Subjects directly, eTG via linked Subjects, Guidelines via
+        their Rotation relation); the user can tick extras or untick any of
+        them.  The panel is authoritative: the tags applied to notes contain
+        exactly the checked rotations (embedded ones are stripped elsewhere).
+        """
+        self._rotation_chips = {}       # tag → chip QPushButton
+        self._rotation_names = {}       # tag → display name
+        self._rotation_overrides = {}   # tag → bool (user forced on/off)
+        self._rotation_auto = set()     # tags auto-derived from checked rows
+        self._rotation_expanded = False
+
+        panel = QFrame()
+        panel.setObjectName("card_panel")
+        panel.setFrameShape(QFrame.Shape.NoFrame)
+        v = QVBoxLayout(panel)
+        v.setContentsMargins(10, 10, 10, 10)
+        v.setSpacing(6)
+
+        # ── Header: title + badge + hint + expand/collapse toggle ──────────
+        header = QHBoxLayout()
+        header.setSpacing(6)
+        title = QLabel("Rotations")
+        title.setStyleSheet("font-size: 12px; font-weight: 700; background: transparent;")
+        self._rotation_badge = QLabel("None selected")
+        self._rotation_badge.setStyleSheet(self._ROT_BADGE_OFF)
+        hint = QLabel("pre-selected from your chosen pages")
+        hint.setStyleSheet(
+            "font-size: 10px; color: palette(placeholderText); background: transparent;"
+        )
+        self._rotation_toggle_btn = QPushButton("Show all  ▾")
+        self._rotation_toggle_btn.setStyleSheet(
+            "QPushButton { border: none; background: transparent; color: #4a82cc;"
+            "  font-size: 11px; font-weight: 600; padding: 2px 6px; }"
+            "QPushButton:hover { color: #6a9fd8; }"
+        )
+        self._rotation_toggle_btn.clicked.connect(
+            lambda: self._set_rotation_expanded(not self._rotation_expanded)
+        )
+        header.addWidget(title)
+        header.addWidget(self._rotation_badge)
+        header.addWidget(hint)
+        header.addStretch()
+        header.addWidget(self._rotation_toggle_btn)
+        v.addLayout(header)
+
+        defs = self._load_rotation_defs()
+        if not defs:
+            empty = QLabel("Rotation list unavailable — use ↻ Update Database to download it.")
+            empty.setStyleSheet(
+                "font-size: 11px; color: palette(placeholderText); background: transparent;"
+            )
+            v.addWidget(empty)
+            self._rotation_toggle_btn.setVisible(False)
+            self._rotation_summary_host = None
+            self._rotation_full_area = None
+            return panel
+
+        # ── Collapsed view: just the selected chips (click to remove) ──────
+        self._rotation_summary_host = QWidget()
+        self._rotation_summary_host.setStyleSheet("background: transparent;")
+        self._rotation_summary_flow = _FlowLayout(self._rotation_summary_host)
+        v.addWidget(self._rotation_summary_host)
+
+        # ── Expanded view: grouped chip cloud inside a capped scroll area ──
+        full_widget = QWidget()
+        full_widget.setStyleSheet("background: transparent;")
+        fa = QVBoxLayout(full_widget)
+        fa.setContentsMargins(0, 2, 0, 0)
+        fa.setSpacing(4)
+
+        groups = list(dict.fromkeys(d['group'] for d in defs))
+        for group in groups:
+            glbl = QLabel(group.upper())
+            glbl.setStyleSheet(
+                "font-size: 9px; font-weight: 700; letter-spacing: 1px;"
+                " color: palette(placeholderText); background: transparent;"
+                " margin-top: 3px;"
+            )
+            fa.addWidget(glbl)
+            flow_host = QWidget()
+            flow_host.setStyleSheet("background: transparent;")
+            flow = _FlowLayout(flow_host)
+            for d in defs:
+                # Parent rotations (Internal Medicine / Surgery) are headings
+                # only — they are not selectable, so no chip is created.
+                if d['group'] != group or d['parent']:
+                    continue
+                chip = QPushButton(_fix_amp_display(d['name']))
+                chip.setCheckable(True)
+                chip.setStyleSheet(self._ROT_CHIP_STYLE)
+                chip.setToolTip(d['tag'])
+                chip.clicked.connect(
+                    lambda checked, t=d['tag']: self._on_rotation_chip_clicked(t, checked)
+                )
+                flow.addWidget(chip)
+                self._rotation_chips[d['tag']] = chip
+                self._rotation_names[d['tag']] = d['name']
+            fa.addWidget(flow_host)
+
+        self._rotation_full_area = QScrollArea()
+        self._rotation_full_area.setWidgetResizable(True)
+        self._rotation_full_area.setFrameShape(QFrame.Shape.NoFrame)
+        # The global stylesheet gives QScrollArea a border — the chip cloud
+        # lives inside the card panel, so keep this one frameless.
+        self._rotation_full_area.setStyleSheet(
+            "QScrollArea { background: transparent; border: none; }"
+        )
+        self._rotation_full_area.setWidget(full_widget)
+        self._rotation_full_area.setMaximumHeight(200)
+        self._rotation_full_area.setVisible(False)
+        v.addWidget(self._rotation_full_area)
+
+        self._refresh_rotation_summary()
+        return panel
+
+    def _set_rotation_expanded(self, expanded: bool):
+        self._rotation_expanded = expanded
+        if self._rotation_full_area is not None:
+            self._rotation_full_area.setVisible(expanded)
+        if self._rotation_summary_host is not None:
+            self._rotation_summary_host.setVisible(not expanded)
+        self._rotation_toggle_btn.setText("Hide  ▴" if expanded else "Show all  ▾")
+
+    def _on_rotation_chip_clicked(self, tag: str, checked: bool):
+        """Record a manual chip toggle.  A toggle back to what auto-selection
+        would give simply drops the override, so the chip follows the rows again."""
+        if checked == (tag in self._rotation_auto):
+            self._rotation_overrides.pop(tag, None)
+        else:
+            self._rotation_overrides[tag] = checked
+        self._refresh_rotation_summary()
+
+    def _summary_remove_rotation(self, tag: str):
+        chip = self._rotation_chips.get(tag)
+        if chip is not None:
+            chip.setChecked(False)
+            self._on_rotation_chip_clicked(tag, False)
+
+    def _refresh_rotation_summary(self):
+        """Rebuild the collapsed-view chips and the count badge."""
+        selected = self.get_selected_rotation_tags()
+
+        n = len(selected)
+        if n == 0:
+            self._rotation_badge.setText("None selected")
+            self._rotation_badge.setStyleSheet(self._ROT_BADGE_OFF)
+        else:
+            self._rotation_badge.setText(f"{n} selected")
+            self._rotation_badge.setStyleSheet(self._ROT_BADGE_ON)
+
+        if self._rotation_summary_host is None:
+            return
+        while self._rotation_summary_flow.count():
+            item = self._rotation_summary_flow.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.deleteLater()
+
+        if not selected:
+            placeholder = QLabel("None — tick a result to pre-fill, or Show all to browse")
+            placeholder.setStyleSheet(
+                "font-size: 11px; color: palette(placeholderText);"
+                " background: transparent; padding: 2px 0px;"
+            )
+            self._rotation_summary_flow.addWidget(placeholder)
+        else:
+            for tag in selected:
+                b = QPushButton(
+                    _fix_amp_display(self._rotation_names.get(tag, tag)) + "  ✕"
+                )
+                b.setStyleSheet(self._ROT_SUMMARY_CHIP_STYLE)
+                b.setToolTip("Remove this rotation")
+                b.clicked.connect(lambda _, t=tag: self._summary_remove_rotation(t))
+                self._rotation_summary_flow.addWidget(b)
+
+        self._rotation_summary_host.updateGeometry()
+
+    def _recompute_rotation_autoselect(self):
+        """Sync chip states with the rotation tags embedded in the checked
+        result rows.  Chips the user has manually toggled keep their state."""
+        if not getattr(self, '_rotation_chips', None):
+            return
+        rows = self._get_selected_rows()
+        auto = set()
+        if rows:
+            try:
+                auto = {t for t in self._tags_for_rows(rows)
+                        if t.startswith(ROTATION_TAG_PREFIX)}
+            except Exception as e:
+                print(f"[Rotations] autoselect failed: {e}")
+        auto &= set(self._rotation_chips)
+        self._rotation_auto = auto
+
+        for tag, chip in self._rotation_chips.items():
+            want = self._rotation_overrides.get(tag, tag in auto)
+            if chip.isChecked() != want:
+                chip.setChecked(want)   # setChecked() does not emit clicked
+        self._refresh_rotation_summary()
+
+    def get_selected_rotation_tags(self) -> list:
+        """All rotation tags currently checked in the panel (auto + manual)."""
+        if not getattr(self, '_rotation_chips', None):
+            return []
+        return [t for t, chip in self._rotation_chips.items() if chip.isChecked()]
+
+    def get_manual_rotation_tags(self) -> list:
+        """Only the rotation tags the user explicitly turned on.  Used by
+        Remove Tags so auto pre-selected chips never widen a removal."""
+        if not getattr(self, '_rotation_chips', None):
+            return []
+        return [t for t, forced_on in self._rotation_overrides.items()
+                if forced_on and t in self._rotation_chips
+                and self._rotation_chips[t].isChecked()]
 
     # ── Recent tags ───────────────────────────────────────────────────────────
 
@@ -1501,6 +1850,8 @@ class NotionPageSelector(QDialog):
     def _show_recent_tags(self):
         """Populate the checkbox layout with recently used tags."""
         recent = self._load_recent_tags()
+        # Rotation rows no longer exist in the UI — drop legacy recents entries
+        recent = [r for r in recent if r.get('database_name') != 'Rotation']
         if not recent:
             return
 
@@ -1631,6 +1982,7 @@ class NotionPageSelector(QDialog):
         self._result_rows = []
         self._showing_recent = False
         self._show_recent_tags()
+        self._recompute_rotation_autoselect()
 
     def _search_single_database(self, db_id: str, db_name: str, search_term: str) -> list:
         """
@@ -1672,10 +2024,12 @@ class NotionPageSelector(QDialog):
         all_results.sort(key=lambda p: -p.get('_composite_score', 0))
         all_results = all_results[:_MAX_SEARCH_RESULTS]
 
-        # Rebuild the result area
+        # Rebuild the result area (fresh rows start unchecked, so clearing the
+        # rows also retracts any auto pre-selected rotation chips)
         self._clear_checkbox_layout()
         self._result_rows = []
         self._showing_recent = False
+        self._recompute_rotation_autoselect()
 
         if not all_results:
             if not self.config['autosearch']:
@@ -1745,13 +2099,20 @@ class NotionPageSelector(QDialog):
     # ── Tag extraction helpers ────────────────────────────────────────────────
 
     def _load_id_lookup(self, database_id: str) -> dict:
-        """Load a database's cache and index it by page id (dash + dash-less)."""
-        pages, _ = self.notion_cache.load_from_cache(database_id)
-        lookup = {}
-        for p in pages:
-            lookup[p['id']] = p
-            lookup[p['id'].replace('-', '')] = p
-        return lookup
+        """Load a database's cache and index it by page id (dash + dash-less).
+        Memoized per dialog instance — the rotation auto-select recomputes on
+        every checkbox toggle and must not re-read the JSON from disk each time."""
+        memo = getattr(self, '_id_lookup_memo', None)
+        if memo is None:
+            memo = self._id_lookup_memo = {}
+        if database_id not in memo:
+            pages, _ = self.notion_cache.load_from_cache(database_id)
+            lookup = {}
+            for p in pages:
+                lookup[p['id']] = p
+                lookup[p['id'].replace('-', '')] = p
+            memo[database_id] = lookup
+        return memo[database_id]
 
     # ── Related-subject rows (Pharmacology → Subjects) ────────────────────────
 
@@ -1975,17 +2336,16 @@ class NotionPageSelector(QDialog):
 
         return []
 
-    def get_tags_from_selected_pages(self) -> list:
+    def _tags_for_rows(self, rows: list) -> list:
         """
-        Extract Anki tag strings from all currently checked result rows.
+        Raw Anki tag strings for the given result rows (embedded rotation tags
+        included — callers decide how to treat them).
 
         Each row's per-result subtag combo (if visible) determines which
         property to read for that page.  eTG cross-database lookups are
         batched to avoid redundant cache loads.
         """
-        selected_rows = self._get_selected_rows()
-        if not selected_rows:
-            return ["#Malleus_CM::#TO_BE_TAGGED"]
+        selected_rows = rows
 
         # Pre-build eTG cross-DB lookups once if any eTG rows are selected
         etg_rows = [r for r in selected_rows if r['page'].get('_database_name') == 'eTG']
@@ -2025,14 +2385,34 @@ class NotionPageSelector(QDialog):
             else:
                 tags.extend(self._get_tags_for_page(page, db_name, prop))
 
+        return tags
+
+    def get_tags_from_selected_pages(self) -> list:
+        """
+        Anki tag strings to APPLY for the currently checked result rows.
+
+        The Rotations panel is authoritative for rotation tags: embedded ones
+        that exist as chips are stripped here, and call sites append
+        get_selected_rotation_tags() instead.  Rotation tags with no chip
+        (the non-selectable parents, e.g. ::Internal_Medicine, or anything
+        when the rotation cache is missing) pass through untouched.
+        """
+        selected_rows = self._get_selected_rows()
+        if not selected_rows:
+            return ["#Malleus_CM::#TO_BE_TAGGED"]
+
+        chip_tags = set(getattr(self, '_rotation_chips', {}) or {})
+        tags = [t for t in self._tags_for_rows(selected_rows)
+                if t not in chip_tags]
         return tags if tags else ["#Malleus_CM::#TO_BE_TAGGED"]
 
     # ── Search cards ──────────────────────────────────────────────────────────
 
     def search_cards(self):
         selected_rows = self._get_selected_rows()
-        if not selected_rows:
-            showInfo("Please select at least one page")
+        selected_rotations = self.get_selected_rotation_tags()
+        if not selected_rows and not selected_rotations:
+            showInfo("Please select at least one page or rotation")
             return
 
         # Collect all tag strings from selected pages
@@ -2046,7 +2426,7 @@ class NotionPageSelector(QDialog):
                 val = tag_prop['formula'].get('string', '')
                 tags.extend(val.split())
 
-        if not tags:
+        if not tags and not selected_rotations:
             showInfo("Could not determine tags for selected pages.")
             return
 
@@ -2073,6 +2453,16 @@ class NotionPageSelector(QDialog):
         search_query = " or ".join(
             f'"tag:{escape_underscores(tag)}{subtag}"' for tag in individual_tags
         )
+
+        # Rotations narrow the page query (like Yield); on their own they ARE
+        # the query.  Multiple rotations are OR'd with each other.
+        rotation_query = " or ".join(
+            f'"tag:{escape_underscores(tag)}"' for tag in selected_rotations
+        )
+        if search_query and rotation_query:
+            search_query = f"({search_query}) and ({rotation_query})"
+        elif rotation_query:
+            search_query = rotation_query
 
         yield_query = self.get_yield_search_query()
         if yield_query:
@@ -2134,8 +2524,9 @@ class NotionPageSelector(QDialog):
             return
 
         selected_rows = self._get_selected_rows()
-        if not selected_rows:
-            showInfo("Please select at least one page")
+        selected_rotations = self.get_selected_rotation_tags()
+        if not selected_rows and not selected_rotations:
+            showInfo("Please select at least one page or rotation")
             return
 
         # Validate that pages needing a subtag (🩺 Subjects/Pharmacology, or
@@ -2156,10 +2547,10 @@ class NotionPageSelector(QDialog):
                     )
                     return
 
-        tags = self.get_tags_from_selected_pages()
+        tags = self.get_tags_from_selected_pages() if selected_rows else []
         selected_db_names = {r['page'].get('_database_name', '') for r in selected_rows}
 
-        all_tags = tags + selected_yields + self.get_paediatrics_tag()
+        all_tags = tags + selected_yields + selected_rotations
 
         note = {
             'deckName':  self.config['deck_name'],
@@ -2523,6 +2914,9 @@ class NotionPageSelector(QDialog):
         2. Pages selected, no subtag → remove all tags for those pages
         3. No pages selected, some chips active → remove tags for active databases
         4. No pages selected, no chips active  → remove all #Malleus_CM:: tags
+
+        Rotation chips the user manually turned on are removed alongside cases
+        1 & 2 (auto pre-selected chips never widen a removal).
         """
         notes = self.get_notes_to_process()
         if not notes:
@@ -2537,12 +2931,18 @@ class NotionPageSelector(QDialog):
         total_tags_removed = 0
         all_removed_tags = set()
 
+        # Rotation chips the user explicitly ticked (never auto pre-selected ones)
+        manual_rotations = self.get_manual_rotation_tags()
+
         # ── Determine removal predicate based on selection state ─────────────
-        if selected_rows:
-            # Cases 1 & 2: pages are selected
+        if selected_rows or manual_rotations:
+            # Cases 1 & 2: pages (and/or rotations) are selected
             # Build a list of (match_fn, is_subjects_db) per row
             page_matchers = []
             any_subjects = False
+
+            for rot_tag in manual_rotations:
+                page_matchers.append(lambda t, rt=rot_tag: t == rt)
 
             for row_data in selected_rows:
                 page    = row_data['page']
@@ -2644,14 +3044,15 @@ class NotionPageSelector(QDialog):
             showInfo("No notes found in current context")
             return
 
-        selected_rows  = self._get_selected_rows()
-        selected_yields = self.get_selected_yield_tags()
+        selected_rows      = self._get_selected_rows()
+        selected_yields    = self.get_selected_yield_tags()
+        selected_rotations = self.get_selected_rotation_tags()
 
-        if not selected_rows and not selected_yields:
-            showInfo("Please select at least one page or yield level")
+        if not selected_rows and not selected_yields and not selected_rotations:
+            showInfo("Please select at least one page, rotation or yield level")
             return
 
-        if not selected_rows and selected_yields:
+        if not selected_rows and not selected_rotations and selected_yields:
             return self._update_yield_only(notes, selected_yields)
 
         # Validate subtags
@@ -2710,8 +3111,9 @@ class NotionPageSelector(QDialog):
                 final_yield_tags = sel_yields
 
             current_tags = {t for t in note.tags if not t.startswith("#Malleus_CM::#Yield::")}
-            new_tags     = set(self.get_tags_from_selected_pages())
-            all_new_tags = new_tags | set(final_yield_tags) | set(self.get_paediatrics_tag())
+            new_tags     = (set(self.get_tags_from_selected_pages())
+                            if selected_rows else set())
+            all_new_tags = new_tags | set(final_yield_tags) | set(selected_rotations)
             note.tags    = list(current_tags | all_new_tags)
 
             selected_db_names = {r['page'].get('_database_name', '') for r in selected_rows}
@@ -2797,8 +3199,9 @@ class NotionPageSelector(QDialog):
             final_yield_tags = selected_yields
 
         current_tags = {t for t in note.tags if not t.startswith("#Malleus_CM::#Yield::")}
-        new_tags     = set(self.get_tags_from_selected_pages())
-        all_new_tags = new_tags | set(final_yield_tags) | set(self.get_paediatrics_tag())
+        new_tags     = (set(self.get_tags_from_selected_pages())
+                        if selected_rows else set())
+        all_new_tags = new_tags | set(final_yield_tags) | set(self.get_selected_rotation_tags())
         note.tags    = list(current_tags | all_new_tags)
 
         selected_db_names = {r['page'].get('_database_name', '') for r in selected_rows}
@@ -3006,10 +3409,15 @@ class NotionPageSelector(QDialog):
         new_tags = []
         for page in selected_pages:
             new_tags.extend(self._get_tags_for_page(page, database_name, prop_to_use))
+        # The Rotations panel is authoritative — replace embedded rotation tags
+        # with the panel's current selection.  Tags with no chip (non-selectable
+        # parents) pass through untouched.
+        chip_tags = set(getattr(self, '_rotation_chips', {}) or {})
+        new_tags = [t for t in new_tags if t not in chip_tags]
 
         # ── Rebuild final tag list ────────────────────────────────────────────
         remaining_tags = [t for t in remaining_tags if not t.startswith("#Malleus_CM::#Yield::")]
-        all_new_tags   = new_tags + final_yield_tags + self.get_paediatrics_tag()
+        all_new_tags   = new_tags + final_yield_tags + self.get_selected_rotation_tags()
         final_tags     = list(set(remaining_tags + all_new_tags))
 
         yield_in_final = [t for t in final_tags if t.startswith("#Malleus_CM::#Yield::")]
