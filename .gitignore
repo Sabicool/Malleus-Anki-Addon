@@ -9,9 +9,10 @@ ui/__pycache__/*
 meta.json
 readme for ankiweb.md
 #cache/*
-# Local-only raw graph + cross-ref caches for incremental generation (never seeds)
-cache/_raw_*.json
-cache/_xref_*.json
+# Raw graph + cross-ref seeds (cache/_raw_*.json, cache/_xref_*.json) are
+# committed by the daily CI build so the add-on can re-seed its incremental
+# refresh from GitHub.  Stray temp files from their atomic writes are not.
+cache/*.tmp*
 # GitHub conditional-download metadata (ETags / last-verified) — local only
 cache/_github_meta.json
 # Runtime user data (caches, raw graphs, recents) — preserved by Anki across

@@ -66,6 +66,12 @@ class NotionCache:
                 return
             import shutil
             for src in old_dir.glob("*.json"):
+                # Never migrate local-only artifacts (_raw_*, _xref_*,
+                # _github_meta): they are stale point-in-time snapshots, and
+                # copying them back would resurrect a raw graph the stale-graph
+                # purge deliberately deleted.
+                if src.name.startswith("_"):
+                    continue
                 dest = self.cache_dir / src.name
                 if not dest.exists():
                     try:
@@ -313,15 +319,18 @@ class NotionCache:
     # The committed/downloaded seed (cache/<id>.json) holds only the generated
     # leaves (`pages`, what the add-on searches) — kept small.  To make a normal
     # refresh *incremental*, the full raw graph (every page incl. ancestors) is
-    # kept in a SEPARATE local-only file (cache/_raw_<id>.json, gitignored), along
-    # with the cross-reference DBs needed for generation — Question Banks (eMedici
-    # tags) and Rotation (rotation tags) — in cache/_xref_<id>.json.
+    # kept in a SEPARATE file (cache/_raw_<id>.json), along with the
+    # cross-reference DBs needed for generation — Question Banks (eMedici tags)
+    # and Rotation (rotation tags) — in cache/_xref_<id>.json.  The daily CI
+    # build publishes these alongside the leaves seed, so a missing or stale
+    # local graph is re-seeded from GitHub (ETag-conditional) rather than
+    # dead-ending on the leaves seed with no incremental sync.
     #
     # A normal refresh fetches only pages edited since the last sync, merges them
-    # into the stored graph, and re-runs generation in memory (fast).  A full
-    # rebuild (Shift+click, first run, or a graph older than the expiry window)
-    # refetches everything — that's also what drops deleted/archived pages, which
-    # a "last_edited_time >= X" query can't report.
+    # into the stored graph, and re-runs generation in memory (fast).  Deleted/
+    # archived pages — which a "last_edited_time >= X" query can't report — are
+    # purged when a fresh raw seed replaces the local graph (staleness window
+    # above), or by a full rebuild (Shift+click).
 
     @staticmethod
     def _iso(ts: float) -> str:
@@ -389,10 +398,17 @@ class NotionCache:
 
     def _refresh_xref(self, db_id: str):
         """Bring a cross-ref raw cache up to date.  Returns (pages, changed).
-        First time (no cache) it full-fetches a baseline and reports changed=False
-        (the seed leaves already reflect the build-time cross-ref state)."""
+        With no local cache, the CI-published baseline (cache/_xref_<id>.json)
+        is downloaded first — the incremental edits-since sync below then brings
+        it current.  Only if GitHub has none is a full baseline fetched from
+        Notion, reported changed=False (the seed leaves already reflect the
+        build-time cross-ref state)."""
         from . import cache_generation
         pages, ts = self._load_xref(db_id)
+        if not pages and self._download_github_json(
+            f"_xref_{db_id}.json", self._xref_path(db_id), f"_xref_{db_id}"
+        ):
+            pages, ts = self._load_xref(db_id)
         if not pages:
             pages = cache_generation.fetch_all_pages(db_id, NOTION_TOKEN)
             self._write_xref(db_id, pages)
@@ -485,11 +501,30 @@ class NotionCache:
                 # (needs deleted/archived pages purged, which incremental can't do).
                 if not raw_pages or graph_stale:
                     reason = "no raw graph cached" if not raw_pages else "raw graph stale"
-                    # Prefer the GitHub seed: the daily CI build regenerates it
-                    # from the full graph, so it is at most ~24h old and the
-                    # ETag-conditional download is nearly free.
-                    if self.download_cache_from_github(database_id):
-                        print(f"{database_name}: {reason} — refreshed from GitHub seed")
+                    # Prefer the CI-published raw-graph seed (at most ~24h old,
+                    # ETag-conditional): it restores the incremental path right
+                    # away — edits since its build time are synced below — and
+                    # purges deleted/archived pages, since CI rebuilds it from
+                    # the full graph.  Even a seed older than the staleness
+                    # window (CI broken) is used: it is the freshest purge
+                    # point available, and incremental-on-old-seed beats a
+                    # frozen leaves cache.
+                    seeded = False
+                    if self._download_raw_seed_from_github(database_id):
+                        raw_pages, ts = self._load_raw_graph(database_id)
+                        seeded = bool(raw_pages)
+                    if seeded:
+                        # Matching leaves seed too (usually a free 304 after
+                        # Phase 1) so search results and graph come from the
+                        # same CI build.
+                        self.download_cache_from_github(database_id)
+                        print(f"{database_name}: {reason} — raw graph seeded from GitHub")
+                    elif self.download_cache_from_github(database_id):
+                        # No raw seed on GitHub (yet) — settle for the leaves
+                        # seed: search stays at most ~24h stale until the daily
+                        # CI build publishes a raw graph.
+                        print(f"{database_name}: {reason}, no raw seed on GitHub — "
+                              f"refreshed from leaves seed")
                         if graph_stale:
                             # Drop the stale graph so we don't merge edits into
                             # a snapshot that still contains deleted pages.
@@ -498,9 +533,10 @@ class NotionCache:
                             except OSError:
                                 pass
                         return
-                    print(f"{database_name}: {reason}, GitHub unavailable — full rebuild")
-                    self._regenerate_generated_db_work(database_id, database_name)
-                    return
+                    else:
+                        print(f"{database_name}: {reason}, GitHub unavailable — full rebuild")
+                        self._regenerate_generated_db_work(database_id, database_name)
+                        return
 
                 edited_main = cache_generation.fetch_edited_since(
                     database_id, NOTION_TOKEN, self._iso(ts))
@@ -798,20 +834,20 @@ class NotionCache:
         meta[database_id] = entry
         self._save_github_meta(meta)
 
-    def download_cache_from_github(self, database_id: str) -> bool:
-        """Download a cache file from GitHub, conditionally.  Sends the stored
-        ETag so an unchanged file returns 304 (no transfer) — the daily re-check
-        is then nearly free and only changed seeds are actually downloaded.
-        Returns True on success (downloaded OR already current), False on error."""
-        cache_filename = f"{database_id}.json"
-        url = f"https://raw.githubusercontent.com/{self.github_repo}/{self.github_branch}/cache/{cache_filename}"
-        cache_path = self.get_cache_path(database_id)
+    def _download_github_json(self, filename: str, dest: Path, meta_key: str) -> bool:
+        """Download cache/<filename> from GitHub into ``dest``, conditionally.
+        Sends the stored ETag so an unchanged file returns 304 (no transfer) —
+        the daily re-check is then nearly free and only changed seeds are
+        actually downloaded.
+        Returns True on success (downloaded OR already current), False on error
+        (including 404 for a seed CI hasn't published yet)."""
+        url = f"https://raw.githubusercontent.com/{self.github_repo}/{self.github_branch}/cache/{filename}"
 
         meta = self._load_github_meta()
-        entry = meta.get(database_id, {})
+        entry = meta.get(meta_key, {})
         headers = {}
         # Only trust the stored ETag if we still have the file it described.
-        if entry.get('etag') and cache_path.exists():
+        if entry.get('etag') and dest.exists():
             headers['If-None-Match'] = entry['etag']
 
         try:
@@ -819,28 +855,53 @@ class NotionCache:
 
             if response.status_code == 304:
                 entry['verified'] = time.time()
-                meta[database_id] = entry
+                meta[meta_key] = entry
                 self._save_github_meta(meta)
                 return True
 
             response.raise_for_status()
             cache_data = response.json()
             with self.cache_lock:
-                self._atomic_write_json(cache_path, cache_data)
+                self._atomic_write_json(dest, cache_data)
             entry['etag'] = response.headers.get('ETag', '')
             entry['verified'] = time.time()
-            meta[database_id] = entry
+            meta[meta_key] = entry
             self._save_github_meta(meta)
             return True
         except requests.exceptions.Timeout:
-            print(f"Timeout downloading cache from GitHub: {database_id} (waited {self.REQUEST_TIMEOUT}s)")
+            print(f"Timeout downloading cache from GitHub: {filename} (waited {self.REQUEST_TIMEOUT}s)")
             return False
         except requests.exceptions.ConnectionError:
-            print(f"Connection error downloading cache from GitHub: {database_id}")
+            print(f"Connection error downloading cache from GitHub: {filename}")
             return False
         except Exception as e:
-            print(f"Error downloading cache from GitHub: {e}")
+            print(f"Error downloading cache from GitHub ({filename}): {e}")
             return False
+
+    def download_cache_from_github(self, database_id: str) -> bool:
+        """Download a database's leaves cache from GitHub (ETag-conditional)."""
+        return self._download_github_json(
+            f"{database_id}.json", self.get_cache_path(database_id), database_id
+        )
+
+    def _download_raw_seed_from_github(self, database_id: str) -> bool:
+        """Download the CI-published raw-graph seed (cache/_raw_<id>.json) for a
+        generated database, plus the cross-ref baselines its generator needs.
+        Returns True only if the raw graph itself succeeded — a missing xref is
+        tolerated (_refresh_xref rebuilds it from Notion)."""
+        if not self._download_github_json(
+            f"_raw_{database_id}.json", self._raw_graph_path(database_id),
+            f"_raw_{database_id}"
+        ):
+            return False
+        cfg = GENERATED_DATABASES.get(database_id, {})
+        for key in ('qb', 'rotation'):
+            if cfg.get(key):
+                self._download_github_json(
+                    f"_xref_{cfg[key]}.json", self._xref_path(cfg[key]),
+                    f"_xref_{cfg[key]}"
+                )
+        return True
 
     def download_all_caches_from_github(self) -> bool:
         """Download all cache files from GitHub"""

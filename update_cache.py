@@ -274,6 +274,19 @@ class NotionCache:
         self.session = make_session()  # each instance gets its own session (thread-safe)
         self._data_source_id_cache = {}
 
+    def _save_raw_seed(self, filename: str, pages: list, fetched_at: float):
+        """Save a raw-graph / cross-ref seed (committed to GitHub so the add-on
+        can re-seed its incremental refresh instead of full-rebuilding from
+        Notion).  ``fetched_at`` must be the time the fetch STARTED so the
+        add-on's edits-since sync can't miss pages edited mid-build.  Written
+        atomically via a per-thread temp file — Subjects and Pharmacology run
+        in parallel and both save the shared Question Banks xref."""
+        path = self.cache_dir / filename
+        tmp = path.with_suffix(f".tmp{os.getpid()}-{threading.get_ident()}")
+        with tmp.open("w", encoding="utf-8") as f:
+            json.dump({"timestamp": fetched_at, "pages": pages}, f)
+        os.replace(tmp, path)
+
     def _get_data_source_id(self, database_id: str) -> str:
         if database_id in self._data_source_id_cache:
             return self._data_source_id_cache[database_id]
@@ -370,6 +383,7 @@ class NotionCache:
         (those with no `Sub-item`).  Injects the same property names the old
         Notion formulas produced, so the add-on is unchanged."""
         cfg = SUBJECTS_GENERATE[database_id]
+        fetch_start = time.time()
         print(f"  [{name}] Fetching full Subjects graph...")
         all_pages = self.fetch_all(database_id)
         print(f"  [{name}] Fetched {len(all_pages)} pages; fetching Question Banks...")
@@ -382,6 +396,12 @@ class NotionCache:
         with cache_path.open("w", encoding="utf-8") as f:
             json.dump({"version": 1, "generator_version": GENERATOR_VERSION,
                        "timestamp": time.time(), "pages": leaves}, f)
+        # Publish the raw graph + cross-ref baselines so the add-on can seed
+        # its incremental refresh from GitHub (edits since fetch_start are then
+        # synced at runtime) instead of dead-ending on the leaves seed.
+        self._save_raw_seed(f"_raw_{database_id}.json", all_pages, fetch_start)
+        self._save_raw_seed(f"_xref_{cfg['qb_database_id']}.json", qb_pages, fetch_start)
+        self._save_raw_seed(f"_xref_{cfg['rotation_database_id']}.json", rotation_pages, fetch_start)
         print(f"  [{name}] Generated + saved {len(leaves)} leaf pages → {cache_path}")
 
     def update_pharmacology(self, database_id: str, name: str):
@@ -390,6 +410,7 @@ class NotionCache:
         one-level-above-leaf categories).  Same injected property names as the
         old Notion formulas, so the add-on is unchanged."""
         cfg = PHARMACOLOGY_GENERATE[database_id]
+        fetch_start = time.time()
         print(f"  [{name}] Fetching full Pharmacology graph...")
         all_pages = self.fetch_all(database_id)
         print(f"  [{name}] Fetched {len(all_pages)} pages; fetching Question Banks...")
@@ -400,6 +421,10 @@ class NotionCache:
         with cache_path.open("w", encoding="utf-8") as f:
             json.dump({"version": 1, "generator_version": GENERATOR_VERSION,
                        "timestamp": time.time(), "pages": leaves}, f)
+        # Publish the raw graph + QB baseline for the add-on's incremental
+        # refresh (see update_subjects).
+        self._save_raw_seed(f"_raw_{database_id}.json", all_pages, fetch_start)
+        self._save_raw_seed(f"_xref_{cfg['qb_database_id']}.json", qb_pages, fetch_start)
         print(f"  [{name}] Generated + saved {len(leaves)} pages → {cache_path}")
 
     def update_cache(self, database_id: str, name: str):
@@ -422,6 +447,7 @@ class NotionCache:
             and database_id not in SERVER_SIDE_FILTER_SKIP
         )
         is_synced_extra = database_id in (SYNCED_EXTRA_DATABASE_ID, SYNCED_ADDITIONAL_RESOURCES_DATABASE_ID)
+        fetch_start = time.time()
         pages = []
         has_more = True
         start_cursor = None
@@ -450,6 +476,9 @@ class NotionCache:
             leaves = generate_from_pages('guidelines', pages)
             print(f"  [{name}] Built hierarchy tags from {len(pages)} pages; "
                   f"{len(leaves)} leaves kept")
+            # Publish the full graph for the add-on's incremental refresh
+            # (see update_subjects).
+            self._save_raw_seed(f"_raw_{database_id}.json", pages, fetch_start)
             pages = leaves
 
         # For Synced Extra, fetch block content and embed as HTML
