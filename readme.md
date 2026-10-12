@@ -120,10 +120,10 @@ Click **Add Random** in the card editor to insert a randomisation element at the
 | **Random List** | one option picked from a list |
 | **Scored List** | a list where each option carries a score |
 | **Scored Number** | a random number scored by which range it falls in |
-| **Show Score** | displays the card's running score |
-| **Answer by Score** | shows different answer text depending on the score |
+| **Show Score** | displays the card's total score: the sum of its scored lists and scored numbers |
+| **Answer by Score** | shows different answer text depending on that total score |
 
-The element is inserted as a placeholder such as `[random:110,180,0]`, and the note is tagged `#Malleus_CM::#Card_Feature::Randomisation`. The Malleus note type fills the placeholders in when the card is shown.
+The element is inserted as a placeholder such as `[random:110,180,0]`, and the note is tagged `#Malleus_CM::#Card_Feature::Randomisation`. The Malleus note type's card template fills the placeholders in each time the card is shown, so the values change from review to review.
 
 ## Keeping the database up to date
 
