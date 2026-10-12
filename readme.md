@@ -46,6 +46,7 @@ A single search surfaces the best matches from every database — Subjects, Phar
 4.  Check the relevant pages from the search results
 5.  For pages that support subtags, pick the subtag from the chip that appears on each checked row (leave as Main Tag to tag the whole topic)
 6.  Click Find Cards to search for existing cards with matching tags
+7.  (Optional) In the **🔍 Find cards** tab, tick which yield levels to return (High + Medium + untagged by default) and use the **NZ / AUS** buttons to show or hide country-specific cards
 
 
 <a id="org3f69585"></a>
@@ -53,7 +54,7 @@ A single search surfaces the best matches from every database — Subjects, Phar
 ### Creating New Cards
 
 1.  Follow steps 1-5 above
-2.  (Optional) Choose a yield level for the new cards
+2.  Switch to the **🏷 Create & tag** tab and choose a yield level (and NZ only / AUS only for country-specific cards)
 3.  Click Create Cards to open the Add Cards window
 4.  The cards will be pre-filled with the appropriate tags
 

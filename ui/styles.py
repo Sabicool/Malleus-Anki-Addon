@@ -537,7 +537,8 @@ def make_sponsor_widget(svg_path: str,
 def make_header(title: str = "Malleus Clinical Medicine",
                 subtitle: str = None,
                 logo_path: str = None,
-                sponsor_svg_path: str = None) -> "QWidget":
+                sponsor_svg_path: str = None,
+                subtitle_widget: "QWidget" = None) -> "QWidget":
     """
     Compact branded header bar for Malleus dialogs.
 
@@ -552,6 +553,8 @@ def make_header(title: str = "Malleus Clinical Medicine",
                           Typically: os.path.join(addon_dir, 'logo.png')
         sponsor_svg_path: Absolute path to a sponsor SVG (optional).  Shown as a
                           small clickable "SPONSORED BY" block right of centre.
+        subtitle_widget:  Widget shown under the title instead of (or after)
+                          the subtitle text, e.g. a row of header links.
     """
     from aqt.qt import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,
                         Qt, QPixmap, QSize)
@@ -604,6 +607,9 @@ def make_header(title: str = "Malleus Clinical Medicine",
             }
         """)
         text_layout.addWidget(sub_label)
+
+    if subtitle_widget is not None:
+        text_layout.addWidget(subtitle_widget)
 
     h_layout.addLayout(text_layout)
     h_layout.addStretch()

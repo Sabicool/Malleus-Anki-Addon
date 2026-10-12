@@ -11,6 +11,7 @@ An Anki extension that integrates with the Malleus notion database to seamlessly
 4. Select the subtag you want to search for (leave as Tag to ignore subtag)
 5. Choose the relevant pages from the search results
 6. Click "Find Cards" to search for existing cards with matching tags
+7. (Optional) In the "Find cards" tab, tick which yield levels to return (High + Medium + untagged by default) and use the NZ / AUS buttons to show or hide country-specific cards
 
 ** Creating New Cards
 1. Follow steps 1-5 above

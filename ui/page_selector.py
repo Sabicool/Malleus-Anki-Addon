@@ -15,6 +15,7 @@ from aqt.editcurrent import EditCurrent
 from aqt.utils import showInfo
 from ..utils import malleus_tooltip
 from PyQt6.QtGui import QDesktopServices
+import os
 import re as _re
 import anki.notes
 
@@ -153,6 +154,47 @@ class _TreeGutter(QWidget):
         p.end()
 
 
+# ── Popup menu styling ────────────────────────────────────────────────────────
+
+def _style_popup_menu(menu: QMenu) -> None:
+    """Apply the add-on's popup colours to *menu*."""
+    # QMenu is a top-level popup window and does not inherit the dialog's
+    # stylesheet, so we must apply colours explicitly.
+    try:
+        pal = QApplication.instance().palette()
+        dark = pal.color(QPalette.ColorRole.Window).lightness() < 128
+        base   = "#1e2236" if dark else "#ffffff"
+        text   = "#dce0ef" if dark else "#1a1d28"
+        border = "rgba(74,130,204,0.50)"
+        sel    = "rgba(74,130,204,0.18)"
+        sep    = "rgba(74,130,204,0.28)"
+        menu.setStyleSheet(f"""
+            QMenu {{
+                background-color: {base};
+                border: 1.5px solid {border};
+                border-radius: 7px;
+                padding: 4px;
+                color: {text};
+            }}
+            QMenu::item {{
+                padding: 6px 14px;
+                border-radius: 4px;
+                color: {text};
+            }}
+            QMenu::item:selected {{
+                background-color: {sel};
+                color: {text};
+            }}
+            QMenu::separator {{
+                height: 1px;
+                background: {sep};
+                margin: 3px 8px;
+            }}
+        """)
+    except Exception:
+        pass
+
+
 # ── Inline subtag chip ────────────────────────────────────────────────────────
 
 class _SubtagChip(QPushButton):
@@ -217,41 +259,7 @@ class _SubtagChip(QPushButton):
     def _open_menu(self):
         menu = QMenu(self)
 
-        # QMenu is a top-level popup window and does not inherit the dialog's
-        # stylesheet, so we must apply colours explicitly.
-        try:
-            pal = QApplication.instance().palette()
-            dark = pal.color(QPalette.ColorRole.Window).lightness() < 128
-            base   = "#1e2236" if dark else "#ffffff"
-            text   = "#dce0ef" if dark else "#1a1d28"
-            border = "rgba(74,130,204,0.50)"
-            sel    = "rgba(74,130,204,0.18)"
-            sep    = "rgba(74,130,204,0.28)"
-            menu.setStyleSheet(f"""
-                QMenu {{
-                    background-color: {base};
-                    border: 1.5px solid {border};
-                    border-radius: 7px;
-                    padding: 4px;
-                    color: {text};
-                }}
-                QMenu::item {{
-                    padding: 6px 14px;
-                    border-radius: 4px;
-                    color: {text};
-                }}
-                QMenu::item:selected {{
-                    background-color: {sel};
-                    color: {text};
-                }}
-                QMenu::separator {{
-                    height: 1px;
-                    background: {sep};
-                    margin: 3px 8px;
-                }}
-            """)
-        except Exception:
-            pass
+        _style_popup_menu(menu)
 
         # ── "Apply to all" shortcut at the top ────────────────────────────
         apply_action = None
@@ -289,6 +297,305 @@ class _SubtagChip(QPushButton):
 
         menu.triggered.connect(_on_action)
         menu.exec(self.mapToGlobal(self.rect().bottomLeft()))
+
+
+# ── Find Cards yield filter ───────────────────────────────────────────────────
+
+YIELD_TAG_PREFIX = "#Malleus_CM::#Yield::"
+
+# (config key, menu label, short label for the button).  Keys are the yield
+# tag suffixes, plus 'Untagged' for notes that carry no yield tag at all.
+_FIND_YIELD_OPTIONS = [
+    ("High",                         "High Yield",                   "High"),
+    ("Medium",                       "Medium Yield",                 "Med"),
+    ("Low",                          "Low Yield",                    "Low"),
+    ("Beyond_medical_student_level", "Beyond Medical Student Level", "Beyond"),
+    ("Untagged",                     "No yield tag",                 "Untagged"),
+]
+_FIND_YIELD_KEYS = [k for k, _, _ in _FIND_YIELD_OPTIONS]
+DEFAULT_FIND_YIELDS = ["High", "Medium", "Untagged"]
+
+# Yield segment button name → find_yields key
+_YIELD_KEY_BY_NAME = {
+    "High Yield":                   "High",
+    "Medium Yield":                 "Medium",
+    "Low Yield":                    "Low",
+    "Beyond Medical Student Level": "Beyond_medical_student_level",
+}
+
+
+def _escape_tag(tag: str) -> str:
+    """Escape '_' so Anki's search treats it literally, not as a wildcard."""
+    return tag.replace('_', '\\_')
+
+
+def normalise_find_yields(value) -> list:
+    """Validate a find_yields config value; fall back to the default."""
+    if not isinstance(value, list):
+        return list(DEFAULT_FIND_YIELDS)
+    selected = [k for k in _FIND_YIELD_KEYS if k in value]
+    return selected or list(DEFAULT_FIND_YIELDS)
+
+
+def build_yield_filter_query(selected: list) -> str:
+    """Anki search clause for the selected yields ('' = every yield, no filter)."""
+    if set(_FIND_YIELD_KEYS) <= set(selected):
+        return ""
+    parts = []
+    for key in _FIND_YIELD_KEYS:
+        if key not in selected:
+            continue
+        if key == "Untagged":
+            parts.append(f'-"tag:{_escape_tag(YIELD_TAG_PREFIX)}*"')
+        else:
+            parts.append(f'"tag:{_escape_tag(YIELD_TAG_PREFIX + key)}"')
+    return " or ".join(parts)
+
+
+def note_matches_yields(tag_string: str, selected_lower: set) -> bool:
+    """Mirror of build_yield_filter_query for a raw note tag string.
+
+    *selected_lower* is the selected keys lower-cased (Anki tags are
+    case-insensitive).  Like Anki's tag: search, child tags count as a match.
+    """
+    prefix = YIELD_TAG_PREFIX.lower()
+    yields = {t[len(prefix):].split('::')[0]
+              for t in tag_string.lower().split() if t.startswith(prefix)}
+    if not yields:
+        return "untagged" in selected_lower
+    return bool(yields & selected_lower)
+
+
+# ── Region card-feature toggles (NZ / AUS only) ──────────────────────────────
+
+# (short label, flag image in images/, tag).  The two are mutually exclusive
+# on a card.  Flags are images, not emoji — Windows has no flag emoji.
+REGION_FEATURES = [
+    ("NZ",  "flag_nz.png", "#Malleus_CM::#Card_Feature::NZ_Only"),
+    ("AUS", "flag_au.png", "#Malleus_CM::#Card_Feature::AUS_Only"),
+]
+_REGION_FEATURE_TAGS = [tag for _, _, tag in REGION_FEATURES]
+
+
+def build_feature_filter_query(states: dict) -> str:
+    """Anki search clause for {tag: +1 include / -1 exclude} ('' = no filter)."""
+    parts = []
+    for tag in _REGION_FEATURE_TAGS:
+        state = states.get(tag, 0)
+        if state > 0:
+            parts.append(f'"tag:{_escape_tag(tag)}"')
+        elif state < 0:
+            parts.append(f'-"tag:{_escape_tag(tag)}"')
+    return " and ".join(parts)
+
+
+def note_matches_features(tag_string: str, states: dict) -> bool:
+    """Mirror of build_feature_filter_query for a raw note tag string."""
+    tokens = tag_string.lower().split()
+    for tag, state in states.items():
+        if not state:
+            continue
+        t = tag.lower()
+        has = any(tok == t or tok.startswith(t + "::") for tok in tokens)
+        if has != (state > 0):
+            return False
+    return True
+
+
+class _RegionToggle(QPushButton):
+    """
+    Toggle for a region card feature.  Behaviour depends on the dialog mode:
+      Find (tri_state):  off → "NZ only" → "Not NZ" → off
+      Create & tag:      off ↔ "NZ only" (adds the tag)
+    The dialog keeps a separate state per mode and swaps it in on mode change.
+    """
+
+    _STYLES = {
+        0: ("QPushButton { background: transparent; border: 1px solid rgba(128,128,128,0.35);"
+            " border-radius: 7px; color: palette(placeholderText);"
+            " font-size: 11px; font-weight: 600; padding: 0 6px; }"
+            "QPushButton:hover { background: rgba(74,130,204,0.08); }"),
+        1: ("QPushButton { background: #4a82cc; border: 1px solid #4a82cc;"
+            " border-radius: 7px; color: white;"
+            " font-size: 11px; font-weight: 600; padding: 0 6px; }"),
+        -1: ("QPushButton { background: rgba(192,64,64,0.12); border: 1px solid #c04040;"
+             " border-radius: 7px; color: #c04040;"
+             " font-size: 11px; font-weight: 600; padding: 0 6px; }"),
+    }
+
+    def __init__(self, label: str, flag_path: str, tag: str, on_change, parent=None):
+        super().__init__(parent)
+        self.label = label
+        self.tag = tag
+        self.state = 0
+        self.tri_state = True
+        self._on_change = on_change      # callable(toggle)
+        self.setFixedSize(92, 32)
+        icon = QIcon(flag_path)
+        if not icon.isNull():
+            self.setIcon(icon)
+            self.setIconSize(QSize(24, 13))   # flag_*.png are 96x52 (2:1 flag + border)
+        self.clicked.connect(self._cycle)
+        self.set_tri_state(True)
+
+    def set_tri_state(self, tri_state: bool):
+        self.tri_state = tri_state
+        label = self.label
+        if tri_state:
+            self.setToolTip(
+                f"Click to cycle:\n"
+                f"  • {label} only: find only {label}-only cards\n"
+                f"  • Not {label}: leave out {label}-only cards (remembered)\n"
+                f"  • Off: no country filter"
+            )
+        else:
+            self.setToolTip(f"Add the {label}-only tag to created / tagged cards")
+        self._refresh()
+
+    def set_state(self, state: int):
+        self.state = state
+        self._refresh()
+
+    def _cycle(self):
+        if self.tri_state:
+            self.set_state({0: 1, 1: -1, -1: 0}[self.state])
+        else:
+            self.set_state(0 if self.state else 1)
+        self._on_change(self)
+
+    def state_text(self) -> str:
+        return {0: self.label, 1: f"{self.label} only", -1: f"Not {self.label}"}[self.state]
+
+    def _refresh(self):
+        self.setText(self.state_text())
+        if self.styleSheet() != self._STYLES[self.state]:
+            self.setStyleSheet(self._STYLES[self.state])
+
+
+class _TabbedPanel(QWidget):
+    """
+    Tabs sitting on a card panel, painted as one shape: the active tab's
+    outline merges into the panel (no line between them, like browser tabs),
+    while inactive tabs keep the panel's top edge beneath them.
+
+    Children are laid out normally (tab buttons on top, body below); this
+    widget only paints the outlines/backgrounds behind them.
+    """
+
+    _RADIUS = 9
+    _TAB_RADIUS = 8
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(0)
+        self._tabs = {}
+        self._body = None
+        self._active = None
+
+    def set_parts(self, tabs: dict, body: QWidget):
+        self._tabs, self._body = tabs, body
+
+    def set_active(self, key):
+        self._active = key
+        self.update()
+
+    def paintEvent(self, event):
+        if self._body is None:
+            return
+        from aqt.qt import QPainter, QPainterPath, QPen, QRectF
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        pal = self.palette()
+        fill = pal.color(QPalette.ColorRole.Base)
+        border = QColor(128, 128, 128, 70)
+        pen = QPen(border)
+        pen.setWidthF(1.0)
+
+        b = QRectF(self._body.geometry()).adjusted(0.5, 0.5, -0.5, -0.5)
+        top = b.top()
+        r, tr = self._RADIUS, self._TAB_RADIUS
+
+        # Inactive tabs: subtle fill, outline without a bottom edge (the
+        # panel's top edge runs underneath them).
+        for key, tab in self._tabs.items():
+            if key == self._active or not tab.isVisible():
+                continue
+            g = QRectF(tab.geometry()).adjusted(0.5, 0.5, -0.5, 0)
+            shape = QPainterPath()
+            shape.addRoundedRect(QRectF(g.left(), g.top(), g.width(), top - g.top() + tr),
+                                 tr, tr)
+            clip = QPainterPath()
+            clip.addRect(QRectF(g.left() - 1, g.top() - 1, g.width() + 2, top - g.top() + 1))
+            p.fillPath(shape.intersected(clip), QColor(128, 128, 128, 18))
+            edge = QPainterPath()
+            edge.moveTo(g.left(), top)
+            edge.lineTo(g.left(), g.top() + tr)
+            edge.quadTo(g.left(), g.top(), g.left() + tr, g.top())
+            edge.lineTo(g.right() - tr, g.top())
+            edge.quadTo(g.right(), g.top(), g.right(), g.top() + tr)
+            edge.lineTo(g.right(), top)
+            p.strokePath(edge, pen)
+
+        # Panel + active tab as one merged outline
+        outline = QPainterPath()
+        outline.addRoundedRect(b, r, r)
+        active = self._tabs.get(self._active)
+        if active is not None and active.isVisible():
+            g = QRectF(active.geometry()).adjusted(0.5, 0.5, -0.5, 0)
+            tab_shape = QPainterPath()
+            # Extend into the panel so the union leaves no seam at the join
+            tab_shape.addRoundedRect(
+                QRectF(g.left(), g.top(), g.width(), top - g.top() + r), tr, tr)
+            outline = outline.united(tab_shape)
+        p.fillPath(outline, fill)
+        p.strokePath(outline, pen)
+
+        # Accent strip along the active tab's top edge
+        if active is not None and active.isVisible():
+            g = QRectF(active.geometry())
+            accent = QPen(QColor("#4a82cc"))
+            accent.setWidthF(2.0)
+            p.setPen(accent)
+            p.drawLine(int(g.left() + tr), int(g.top() + 1), int(g.right() - tr), int(g.top() + 1))
+        p.end()
+
+
+class _SearchLineEdit(QLineEdit):
+    """QLineEdit with an optional button inset at its right end (✦ Suggest)."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._trailing = None
+
+    def set_trailing_button(self, button: QPushButton):
+        button.setParent(self)
+        button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._trailing = button
+        self.setTextMargins(0, 0, button.sizeHint().width() + 6, 0)
+        self._place_trailing()
+
+    def set_trailing_visible(self, visible: bool):
+        """Show/hide the inset button, reclaiming its text margin when hidden."""
+        if self._trailing is None:
+            return
+        self._trailing.setVisible(visible)
+        self.setTextMargins(
+            0, 0, (self._trailing.sizeHint().width() + 6) if visible else 0, 0)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._place_trailing()
+
+    def _place_trailing(self):
+        b = self._trailing
+        if b is None:
+            return
+        hint = b.sizeHint()
+        h = min(hint.height(), self.height() - 8)
+        b.setGeometry(self.width() - hint.width() - 5, (self.height() - h) // 2,
+                      hint.width(), h)
 
 
 # Maps the UI database name to the fragment used in Anki tag strings.
@@ -379,6 +686,12 @@ class NotionPageSelector(QDialog):
     last_yield_selection = ""
     last_subtag_selection = ""
 
+    last_mode = "find"   # Browser / Edit window reopen in the last-used mode
+
+    # Card details panel geometry (Yield / Country / Rotations rows)
+    _DETAILS_ROW_H   = 32
+    _DETAILS_LABEL_W = 72
+
     def __init__(self, parent, notion_cache, config):
         if parent is not None and not isinstance(parent, QWidget):
             parent = mw
@@ -406,6 +719,18 @@ class NotionPageSelector(QDialog):
         self._result_rows = []
         self._showing_recent = False
         self._db_chips = {}  # db_name → QPushButton (filter chips)
+        self._count_labels = []  # (QLabel, page) — refreshed when the yield filter changes
+        self._find_yields = normalise_find_yields(config.get('find_yields'))
+        # Country toggle state per mode: {tag: +1 only / -1 not / 0 off}.
+        # Find "Not X" persists (exclude_region_features); nothing else does.
+        excluded = config.get('exclude_region_features', [])
+        excluded = excluded if isinstance(excluded, list) else []
+        self._region_state = {
+            'find': {tag: (-1 if label in excluded else 0)
+                     for label, _, tag in REGION_FEATURES},
+            'tag':  {tag: 0 for _, _, tag in REGION_FEATURES},
+        }
+        self._mode = self._initial_mode()
         self.setup_ui()
         apply_malleus_style(self)
 
@@ -440,9 +765,9 @@ class NotionPageSelector(QDialog):
         _sponsor = _os.path.join(self._addon_dir, "images", "emedici.svg")
         header = make_header(
             title="Malleus Clinical Medicine",
-            subtitle="Find, create and tag Anki cards",
             logo_path=_logo if _os.path.exists(_logo) else None,
             sponsor_svg_path=_sponsor if _os.path.exists(_sponsor) else None,
+            subtitle_widget=self._build_header_links(),
         )
         layout.addWidget(header)
 
@@ -457,10 +782,25 @@ class NotionPageSelector(QDialog):
         self.search_timer.setSingleShot(True)
         self.search_timer.timeout.connect(self.perform_search)
 
-        self.search_input = QLineEdit()
+        self.search_input = _SearchLineEdit()
         self.search_input.setPlaceholderText("🔍  Search…")
         self.search_input.textChanged.connect(self.on_search_text_changed)
         self.search_input.setMinimumHeight(34)
+        if self.has_notes_to_process():
+            suggest_button = QPushButton("✦ Suggest")
+            suggest_button.setToolTip(
+                "Automatically suggest subject tags based on the card's text content"
+            )
+            suggest_button.setStyleSheet(
+                "QPushButton { border: 1px solid rgba(74,130,204,0.50);"
+                " background: rgba(74,130,204,0.10); color: #6a9fd8;"
+                " border-radius: 6px; padding: 2px 9px; min-height: 0px;"
+                " font-size: 11px; font-weight: 600; }"
+                "QPushButton:hover { background: rgba(74,130,204,0.22); }"
+            )
+            suggest_button.clicked.connect(self.suggest_tags_from_card)
+            self.search_input.set_trailing_button(suggest_button)
+            self._suggest_button = suggest_button
         content_layout.addWidget(self.search_input)
 
         if not self.config['autosearch']:
@@ -581,9 +921,20 @@ class NotionPageSelector(QDialog):
         self._results_count_label.setStyleSheet(
             "QLabel { font-size: 11px; color: palette(placeholderText); background: transparent; }"
         )
+        select_all_link = QPushButton("Select all")
+        select_all_link.setCursor(Qt.CursorShape.PointingHandCursor)
+        select_all_link.setToolTip("Tick every result (Ctrl+A)")
+        select_all_link.setStyleSheet(
+            "QPushButton { border: none; background: transparent; color: #4a82cc;"
+            " font-size: 11px; font-weight: 600; padding: 0px 2px; min-height: 0px; }"
+            "QPushButton:hover { color: #6a9fd8; }"
+        )
+        select_all_link.clicked.connect(self.select_all_pages)
         results_header_layout.addWidget(self._results_section_label)
         results_header_layout.addStretch()
         results_header_layout.addWidget(self._results_count_label)
+        results_header_layout.addSpacing(8)
+        results_header_layout.addWidget(select_all_link)
         content_layout.addLayout(results_header_layout)
 
         scroll = QScrollArea()
@@ -604,15 +955,10 @@ class NotionPageSelector(QDialog):
             def setTitle(self_, text): self_._lbl.setText(text)
         self.results_group = _SectionLabelShim(self._results_section_label)
 
-        # ── Yield selection — segmented control ─────────────────────────────
-        _YIELD_DEFS = [
-            ("High Yield",                   "High",      "#3a9e6a"),
-            ("Medium Yield",                 "Medium",    "#c8902a"),
-            ("Low Yield",                    "Low",       "#c06030"),
-            ("Beyond Medical Student Level", "Beyond\nMedical School", "#7a5ab8"),
-        ]
-
-        combined_tooltip = """<p style="margin: 0; padding: 4px;">
+        # ── Card details: [Yield │ Country] row, then Rotations ─────────────
+        _tip = '<p style="margin: 0; padding: 4px;">'
+        _YIELD_DEFS = [   # (name, button text, colour, tooltip)
+            ("High Yield", "High", "#3a9e6a", _tip + """
         <b style="font-size: 14px;">High Yield</b> <span>(~50% cards)</span><br><br>
         <span>• If you study just these cards, you will likely pass final year medical school exams, but likely not do much better if studied in isolation</span><br>
         <span>• These cards touch on high yield topics that are essential for basic understanding of clinical medicine at the level of a final year medical student/intern and should be prioritised for study</span><br><br>
@@ -621,15 +967,15 @@ class NotionPageSelector(QDialog):
         <span style="margin-left: 12px;">◦ 1st line empirical antibiotics used for low-severity community acquired pneumonia</span><br>
         <span style="margin-left: 12px;">◦ Basics of statistics (PPV, NPP, sensitivity, specificity, etc.)</span><br>
         <span style="margin-left: 12px;">◦ Identifying ST elevation criteria on an ECG</span><br>
-        <span style="margin-left: 12px;">◦ Common causes of HAGMAs/NAGMAs</span><br><br>
-
+        <span style="margin-left: 12px;">◦ Common causes of HAGMAs/NAGMAs</span></p>"""),
+            ("Medium Yield", "Medium", "#c8902a", _tip + """
         <b style="font-size: 14px;">Medium Yield</b> <span>(~30% cards)</span><br><br>
         <span>• These cards cover topics that are <i>useful</i>, but not essential for basic understanding of clinical medicine</span><br>
         <span>• They may provide helpful context to 'high yield' cards and background knowledge</span><br><br>
         <b>Examples:</b><br>
         <span style="margin-left: 12px;">◦ ST-elevation cut-offs (ie. mm) on ECG according to national guidelines</span><br>
-        <span style="margin-left: 12px;">◦ Antibiotics used in management of cystitis in women &lt;50 years old</span><br><br>
-
+        <span style="margin-left: 12px;">◦ Antibiotics used in management of cystitis in women &lt;50 years old</span></p>"""),
+            ("Low Yield", "Low", "#c06030", _tip + """
         <b style="font-size: 14px;">Low Yield</b> <span>(~10% cards)</span><br><br>
         <span>• These cards are low yield and cover knowledge that goes well beyond what is expected for a basic understanding of clinical medicine</span><br>
         <span>• Includes niche topics and facts that might be useful for getting a HD in topics for final year medical school exams, but has little utility beyond that</span><br><br>
@@ -637,69 +983,77 @@ class NotionPageSelector(QDialog):
         <span style="margin-left: 12px;">◦ Epidemiology of VSDs in the population</span><br>
         <span style="margin-left: 12px;">◦ Subtypes of gram-negative bacterium</span><br>
         <span style="margin-left: 12px;">◦ Exact components of niche risk stratification tools (ie. HASBLED)</span><br>
-        <span style="margin-left: 12px;">◦ Niche examination findings found in Talley &amp; O'Connor (ie. JVP waveform interpretation)</span><br><br>
-
+        <span style="margin-left: 12px;">◦ Niche examination findings found in Talley &amp; O'Connor (ie. JVP waveform interpretation)</span></p>"""),
+            ("Beyond Medical Student Level", "Beyond MS", "#7a5ab8", _tip + """
         <b style="font-size: 14px;">Beyond Medical Student Level</b> <span>(~10% cards)</span><br><br>
         <span>• These cards are a level 'below' low yield, and are tagged to easily filter out content that may be useful for some clinicians (such as Medical Registrars) however has no role in the curriculum of medical school finals</span><br>
         <span>• These tags were envisioned to be used for cards made on topics from textbooks directly; it's easy to make cards this way however only select cards will actually be high yield for medical school</span><br><br>
         <b>Examples:</b><br>
         <span style="margin-left: 12px;">◦ Diagnostic criteria for sepsis according to college guidelines</span><br>
-        <span style="margin-left: 12px;">◦ Niche pharmacology including half-lives and pharmacokinetics of drugs</span>
-        </p>"""
+        <span style="margin-left: 12px;">◦ Niche pharmacology including half-lives and pharmacokinetics of drugs</span></p>"""),
+        ]
 
-        # Card panel
-        yield_panel = QFrame()
-        yield_panel.setObjectName("card_panel")
-        yield_panel.setFrameShape(QFrame.Shape.NoFrame)
-        yield_panel_layout = QVBoxLayout(yield_panel)
-        yield_panel_layout.setContentsMargins(10, 10, 10, 10)
-        yield_panel_layout.setSpacing(8)
+        # ── Mode tabs: 🔍 Find cards | 🏷 Create & tag ──────────────────────
+        has_notes    = self.has_notes_to_process()
+        is_add_cards = isinstance(self.parent(), AddCards)
 
-        # Title row: label + badge + info icon
-        yield_header_row = QHBoxLayout()
-        yield_header_row.setSpacing(6)
-        yield_title_label = QLabel("Yield Level")
-        yield_title_label.setStyleSheet("font-size: 12px; font-weight: 700; background: transparent;")
-        self._yield_badge = QLabel("None selected")
-        self._yield_badge.setStyleSheet(
-            "font-size: 10px; color: palette(placeholderText);"
-            " background: palette(midlight); border: 1px solid rgba(128,128,128,0.25);"
-            " border-radius: 5px; padding: 1px 6px;"
-        )
-        info_label = QLabel("ℹ️")
-        info_label.setToolTip(combined_tooltip)
-        info_label.setStyleSheet("QLabel { color: #4a82cc; font-size: 14px; margin-left: 5px; background: transparent; }")
-        info_label.setFixedSize(20, 20)
-        info_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        info_label.setCursor(Qt.CursorShape.WhatsThisCursor)
-        yield_header_row.addWidget(yield_title_label)
-        yield_header_row.addWidget(self._yield_badge)
-        yield_header_row.addWidget(info_label)
-        yield_header_row.addStretch()
-        yield_panel_layout.addLayout(yield_header_row)
+        tabs_row = QHBoxLayout()
+        tabs_row.setContentsMargins(10, 0, 0, 0)
+        tabs_row.setSpacing(4)
+        tag_tab_text = "🏷  Create && tag"
+        if has_notes and not is_add_cards:
+            n = self._selected_note_count()
+            tag_tab_text += f"   · {n} card{'s' if n != 1 else ''} selected"
+        self._mode_tabs = {
+            'find': QPushButton("🔍  Find cards"),
+            'tag':  QPushButton(tag_tab_text),
+        }
+        for mode, tab in self._mode_tabs.items():
+            tab.setCursor(Qt.CursorShape.PointingHandCursor)
+            tab.clicked.connect(lambda _, m=mode: self._set_mode(m))
+            tabs_row.addWidget(tab)
+        tabs_row.addStretch()
+        # Tabs sit flush on top of the panel (no layout gap between them)
+        self._tabbed = _TabbedPanel()
+        mode_box = self._tabbed.layout()
+        mode_box.addLayout(tabs_row)
 
-        # Segmented control
+        # Painted (border + background) by _TabbedPanel, merged with the tabs
+        details_panel = QFrame()
+        details_panel.setObjectName("mode_body")
+        details_panel.setFrameShape(QFrame.Shape.NoFrame)
+        details_panel.setStyleSheet("#mode_body { background: transparent; border: none; }")
+        details_layout = QVBoxLayout(details_panel)
+        details_layout.setContentsMargins(12, 10, 12, 12)
+        details_layout.setSpacing(8)
+
+        # Segmented yield control.  Find: multi-select incl. "No yield"
+        # (self._find_yields).  Create & tag: single select
+        # (self._last_checked_yield).  _paint_mode() styles it per mode.
         yield_segment = QWidget()
         yield_segment.setObjectName("yield_segment")
         yield_segment_layout = QHBoxLayout(yield_segment)
         yield_segment_layout.setContentsMargins(0, 0, 0, 0)
         yield_segment_layout.setSpacing(0)
-        yield_segment.setFixedHeight(44)
+        yield_segment.setFixedHeight(self._DETAILS_ROW_H)
 
+        _YIELD_DEFS.append(("No yield", "No yield", "#5a6a85",
+                            "Cards with no yield tag (Find only)"))
         self.yield_radio_buttons = {}
         self._yield_btn_colors = {}
         self._last_checked_yield = None
 
-        for i, (full_name, short_name, color) in enumerate(_YIELD_DEFS):
+        for i, (full_name, short_name, color, tooltip) in enumerate(_YIELD_DEFS):
             btn = QPushButton(short_name)
-            btn.setFixedHeight(44)
+            btn.setFixedHeight(self._DETAILS_ROW_H)
+            btn.setToolTip(tooltip)
             is_last = (i == len(_YIELD_DEFS) - 1)
             sep_r = "" if is_last else "border-right: 1px solid rgba(128,128,128,0.25);"
             inactive = (
                 "QPushButton {"
                 "  background: transparent; border: none; border-radius: 0px;"
                 f"  {sep_r}"
-                "  color: palette(placeholderText);"
+                "  color: palette(placeholderText); min-height: 0px; padding: 0px 6px;"
                 "  font-size: 11px; font-weight: 600; letter-spacing: 0.2px;"
                 "}"
                 "QPushButton:hover { background: rgba(74,130,204,0.08); }"
@@ -710,182 +1064,263 @@ class NotionPageSelector(QDialog):
                 "QPushButton {"
                 f"  background: {color}; border: none; border-radius: 0px;"
                 f"  {sep_r_active}"
-                "  color: white;"
+                "  color: white; min-height: 0px; padding: 0px 6px;"
                 "  font-size: 11px; font-weight: 600; letter-spacing: 0.2px;"
                 "}"
             )
             btn.setStyleSheet(inactive)
             btn._inactive_style = inactive
             btn._active_style = active
-            btn._yield_color = color
-            btn._yield_rgb = (r, g, b)
+            btn._label = short_name
             self.yield_radio_buttons[full_name] = btn
             self._yield_btn_colors[full_name] = color
-            btn.clicked.connect(lambda _, opt=full_name: self.handle_yield_click(opt))
+            btn.clicked.connect(lambda _, opt=full_name: self._on_yield_button(opt))
             yield_segment_layout.addWidget(btn)
 
-        yield_panel_layout.addWidget(yield_segment)
-
-        # Restore previous yield selection (opt-in via remember_yield_selection)
+        # Restore previous tagging yield (opt-in via remember_yield_selection)
         if (self.config.get('remember_yield_selection', False)
-                and NotionPageSelector.last_yield_selection in self.yield_radio_buttons):
+                and NotionPageSelector.last_yield_selection in _YIELD_KEY_BY_NAME):
             self._last_checked_yield = NotionPageSelector.last_yield_selection
-            _btn = self.yield_radio_buttons[NotionPageSelector.last_yield_selection]
-            _btn.setStyleSheet(_btn._active_style)
-            _r, _g, _b = _btn._yield_rgb
-            _short = {"High Yield": "High Yield", "Medium Yield": "Medium Yield",
-                      "Low Yield": "Low Yield", "Beyond Medical Student Level": "Beyond MS"}
-            self._yield_badge.setText(_short.get(NotionPageSelector.last_yield_selection, ""))
-            self._yield_badge.setStyleSheet(
-                f"font-size: 10px; color: {_btn._yield_color}; font-weight: 600;"
-                f" background: rgba({_r},{_g},{_b},0.12);"
-                f" border: 1px solid rgba({_r},{_g},{_b},0.30);"
-                " border-radius: 5px; padding: 1px 6px;"
-            )
 
-        yield_panel.setSizePolicy(
-            QSizePolicy.Policy.Expanding,
-            QSizePolicy.Policy.Fixed
+        self._region_toggles = [
+            _RegionToggle(label, os.path.join(self._addon_dir, "images", flag),
+                          tag, self._on_region_toggled)
+            for label, flag, tag in REGION_FEATURES
+        ]
+
+        divider = QFrame()
+        divider.setFrameShape(QFrame.Shape.NoFrame)
+        divider.setFixedSize(1, 22)
+        divider.setStyleSheet("background: rgba(128,128,128,0.30);")
+
+        self._yield_row_label = self._details_label("Yield")
+        yield_row = QHBoxLayout()
+        yield_row.setSpacing(8)
+        yield_row.addWidget(self._yield_row_label)
+        yield_row.addWidget(yield_segment, stretch=1)
+        yield_row.addSpacing(4)
+        yield_row.addWidget(divider)
+        yield_row.addSpacing(4)
+        yield_row.addWidget(self._details_label(
+            "Country", "Country-specific cards (NZ_Only / AUS_Only card features)",
+            fixed_width=False))
+        for toggle in self._region_toggles:
+            yield_row.addWidget(toggle)
+        details_layout.addLayout(yield_row)
+
+        # One-line plain-English summary of what the mode's button will do
+        self._mode_summary = QLabel()
+        self._mode_summary.setTextFormat(Qt.TextFormat.RichText)
+        self._mode_summary.setContentsMargins(self._DETAILS_LABEL_W + 8, 0, 0, 0)
+        self._mode_summary.setStyleSheet(
+            "font-size: 11px; color: palette(placeholderText); background: transparent;"
         )
-        content_layout.addWidget(yield_panel, stretch=0)
+        details_layout.addWidget(self._mode_summary)
 
-        # ── Rotations panel (replaces the old Paediatrics checkbox) ─────────
-        rotations_panel = self._build_rotations_panel()
-        content_layout.addWidget(rotations_panel, stretch=0)
+        # Rotations (collapsible chip picker) — shared by both modes
+        details_layout.addWidget(self._build_rotations_panel())
 
-        # ── Buttons ─────────────────────────────────────────────────────────
-        has_notes = self.has_notes_to_process()
-        buttons_vbox = QVBoxLayout()
-        buttons_vbox.setSpacing(6)
+        # ── Per-mode actions ────────────────────────────────────────────────
+        self._find_actions = QWidget()
+        find_row = QHBoxLayout(self._find_actions)
+        find_row.setContentsMargins(0, 4, 0, 0)
+        find_cards_button = QPushButton("Find Cards")
+        find_cards_button.clicked.connect(self.search_cards)
+        find_row.addWidget(find_cards_button)
 
-        update_database_button = QPushButton("↻  Update Database")
-        update_database_button.setObjectName("secondary")
-
-        def _on_update_database():
-            full = bool(
-                QApplication.queryKeyboardModifiers()
-                & Qt.KeyboardModifier.ShiftModifier
-            )
-
-            def _after_update():
-                # Runs once the async update chain finishes — refreshing the
-                # suggestion index / age label any earlier would read stale data.
-                invalidate_index()
-                try:
-                    self._update_cache_age_label()
-                except RuntimeError:
-                    pass   # dialog was closed while the update ran
-
-            perform_cache_update(self.notion_cache, mw, full=full,
-                                 on_complete=_after_update)
-
-        update_database_button.clicked.connect(_on_update_database)
-        self._update_database_button = update_database_button
-        self._update_cache_age_label()
-
-        guidelines_button = QPushButton("Guidelines ↗")
-        guidelines_button.setObjectName("secondary")
-        guidelines_button.clicked.connect(
-            lambda: QDesktopServices.openUrl(
-                QUrl("https://malleuscm.notion.site/submission-guidelines")
-            )
-        )
-        donate_button = QPushButton("🫶 Support")
-        donate_button.setObjectName("donate")
-        donate_button.setToolTip("Support Malleus on Paypal")
-        donate_button.clicked.connect(
-            lambda: QDesktopServices.openUrl(
-                QUrl("https://www.paypal.com/donate/?hosted_button_id=9VM7MHMMK5JJJ")
-            )
-        )
-
-        if has_notes:
-            row1 = QHBoxLayout()
-            row1.setSpacing(6)
-
-            select_all_button = QPushButton("Select All")
-            select_all_button.setObjectName("secondary")
-            select_all_button.clicked.connect(self.select_all_pages)
-            row1.addWidget(select_all_button, stretch=1)
-
-            suggest_button = QPushButton("✦ Suggest Tags")
-            suggest_button.setObjectName("secondary")
-            suggest_button.setToolTip(
-                "Automatically suggest subject tags based on the card's text content"
-            )
-            suggest_button.clicked.connect(self.suggest_tags_from_card)
-            row1.addWidget(suggest_button, stretch=1)
-
-            add_tags_button = QPushButton("Add Tags")
-            add_tags_button.setObjectName("secondary")
-            add_tags_button.clicked.connect(self.add_tags)
-            row1.addWidget(add_tags_button, stretch=1)
-
-            if not isinstance(self.parent(), AddCards):
-                replace_tags_button = QPushButton("Replace Tags")
-                replace_tags_button.setObjectName("secondary")
-                replace_tags_button.clicked.connect(self.replace_tags)
-                row1.addWidget(replace_tags_button, stretch=1)
-
-                remove_tags_button = QPushButton("Remove Tags")
-                remove_tags_button.setObjectName("danger")
-                remove_tags_button.clicked.connect(self.remove_tags)
-                row1.addWidget(remove_tags_button, stretch=1)
-
-            buttons_vbox.addLayout(row1)
-
-            row2 = QHBoxLayout()
-            row2.setSpacing(6)
-
-            find_cards_button = QPushButton("Find Cards")
-            find_cards_button.clicked.connect(self.search_cards)
-            row2.addWidget(find_cards_button, stretch=1)
-
-            if not isinstance(self.parent(), AddCards):
-                create_cards_button = QPushButton("Create Cards")
-                create_cards_button.clicked.connect(self.create_cards)
-                row2.addWidget(create_cards_button, stretch=1)
-
-            row2.addWidget(update_database_button, stretch=1)
-            row2.addWidget(guidelines_button, stretch=1)
-            row2.addWidget(donate_button, stretch=1)
-            buttons_vbox.addLayout(row2)
-
-        else:
-            row1 = QHBoxLayout()
-            row1.setSpacing(6)
-
-            select_all_button = QPushButton("Select All")
-            select_all_button.setObjectName("secondary")
-            select_all_button.clicked.connect(self.select_all_pages)
-            row1.addWidget(select_all_button, stretch=1)
-
-            find_cards_button = QPushButton("Find Cards")
-            find_cards_button.clicked.connect(self.search_cards)
-            row1.addWidget(find_cards_button, stretch=1)
-
+        self._tag_actions = QWidget()
+        tag_row = QHBoxLayout(self._tag_actions)
+        tag_row.setContentsMargins(0, 4, 0, 0)
+        tag_row.setSpacing(8)
+        if not is_add_cards:
             create_cards_button = QPushButton("Create Cards")
             create_cards_button.clicked.connect(self.create_cards)
-            row1.addWidget(create_cards_button, stretch=1)
+            tag_row.addWidget(create_cards_button, stretch=1)
+        if has_notes:
+            # Replace / Remove aren't offered from the Add Cards window.
+            tag_row.addWidget(self._tag_split_button(with_menu=not is_add_cards), stretch=1)
 
-            row1.addWidget(update_database_button, stretch=1)
-            row1.addWidget(guidelines_button, stretch=1)
-            row1.addWidget(donate_button, stretch=1)
-            buttons_vbox.addLayout(row1)
+        # Stacked, not shown/hidden: both pages stay laid out, so switching
+        # modes can't paint a button at a stale position (flicker) or change
+        # the panel's height.
+        from aqt.qt import QStackedWidget
+        self._actions_stack = QStackedWidget()
+        self._actions_stack.setStyleSheet("QStackedWidget { background: transparent; }")
+        self._actions_stack.addWidget(self._find_actions)
+        self._actions_stack.addWidget(self._tag_actions)
+        details_layout.addWidget(self._actions_stack)
 
-        button_widget = QWidget()
-        button_widget.setLayout(buttons_vbox)
-        button_widget.setSizePolicy(
+        details_panel.setSizePolicy(
             QSizePolicy.Policy.Expanding,
             QSizePolicy.Policy.Fixed
         )
-        content_layout.addWidget(button_widget, stretch=0)
+        mode_box.addWidget(details_panel)
+        self._tabbed.set_parts(self._mode_tabs, details_panel)
+        content_layout.addWidget(self._tabbed, stretch=0)
+        self._paint_mode()
 
         layout.addWidget(content_widget)
         self.setLayout(layout)
 
         # Show recent tags on first open
         self._show_recent_tags()
+
+    def _details_label(self, text: str, tooltip: str = None,
+                       fixed_width: bool = True) -> QLabel:
+        """Bold row label for the card details panel (fixed width aligns rows)."""
+        lbl = QLabel(text)
+        lbl.setStyleSheet("font-size: 12px; font-weight: 700; background: transparent;")
+        if fixed_width:
+            lbl.setFixedWidth(self._DETAILS_LABEL_W)
+        if tooltip:
+            lbl.setToolTip(tooltip)
+        return lbl
+
+    # ── Header links: ↻ Updated … · Guidelines ↗ · 🫶 Support ─────────────────
+
+    @staticmethod
+    def _style_header_link(button: QPushButton, color: str = "palette(placeholderText)",
+                           first: bool = False):
+        pad_left = "0px" if first else "6px"
+        button.setStyleSheet(
+            f"QPushButton {{ border: none; background: transparent; color: {color};"
+            f" font-size: 11px; font-weight: 600; padding: 2px 6px 2px {pad_left};"
+            " min-height: 0px; border-radius: 5px; }"
+            "QPushButton:hover { color: #6a9fd8; }"
+        )
+
+    def _build_header_links(self) -> QWidget:
+        """Quiet link row shown under the header title (replaces the tagline)."""
+        row = QWidget()
+        lay = QHBoxLayout(row)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(2)
+
+        def _sep():
+            line = QFrame()
+            line.setFrameShape(QFrame.Shape.NoFrame)
+            line.setFixedSize(1, 11)
+            line.setStyleSheet("background: rgba(128,128,128,0.35);")
+            return line
+
+        update_link = QPushButton("↻ Update database")
+        update_link.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._style_header_link(update_link, first=True)
+        update_link.clicked.connect(self._on_update_database)
+        self._update_database_button = update_link
+
+        guidelines_link = QPushButton("Guidelines ↗")
+        guidelines_link.setCursor(Qt.CursorShape.PointingHandCursor)
+        guidelines_link.setToolTip("Malleus card submission guidelines")
+        self._style_header_link(guidelines_link)
+        guidelines_link.clicked.connect(
+            lambda: QDesktopServices.openUrl(
+                QUrl("https://malleuscm.notion.site/submission-guidelines")
+            )
+        )
+
+        support_link = QPushButton("🫶 Support")
+        support_link.setCursor(Qt.CursorShape.PointingHandCursor)
+        support_link.setToolTip("Support Malleus on PayPal")
+        self._style_header_link(support_link, color="#d4a24a")
+        support_link.clicked.connect(
+            lambda: QDesktopServices.openUrl(
+                QUrl("https://www.paypal.com/donate/?hosted_button_id=9VM7MHMMK5JJJ")
+            )
+        )
+
+        lay.addWidget(update_link)
+        lay.addWidget(_sep())
+        lay.addWidget(guidelines_link)
+        lay.addWidget(_sep())
+        lay.addWidget(support_link)
+        lay.addStretch()
+
+        self._update_cache_age_label()
+        return row
+
+    def _on_update_database(self):
+        full = bool(
+            QApplication.queryKeyboardModifiers()
+            & Qt.KeyboardModifier.ShiftModifier
+        )
+        self._update_database_button.setText("↻ Updating…")
+
+        def _after_update():
+            # Runs once the async update chain finishes (success or error) —
+            # refreshing the suggestion index / age label any earlier would
+            # read stale data.
+            invalidate_index()
+            try:
+                self._update_cache_age_label()
+            except RuntimeError:
+                pass   # dialog was closed while the update ran
+
+        perform_cache_update(self.notion_cache, mw, full=full,
+                             on_complete=_after_update)
+
+    # ── Action buttons ────────────────────────────────────────────────────────
+
+    def _tag_split_button(self, with_menu: bool) -> QWidget:
+        """Add Tags, with Replace / Remove behind a ▾ menu when available."""
+        add_tags_button = QPushButton("Add Tags")
+        add_tags_button.clicked.connect(self.add_tags)
+        if not with_menu:
+            return add_tags_button
+
+        add_tags_button.setStyleSheet(
+            "QPushButton { border-top-right-radius: 0px; border-bottom-right-radius: 0px; }"
+        )
+        more_button = QPushButton("▾")
+        more_button.setToolTip("Replace or remove tags")
+        more_button.setStyleSheet(
+            "QPushButton { border-top-left-radius: 0px; border-bottom-left-radius: 0px;"
+            " border-left: 1px solid rgba(255,255,255,0.35);"
+            " padding-left: 11px; padding-right: 11px; }"
+        )
+        more_button.clicked.connect(lambda: self._open_tag_menu(more_button))
+
+        split = QWidget()
+        split_layout = QHBoxLayout(split)
+        split_layout.setContentsMargins(0, 0, 0, 0)
+        split_layout.setSpacing(0)
+        split_layout.addWidget(add_tags_button, stretch=1)
+        split_layout.addWidget(more_button, stretch=0)
+        return split
+
+    def _open_tag_menu(self, anchor: QPushButton):
+        """Replace / Remove Tags menu, opened above the ▾ button."""
+        from aqt.qt import QWidgetAction
+        menu = QMenu(self)
+        _style_popup_menu(menu)
+
+        def _entry(text, tooltip, callback, color=None):
+            # QWidgetAction so Remove can be red (QMenu can't colour one item).
+            lbl = QLabel(text)
+            lbl.setToolTip(tooltip)
+            lbl.setStyleSheet(
+                "QLabel { padding: 6px 14px; border-radius: 4px; background: transparent;"
+                + (f" color: {color};" if color else "") + " }"
+                "QLabel:hover { background: rgba(74,130,204,0.18); }"
+            )
+
+            def _press(event, _cb=callback):
+                menu.close()
+                QTimer.singleShot(0, _cb)
+            lbl.mousePressEvent = _press
+            action = QWidgetAction(menu)
+            action.setDefaultWidget(lbl)
+            menu.addAction(action)
+
+        _entry("Replace Tags", "Swap this database's existing tags for the selected page",
+               self.replace_tags)
+        menu.addSeparator()
+        _entry("Remove Tags", "Remove the selected pages' tags (or all Malleus tags "
+               "if nothing is selected)", self.remove_tags, color="#e07070")
+
+        hint = menu.sizeHint()
+        menu.exec(anchor.mapToGlobal(
+            QPoint(anchor.width() - hint.width(), -hint.height() - 4)))
 
     def _remember_subtag(self, selection: str):
         """Record the user's subtag pick (always stored; restored on new rows
@@ -973,11 +1408,51 @@ class NotionPageSelector(QDialog):
                         break
             if not tag:
                 return 0
-            tag_strings = getattr(self, '_note_tag_strings', [])
+            tag_strings = self._yield_filtered_tag_strings()
             return sum(1 for ts in tag_strings if tag in ts)
         except Exception as e:
             print(f"[MalleusCardCount] error: {e}")
             return 0
+
+    def _yield_filtered_tag_strings(self) -> list:
+        """Note tag strings restricted to the Find yield + region filters (cached per filter)."""
+        tag_strings = getattr(self, '_note_tag_strings', [])
+        features = self._region_states()
+        key = (id(tag_strings), tuple(self._find_yields), tuple(sorted(features.items())))
+        if getattr(self, '_filtered_tag_strings_key', None) != key:
+            filter_yields = bool(build_yield_filter_query(self._find_yields))
+            if filter_yields or any(features.values()):
+                sel = {k.lower() for k in self._find_yields}
+                self._filtered_tag_strings = [
+                    ts for ts in tag_strings
+                    if (not filter_yields or note_matches_yields(ts, sel))
+                    and note_matches_features(ts, features)]
+            else:
+                self._filtered_tag_strings = tag_strings
+            self._filtered_tag_strings_key = key
+        return self._filtered_tag_strings
+
+    @staticmethod
+    def _style_count_label(label: QLabel, card_count: int):
+        label.setText(f"{card_count} {'note' if card_count == 1 else 'notes'}")
+        if card_count == 0:
+            label.setStyleSheet(
+                "color: rgba(128,128,128,0.55); font-size: 11px;"
+                " background: transparent; padding: 1px 7px;"
+            )
+        else:
+            label.setStyleSheet(
+                "color: #4a82cc; font-size: 11px; font-weight: 600;"
+                " background: rgba(74,130,204,0.12); border-radius: 8px; padding: 1px 7px;"
+            )
+
+    def _refresh_card_counts(self):
+        """Recount the visible result rows (after the yield filter changes)."""
+        for label, page in self._count_labels:
+            try:
+                self._style_count_label(label, self._get_card_count_for_page(page))
+            except RuntimeError:
+                pass   # row widget already deleted
 
     @staticmethod
     def _score_to_dots(score: float, max_score: float = 4.0) -> str:
@@ -1153,19 +1628,13 @@ class NotionPageSelector(QDialog):
 
         # ── Card count pill ────────────────────────────────────────────────
         if show_count:
-            card_count = self._get_card_count_for_page(page)
-            count_label = QLabel(f"{card_count} {'note' if card_count == 1 else 'notes'}")
-            count_label.setToolTip("Number of notes in your collection tagged with this page")
-            if card_count == 0:
-                count_label.setStyleSheet(
-                    "color: rgba(128,128,128,0.55); font-size: 11px;"
-                    " background: transparent; padding: 1px 7px;"
-                )
-            else:
-                count_label.setStyleSheet(
-                    "color: #4a82cc; font-size: 11px; font-weight: 600;"
-                    " background: rgba(74,130,204,0.12); border-radius: 8px; padding: 1px 7px;"
-                )
+            count_label = QLabel()
+            self._style_count_label(count_label, self._get_card_count_for_page(page))
+            count_label.setToolTip(
+                "Number of notes in your collection tagged with this page\n"
+                "(matching the Find Cards yield and NZ/AUS filters)"
+            )
+            self._count_labels.append((count_label, page))
             row_layout.addWidget(count_label, stretch=0)
 
         # ── Confidence dots (suggestions only) ────────────────────────────
@@ -1203,8 +1672,8 @@ class NotionPageSelector(QDialog):
 
           Up / Down    — move focus between result checkboxes
           Space        — toggle the focused checkbox  (Qt default, kept)
-          Enter/Return — trigger primary action (Add Tags if note open,
-                         otherwise Create Cards)
+          Enter/Return — current mode's action: Find Cards, or in Create &
+                         tag, Add Tags if a note is open, otherwise Create Cards
           Escape       — close the dialog
           Ctrl+A       — select all checkboxes
           Ctrl+D       — deselect all checkboxes
@@ -1235,7 +1704,9 @@ class NotionPageSelector(QDialog):
             return
 
         if key in (Qt_Key.Key_Return, Qt_Key.Key_Enter):
-            if self.has_notes_to_process():
+            if self._mode == 'find':
+                self.search_cards()
+            elif self.has_notes_to_process():
                 self.add_tags()
             else:
                 self.create_cards()
@@ -1417,44 +1888,29 @@ class NotionPageSelector(QDialog):
 
     # ── Yield handlers ────────────────────────────────────────────────────────
 
-    def handle_yield_click(self, yield_option):
-        """Handle yield segment button clicks — allow deselection of selected button."""
-        btn = self.yield_radio_buttons[yield_option]
-        _short = {
-            "High Yield": "High Yield",
-            "Medium Yield": "Medium Yield",
-            "Low Yield": "Low Yield",
-            "Beyond Medical Student Level": "Beyond Medical School",
-        }
-
-        if self._last_checked_yield == yield_option:
-            # Deselect current
-            btn.setStyleSheet(btn._inactive_style)
-            self._last_checked_yield = None
-            NotionPageSelector.last_yield_selection = ""
-            self._yield_badge.setText("None selected")
-            self._yield_badge.setStyleSheet(
-                "font-size: 10px; color: palette(placeholderText);"
-                " background: palette(midlight); border: 1px solid rgba(128,128,128,0.25);"
-                " border-radius: 5px; padding: 1px 6px;"
-            )
+    def _on_yield_button(self, name: str):
+        """Yield segment click: multi-select filter in Find, single yield in Create & tag."""
+        if self._mode == 'find':
+            key = _YIELD_KEY_BY_NAME.get(name, "Untagged")
+            selected = list(self._find_yields)
+            if key in selected:
+                if len(selected) == 1:
+                    return            # never an empty filter
+                selected.remove(key)
+            else:
+                selected.append(key)
+            self._on_find_yields_changed(normalise_find_yields(selected))
         else:
-            # Deselect previous
-            if self._last_checked_yield and self._last_checked_yield in self.yield_radio_buttons:
-                old_btn = self.yield_radio_buttons[self._last_checked_yield]
-                old_btn.setStyleSheet(old_btn._inactive_style)
-            # Select new
-            btn.setStyleSheet(btn._active_style)
+            self.handle_yield_click(name)
+        self._paint_mode()
+
+    def handle_yield_click(self, yield_option):
+        """Tagging yield: single select, click the selected level again to clear."""
+        if self._last_checked_yield == yield_option:
+            self._last_checked_yield = None
+        else:
             self._last_checked_yield = yield_option
-            NotionPageSelector.last_yield_selection = yield_option
-            r, g, b = btn._yield_rgb
-            self._yield_badge.setText(_short.get(yield_option, yield_option))
-            self._yield_badge.setStyleSheet(
-                f"font-size: 10px; color: {btn._yield_color}; font-weight: 600;"
-                f" background: rgba({r},{g},{b},0.12);"
-                f" border: 1px solid rgba({r},{g},{b},0.30);"
-                " border-radius: 5px; padding: 1px 6px;"
-            )
+        NotionPageSelector.last_yield_selection = self._last_checked_yield or ""
 
     def get_selected_yield_tags(self):
         """Get the selected yield tags from the segmented control."""
@@ -1474,17 +1930,188 @@ class NotionPageSelector(QDialog):
         yield_pattern = "#Malleus_CM::#Yield::"
         return [tag for tag in tags if tag.startswith(yield_pattern)]
 
-    def get_yield_search_query(self):
-        """Get the yield search query for the Anki browser."""
-        yield_search_mapping = {
-            "High Yield": "tag:#Malleus_CM::#Yield::High",
-            "Medium Yield": "tag:#Malleus_CM::#Yield::Medium",
-            "Low Yield": "tag:#Malleus_CM::#Yield::Low",
-            "Beyond Medical Student Level": "tag:#Malleus_CM::#Yield::Beyond_medical_student_level"
-        }
-        if self._last_checked_yield:
-            return yield_search_mapping.get(self._last_checked_yield, "")
-        return ""
+    def _on_find_yields_changed(self, selected: list):
+        """Persist the Find yield filter and refresh any visible card counts."""
+        self._find_yields = selected
+        self.config['find_yields'] = selected
+        try:
+            mw.addonManager.writeConfig(__name__.split('.')[0], self.config)
+        except Exception as e:
+            print(f"[Malleus] failed to save find_yields: {e}")
+        self._refresh_card_counts()
+
+    # ── Region (NZ / AUS only) toggles ────────────────────────────────────────
+
+    def _on_region_toggled(self, toggle):
+        """Store the toggle in the current mode's state.  A card can't be both
+        NZ- and AUS-only, so only one may be 'only'."""
+        states = self._region_state[self._mode]
+        states[toggle.tag] = toggle.state
+        if toggle.state > 0:
+            for other in self._region_toggles:
+                if other is not toggle and states[other.tag] > 0:
+                    states[other.tag] = 0
+                    other.set_state(0)
+        if self._mode == 'find':
+            excluded = [label for label, _, tag in REGION_FEATURES
+                        if self._region_state['find'][tag] < 0]
+            if excluded != self.config.get('exclude_region_features'):
+                self.config['exclude_region_features'] = excluded
+                try:
+                    mw.addonManager.writeConfig(__name__.split('.')[0], self.config)
+                except Exception as e:
+                    print(f"[Malleus] failed to save exclude_region_features: {e}")
+            self._refresh_card_counts()
+        self._paint_mode()
+
+    def _region_states(self) -> dict:
+        """Find tab's {tag: +1 include / -1 exclude / 0 off} for the search query."""
+        return dict(self._region_state['find'])
+
+    def get_selected_feature_tags(self) -> list:
+        """Create & tag tab's region tags to ADD when tagging/creating."""
+        return [tag for tag, state in self._region_state['tag'].items() if state > 0]
+
+    # ── Find / Create & tag modes ─────────────────────────────────────────────
+
+    # Tab buttons are transparent — _TabbedPanel paints their shapes
+    _TAB_STYLE = (
+        "QPushButton {{ border: none; background: transparent; color: {fg};"
+        " padding: 7px 18px 7px 18px; min-height: 0px;"
+        " font-size: 12px; font-weight: 650; }}"
+        "QPushButton:hover {{ color: palette(windowText); }}"
+    )
+
+    def _initial_mode(self) -> str:
+        """Main window → Find; Add Cards → Create & tag; Browser / Edit → last used."""
+        if isinstance(self.parent(), AddCards):
+            return 'tag'
+        if not self.has_notes_to_process():
+            return 'find'
+        return NotionPageSelector.last_mode
+
+    def _selected_note_count(self) -> int:
+        parent = self.parent()
+        try:
+            if isinstance(parent, Browser):
+                return len(parent.selectedNotes())
+        except Exception:
+            pass
+        return 1
+
+    def _set_mode(self, mode: str):
+        if mode == self._mode:
+            return
+        self._mode = mode
+        if self.has_notes_to_process() and not isinstance(self.parent(), AddCards):
+            NotionPageSelector.last_mode = mode
+        self._paint_mode()
+
+    def _paint_mode(self):
+        """Restyle the tabs, yield segment, country toggles, summary and actions
+        for the current mode — as a single repaint (see _apply_mode_styles)."""
+        if not hasattr(self, '_mode_summary'):
+            return
+        self.setUpdatesEnabled(False)
+        try:
+            self._apply_mode_styles()
+            # Settle every affected layout now, so widgets that just became
+            # visible (e.g. "No yield") are in place before the next paint.
+            for lay in (self.layout(), self._tabbed.layout(),
+                        self._actions_stack.parentWidget().layout(),
+                        self.yield_radio_buttons["No yield"].parentWidget().layout()):
+                if lay is not None:
+                    lay.activate()
+        finally:
+            self.setUpdatesEnabled(True)
+
+    def _apply_mode_styles(self):
+        find = self._mode == 'find'
+        # Rich text can't use palette(...) — resolve the theme colours here
+        pal = self.palette()
+        text_hex  = pal.color(QPalette.ColorRole.WindowText).name()
+        muted_hex = pal.color(QPalette.ColorRole.PlaceholderText).name()
+
+        for mode, tab in self._mode_tabs.items():
+            on = (mode == self._mode)
+            style = self._TAB_STYLE.format(
+                fg="palette(windowText)" if on else "palette(placeholderText)")
+            if tab.styleSheet() != style:
+                tab.setStyleSheet(style)
+        self._tabbed.set_active(self._mode)
+
+        # Yield segment
+        self._yield_row_label.setToolTip(
+            "Find cards with any of the ticked yields (remembered)" if find else
+            "The single yield given to created / tagged cards — click again to clear.\n"
+            "Hover a level for details."
+        )
+        for name, btn in self.yield_radio_buttons.items():
+            key = _YIELD_KEY_BY_NAME.get(name, "Untagged")
+            if find:
+                on = key in self._find_yields
+                btn.setVisible(True)
+                btn.setText(f"✓ {btn._label}" if on else btn._label)
+            else:
+                on = (name == self._last_checked_yield)
+                btn.setVisible(name in _YIELD_KEY_BY_NAME)   # no "No yield"
+                btn.setText(btn._label)
+            style = btn._active_style if on else btn._inactive_style
+            if btn.styleSheet() != style:
+                btn.setStyleSheet(style)
+
+        # Country toggles
+        states = self._region_state[self._mode]
+        for toggle in self._region_toggles:
+            toggle.set_tri_state(find)
+            toggle.set_state(states[toggle.tag])
+
+        # Summary line
+        b = lambda t: f"<b style='color: {text_hex};'>{t}</b>"
+        if find:
+            names = {"High": "High", "Medium": "Medium", "Low": "Low",
+                     "Beyond_medical_student_level": "Beyond MS",
+                     "Untagged": "no-yield"}
+            if set(_FIND_YIELD_KEYS) <= set(self._find_yields):
+                what = b("all")
+            else:
+                what = b(", ".join(names[k] for k in self._find_yields))
+            extras = []
+            for label, _, tag in REGION_FEATURES:
+                if states[tag] > 0:
+                    extras.append(f"only {label}-only cards")
+                elif states[tag] < 0:
+                    extras.append(f"hiding {label}-only cards")
+            text = f"Finds {what} cards" + "".join(f" · {e}" for e in extras)
+        else:
+            if self._last_checked_yield:
+                adds = [b(self._last_checked_yield)]
+                adds += [b(tag.split('::')[-1]) for tag in self.get_selected_feature_tags()]
+                text = "Adds " + " + ".join(adds) + " to created / tagged cards"
+            else:
+                text = ("No yield chosen — Add Tags keeps each card's existing yield;"
+                        " Create Cards needs one")
+        self._mode_summary.setText(f"<span style='color: {muted_hex};'>{text}</span>")
+
+        # Rotations hint, Suggest, actions
+        if getattr(self, '_rotation_hint', None) is not None \
+                and not self._rotation_toggle_btn.isHidden():
+            self._rotation_hint.setText(
+                "Narrow the search to a rotation" if find else
+                "Tick a result to pre-fill, or browse all")
+        if getattr(self, '_suggest_button', None) is not None:
+            self._suggest_button.setVisible(not find)
+            self.search_input.set_trailing_visible(not find)
+        self._actions_stack.setCurrentWidget(
+            self._find_actions if find else self._tag_actions)
+
+    @staticmethod
+    def _with_feature_tags(tags, feature_tags: list) -> list:
+        """Add *feature_tags*, dropping any other region tag (they're exclusive)."""
+        if not feature_tags:
+            return list(tags)
+        kept = [t for t in tags if t not in _REGION_FEATURE_TAGS]
+        return kept + [t for t in feature_tags if t not in kept]
 
     # ── Rotations panel ───────────────────────────────────────────────────────
 
@@ -1563,9 +2190,10 @@ class NotionPageSelector(QDialog):
                                  not d['parent'], d['name'].lower()))
         return defs
 
-    def _build_rotations_panel(self) -> QFrame:
+    def _build_rotations_panel(self) -> QWidget:
         """
-        Collapsible full-width panel with every rotation as a checkable chip.
+        Collapsible Rotations row (inside the card details panel) with every
+        rotation as a checkable chip.
 
         Chips are pre-selected from the rotation tags embedded in the checked
         result rows (Subjects directly, eTG via linked Subjects, Guidelines via
@@ -1579,24 +2207,25 @@ class NotionPageSelector(QDialog):
         self._rotation_auto = set()     # tags auto-derived from checked rows
         self._rotation_expanded = False
 
-        panel = QFrame()
-        panel.setObjectName("card_panel")
-        panel.setFrameShape(QFrame.Shape.NoFrame)
+        panel = QWidget()
+        panel.setStyleSheet("background: transparent;")
         v = QVBoxLayout(panel)
-        v.setContentsMargins(10, 10, 10, 10)
+        v.setContentsMargins(0, 0, 0, 0)
         v.setSpacing(6)
 
         # ── Header: title + badge + hint + expand/collapse toggle ──────────
         header = QHBoxLayout()
-        header.setSpacing(6)
-        title = QLabel("Rotations")
-        title.setStyleSheet("font-size: 12px; font-weight: 700; background: transparent;")
-        self._rotation_badge = QLabel("None selected")
+        header.setSpacing(8)
+        title = self._details_label(
+            "Rotations", "Pre-selected from your chosen pages — tick or untick to adjust")
+        self._rotation_badge = QLabel("None")
         self._rotation_badge.setStyleSheet(self._ROT_BADGE_OFF)
-        hint = QLabel("pre-selected from your chosen pages")
+        # Only shown while nothing is selected (selected chips replace it)
+        hint = QLabel("Tick a result to pre-fill, or browse all")
         hint.setStyleSheet(
-            "font-size: 10px; color: palette(placeholderText); background: transparent;"
+            "font-size: 11px; color: palette(placeholderText); background: transparent;"
         )
+        self._rotation_hint = hint
         self._rotation_toggle_btn = QPushButton("Show all  ▾")
         self._rotation_toggle_btn.setStyleSheet(
             "QPushButton { border: none; background: transparent; color: #4a82cc;"
@@ -1615,11 +2244,7 @@ class NotionPageSelector(QDialog):
 
         defs = self._load_rotation_defs()
         if not defs:
-            empty = QLabel("Rotation list unavailable — use ↻ Update Database to download it.")
-            empty.setStyleSheet(
-                "font-size: 11px; color: palette(placeholderText); background: transparent;"
-            )
-            v.addWidget(empty)
+            hint.setText("Rotation list unavailable — use ↻ in the header to download it")
             self._rotation_toggle_btn.setVisible(False)
             self._rotation_summary_host = None
             self._rotation_full_area = None
@@ -1628,6 +2253,8 @@ class NotionPageSelector(QDialog):
         # ── Collapsed view: just the selected chips (click to remove) ──────
         self._rotation_summary_host = QWidget()
         self._rotation_summary_host.setStyleSheet("background: transparent;")
+        # Indent so selected chips line up under the Yield segment
+        self._rotation_summary_host.setContentsMargins(self._DETAILS_LABEL_W + 8, 0, 0, 0)
         self._rotation_summary_flow = _FlowLayout(self._rotation_summary_host)
         v.addWidget(self._rotation_summary_host)
 
@@ -1688,7 +2315,8 @@ class NotionPageSelector(QDialog):
         if self._rotation_full_area is not None:
             self._rotation_full_area.setVisible(expanded)
         if self._rotation_summary_host is not None:
-            self._rotation_summary_host.setVisible(not expanded)
+            self._rotation_summary_host.setVisible(
+                not expanded and bool(self.get_selected_rotation_tags()))
         self._rotation_toggle_btn.setText("Hide  ▴" if expanded else "Show all  ▾")
 
     def _on_rotation_chip_clicked(self, tag: str, checked: bool):
@@ -1712,7 +2340,7 @@ class NotionPageSelector(QDialog):
 
         n = len(selected)
         if n == 0:
-            self._rotation_badge.setText("None selected")
+            self._rotation_badge.setText("None")
             self._rotation_badge.setStyleSheet(self._ROT_BADGE_OFF)
         else:
             self._rotation_badge.setText(f"{n} selected")
@@ -1726,14 +2354,9 @@ class NotionPageSelector(QDialog):
             if w is not None:
                 w.deleteLater()
 
-        if not selected:
-            placeholder = QLabel("None — tick a result to pre-fill, or Show all to browse")
-            placeholder.setStyleSheet(
-                "font-size: 11px; color: palette(placeholderText);"
-                " background: transparent; padding: 2px 0px;"
-            )
-            self._rotation_summary_flow.addWidget(placeholder)
-        else:
+        self._rotation_hint.setVisible(not selected)
+        self._rotation_summary_host.setVisible(not self._rotation_expanded and bool(selected))
+        if selected:
             for tag in selected:
                 b = QPushButton(
                     _fix_amp_display(self._rotation_names.get(tag, tag)) + "  ✕"
@@ -1924,13 +2547,16 @@ class NotionPageSelector(QDialog):
         self._showing_recent = True
 
     def _update_cache_age_label(self, _unused=None):
-        """Update the 'Update Database' button tooltip showing the oldest cache age."""
+        """Show the oldest cache's age on the header ↻ link (amber when stale)."""
         if not hasattr(self, '_update_database_button'):
             return
+        actions = ("Click: download the latest Malleus database cache\n"
+                   "Shift+click: full rebuild directly from Notion (slower)")
+        link = self._update_database_button
         try:
             import time as _time
             from ..config import DATABASES
-            oldest_days = 0
+            oldest_age = 0.0
             oldest_name = ""
             missing_name = None
             for db_id, db_name in DATABASES:
@@ -1938,32 +2564,31 @@ class NotionPageSelector(QDialog):
                 if ts <= 0:   # no cache file yet (e.g. right after an add-on update)
                     missing_name = db_name
                     break
-                age_days = int((_time.time() - ts) / 86400)
-                if age_days > oldest_days:
-                    oldest_days = age_days
-                    oldest_name = db_name
+                age = _time.time() - ts
+                if age > oldest_age:
+                    oldest_age, oldest_name = age, db_name
             if missing_name:
-                age_text = f"{missing_name}: not downloaded yet"
-                warning = " — click to download"
-            elif oldest_days == 0:
-                age_text = "all databases updated today"
-                warning = ""
-            elif oldest_days == 1:
-                age_text = f"{oldest_name}: 1 day old"
-                warning = ""
+                link.setText("↻ Download database")
+                link.setToolTip(f"{missing_name} hasn't been downloaded yet\n{actions}")
+                self._style_header_link(link, color="#d4a24a", first=True)
+                return
+            hours = int(oldest_age // 3600)
+            if hours < 1:
+                when = "just now"
+            elif hours < 24:
+                when = f"{hours} h ago"
             else:
-                age_text = f"{oldest_name}: {oldest_days} days old"
-                warning = " — consider updating" if oldest_days > 7 else ""
-            self._update_database_button.setToolTip(
-                f"Cache: {age_text}{warning}\n"
-                "Download the latest Malleus database cache\n"
-                "Shift+click: full rebuild directly from Notion (slower)"
-            )
+                days = hours // 24
+                when = f"{days} day{'s' if days != 1 else ''} ago"
+            link.setText(f"↻ Updated {when}")
+            detail = f"Oldest: {oldest_name}" if oldest_name else "All databases up to date"
+            link.setToolTip(f"{detail}\n{actions}")
+            stale = oldest_age > 7 * 86400
+            self._style_header_link(link, color="#d4a24a" if stale else
+                                    "palette(placeholderText)", first=True)
         except Exception:
-            self._update_database_button.setToolTip(
-                "Download the latest Malleus database cache\n"
-                "Shift+click: full rebuild directly from Notion (slower)"
-            )
+            link.setText("↻ Update database")
+            link.setToolTip(actions)
 
     # ── Search ────────────────────────────────────────────────────────────────
 
@@ -1973,6 +2598,7 @@ class NotionPageSelector(QDialog):
             widget = self.checkbox_layout.itemAt(i).widget()
             if widget:
                 widget.setParent(None)
+        self._count_labels = []
         if hasattr(self, '_results_count_label'):
             self._results_count_label.setText("")
 
@@ -2411,8 +3037,12 @@ class NotionPageSelector(QDialog):
     def search_cards(self):
         selected_rows = self._get_selected_rows()
         selected_rotations = self.get_selected_rotation_tags()
-        if not selected_rows and not selected_rotations:
-            showInfo("Please select at least one page or rotation")
+        yield_query = build_yield_filter_query(self._find_yields)
+        feature_query = build_feature_filter_query(self._region_states())
+        if (not selected_rows and not selected_rotations
+                and not yield_query and not feature_query):
+            showInfo("Please select at least one page or rotation, "
+                     "or narrow the Yield / NZ / AUS filters")
             return
 
         # Collect all tag strings from selected pages
@@ -2426,7 +3056,7 @@ class NotionPageSelector(QDialog):
                 val = tag_prop['formula'].get('string', '')
                 tags.extend(val.split())
 
-        if not tags and not selected_rotations:
+        if selected_rows and not tags and not selected_rotations:
             showInfo("Could not determine tags for selected pages.")
             return
 
@@ -2447,26 +3077,32 @@ class NotionPageSelector(QDialog):
         else:
             subtag = ""
 
-        def escape_underscores(tag):
-            return tag.replace('_', '\\_')
-
         search_query = " or ".join(
-            f'"tag:{escape_underscores(tag)}{subtag}"' for tag in individual_tags
+            f'"tag:{_escape_tag(tag)}{subtag}"' for tag in individual_tags
         )
 
         # Rotations narrow the page query (like Yield); on their own they ARE
         # the query.  Multiple rotations are OR'd with each other.
         rotation_query = " or ".join(
-            f'"tag:{escape_underscores(tag)}"' for tag in selected_rotations
+            f'"tag:{_escape_tag(tag)}"' for tag in selected_rotations
         )
         if search_query and rotation_query:
             search_query = f"({search_query}) and ({rotation_query})"
         elif rotation_query:
             search_query = rotation_query
 
-        yield_query = self.get_yield_search_query()
-        if yield_query:
+        # The Find yield filter (not the tagging Yield Level segment) narrows
+        # the query; with nothing else selected it is the whole query.
+        if search_query and yield_query:
             search_query = f"({search_query}) and ({yield_query})"
+        elif yield_query:
+            search_query = yield_query
+
+        # NZ / AUS toggles: plain AND-ed include/exclude terms.
+        if search_query and feature_query:
+            search_query = f"({search_query}) and {feature_query}"
+        elif feature_query:
+            search_query = feature_query
 
         if isinstance(self.parent(), Browser):
             browser = self.parent()
@@ -2550,7 +3186,9 @@ class NotionPageSelector(QDialog):
         tags = self.get_tags_from_selected_pages() if selected_rows else []
         selected_db_names = {r['page'].get('_database_name', '') for r in selected_rows}
 
-        all_tags = tags + selected_yields + selected_rotations
+        all_tags = self._with_feature_tags(
+            tags + selected_yields + selected_rotations,
+            self.get_selected_feature_tags())
 
         note = {
             'deckName':  self.config['deck_name'],
@@ -3047,13 +3685,16 @@ class NotionPageSelector(QDialog):
         selected_rows      = self._get_selected_rows()
         selected_yields    = self.get_selected_yield_tags()
         selected_rotations = self.get_selected_rotation_tags()
+        selected_features  = self.get_selected_feature_tags()
 
-        if not selected_rows and not selected_yields and not selected_rotations:
-            showInfo("Please select at least one page, rotation or yield level")
+        if (not selected_rows and not selected_yields and not selected_rotations
+                and not selected_features):
+            showInfo("Please select at least one page, rotation, yield level "
+                     "or NZ/AUS only")
             return
 
-        if not selected_rows and not selected_rotations and selected_yields:
-            return self._update_yield_only(notes, selected_yields)
+        if not selected_rows and not selected_rotations:
+            return self._update_yield_only(notes, selected_yields, selected_features)
 
         # Validate subtags
         for row_data in selected_rows:
@@ -3114,7 +3755,8 @@ class NotionPageSelector(QDialog):
             new_tags     = (set(self.get_tags_from_selected_pages())
                             if selected_rows else set())
             all_new_tags = new_tags | set(final_yield_tags) | set(selected_rotations)
-            note.tags    = list(current_tags | all_new_tags)
+            note.tags    = self._with_feature_tags(current_tags | all_new_tags,
+                                                   selected_features)
 
             selected_db_names = {r['page'].get('_database_name', '') for r in selected_rows}
             self._schedule_extra_synced(
@@ -3145,12 +3787,12 @@ class NotionPageSelector(QDialog):
             summary += f"Skipped (no yield selected): {notes_needing_yield} note(s)\n"
         showInfo(summary)
 
-    def _update_yield_only(self, notes, selected_yields):
-        """Update only the yield tags without adding any other tags."""
+    def _update_yield_only(self, notes, selected_yields, selected_features=()):
+        """Update only the yield and/or NZ/AUS tags without adding page tags."""
         if len(selected_yields) > 1:
             showInfo("Please select only one yield level")
             return
-        if len(selected_yields) == 0:
+        if not selected_yields and not selected_features:
             showInfo("Please select a yield level")
             return
 
@@ -3161,8 +3803,11 @@ class NotionPageSelector(QDialog):
         notes_modified = 0
 
         for note in notes:
-            remaining = [t for t in note.tags if not t.startswith("#Malleus_CM::#Yield::")]
-            note.tags = remaining + selected_yields
+            tags = list(note.tags)
+            if selected_yields:
+                tags = [t for t in tags if not t.startswith("#Malleus_CM::#Yield::")]
+                tags += selected_yields
+            note.tags = self._with_feature_tags(tags, list(selected_features))
             self._schedule_extra_synced(note, self.notion_cache, subjects_db=False)
             if not is_add_cards:
                 note.flush()
@@ -3176,9 +3821,12 @@ class NotionPageSelector(QDialog):
             parent.editor.loadNote()
 
         if not is_single:
-            summary = f"Successfully updated yield for {total_notes} note(s)\n"
-            summary += f"New yield: {selected_yields[0].replace('#Malleus_CM::#Yield::', '')}"
-            showInfo(summary)
+            summary = f"Successfully updated {total_notes} note(s)\n"
+            if selected_yields:
+                summary += f"New yield: {selected_yields[0].replace('#Malleus_CM::#Yield::', '')}\n"
+            for tag in selected_features:
+                summary += f"Added: {tag.split('::')[-1].replace('_', ' ')}\n"
+            showInfo(summary.rstrip())
 
     def _add_tags_single_note(self, note, selected_rows):
         """Handle add_tags for a single note with proper validation."""
@@ -3202,7 +3850,8 @@ class NotionPageSelector(QDialog):
         new_tags     = (set(self.get_tags_from_selected_pages())
                         if selected_rows else set())
         all_new_tags = new_tags | set(final_yield_tags) | set(self.get_selected_rotation_tags())
-        note.tags    = list(current_tags | all_new_tags)
+        note.tags    = self._with_feature_tags(current_tags | all_new_tags,
+                                               self.get_selected_feature_tags())
 
         selected_db_names = {r['page'].get('_database_name', '') for r in selected_rows}
         self._schedule_extra_synced(
@@ -3230,13 +3879,14 @@ class NotionPageSelector(QDialog):
 
         selected_rows  = self._get_selected_rows()
         selected_yields = self.get_selected_yield_tags()
+        selected_features = self.get_selected_feature_tags()
 
-        if not selected_rows and not selected_yields:
-            showInfo("Please select at least one page or yield level")
+        if not selected_rows and not selected_yields and not selected_features:
+            showInfo("Please select at least one page, yield level or NZ/AUS only")
             return
 
-        if not selected_rows and selected_yields:
-            return self._update_yield_only(notes, selected_yields)
+        if not selected_rows:
+            return self._update_yield_only(notes, selected_yields, selected_features)
 
         if len(selected_rows) > 1:
             showInfo(
@@ -3418,7 +4068,8 @@ class NotionPageSelector(QDialog):
         # ── Rebuild final tag list ────────────────────────────────────────────
         remaining_tags = [t for t in remaining_tags if not t.startswith("#Malleus_CM::#Yield::")]
         all_new_tags   = new_tags + final_yield_tags + self.get_selected_rotation_tags()
-        final_tags     = list(set(remaining_tags + all_new_tags))
+        final_tags     = self._with_feature_tags(set(remaining_tags + all_new_tags),
+                                                 self.get_selected_feature_tags())
 
         yield_in_final = [t for t in final_tags if t.startswith("#Malleus_CM::#Yield::")]
         if len(yield_in_final) > 1:

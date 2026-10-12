@@ -173,6 +173,16 @@ def load_config():
         config['remember_subtag_selection'] = False  # pre-select last subtag on result rows
         mw.addonManager.writeConfig(__name__.split('.')[0], config)
 
+    if 'find_yields' not in config:
+        # Find Cards yield filter; the dialog writes changes back here.
+        config['find_yields'] = ['High', 'Medium', 'Untagged']
+        mw.addonManager.writeConfig(__name__.split('.')[0], config)
+
+    if 'exclude_region_features' not in config:
+        # Find Cards leaves out these region-only cards ("NZ" / "AUS").
+        config['exclude_region_features'] = []
+        mw.addonManager.writeConfig(__name__.split('.')[0], config)
+
     return config
 
 def get_database_id(database_name):

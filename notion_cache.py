@@ -138,7 +138,7 @@ class NotionCache:
             if is_expired and warn_if_expired and not self._expiry_warning_shown:
                 self._expiry_warning_shown = True
                 mw.taskman.run_on_main(
-                    lambda: malleus_tooltip("Newer database version available. Click 'Update Database' to update.")
+                    lambda: malleus_tooltip("Newer database version available. Click ↻ in the Page Selector header to update.")
                 )
 
             # Return cached data even if expired (better than crashing)

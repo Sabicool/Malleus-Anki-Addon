@@ -126,3 +126,41 @@ under the same subtag (e.g. a Management run).
 ```
 "remember_subtag_selection": false
 ```
+
+---
+
+## `find_yields`
+**Default:** `["High", "Medium", "Untagged"]`
+
+Which yield levels **Find Cards** returns. Allowed values: `"High"`, `"Medium"`, `"Low"`,
+`"Beyond_medical_student_level"` and `"Untagged"` (notes with no yield tag).
+
+You don't normally edit this by hand: the Yield buttons in the Page Selector's
+**🔍 Find cards** tab update it (tick as many as you like; "No yield" is the `"Untagged"` value),
+so your choice is remembered between sessions.
+
+This is separate from the yield in the **🏷 Create & tag** tab, which sets the single yield used
+when tagging or creating cards. When `show_card_counts` is on, the per-result note counts also
+follow this filter.
+
+```
+"find_yields": ["High", "Medium", "Untagged"]
+```
+
+---
+
+## `exclude_region_features`
+**Default:** `[]`
+
+Region-specific cards that **Find Cards** leaves out. Allowed values: `"NZ"` (cards tagged
+`#Malleus_CM::#Card_Feature::NZ_Only`) and `"AUS"` (cards tagged
+`#Malleus_CM::#Card_Feature::AUS_Only`). For example, a New Zealand student would use:
+
+```
+"exclude_region_features": ["AUS"]
+```
+
+The NZ / AUS buttons in the **🔍 Find cards** tab update this automatically: setting one to
+**Not NZ** / **Not AUS** saves it, and turning it off removes it. This only affects searching and
+never changes card tags. **NZ only** / **AUS only** (in either tab) is never saved and starts off
+each time the Page Selector opens; in the **🏷 Create & tag** tab it adds the tag to cards.
