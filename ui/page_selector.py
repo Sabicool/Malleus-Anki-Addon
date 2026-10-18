@@ -696,6 +696,10 @@ class NotionPageSelector(QDialog):
     # Card details panel geometry (Yield / Country / Rotations rows)
     _DETAILS_ROW_H   = 32
     _DETAILS_LABEL_W = 72
+    # Mode tabs are pinned to this height.  _TAB_STYLE carries min-height: 0px
+    # to escape Anki's global button metrics, which also lets a vertically
+    # squeezed layout shrink them to nothing and clip their labels away.
+    _TAB_H           = 32
 
     def __init__(self, parent, notion_cache, config):
         if parent is not None and not isinstance(parent, QWidget):
@@ -1015,6 +1019,7 @@ class NotionPageSelector(QDialog):
         }
         for mode, tab in self._mode_tabs.items():
             tab.setCursor(Qt.CursorShape.PointingHandCursor)
+            tab.setFixedHeight(self._TAB_H)
             tab.clicked.connect(lambda _, m=mode: self._set_mode(m))
             tabs_row.addWidget(tab)
         tabs_row.addStretch()
@@ -2212,6 +2217,11 @@ class NotionPageSelector(QDialog):
         self._rotation_overrides = {}   # tag → bool (user forced on/off)
         self._rotation_auto = set()     # tags auto-derived from checked rows
         self._rotation_expanded = False
+        # Window geometry to put back when the chip cloud is collapsed again:
+        # (y, height) before the grow, plus the (y, height) the grow produced.
+        # Without this the window keeps the extra height after every collapse
+        # and the next expand grows it again.
+        self._rotation_grow_undo = None
 
         panel = QWidget()
         panel.setStyleSheet("background: transparent;")
@@ -2324,6 +2334,66 @@ class NotionPageSelector(QDialog):
             self._rotation_summary_host.setVisible(
                 not expanded and bool(self.get_selected_rotation_tags()))
         self._rotation_toggle_btn.setText("Hide  ▴" if expanded else "Show all  ▾")
+        if expanded:
+            self._grow_for_rotation_panel()
+        else:
+            self._undo_rotation_growth()
+
+    def _grow_for_rotation_panel(self):
+        """Make room for the chip cloud instead of taking it from the rest.
+
+        Revealing the cloud adds up to its 200px without resizing the window,
+        so the layout claws that height back out of whatever will yield.  Grow
+        the window to fit when the screen allows, and only ever grow.
+        """
+        from aqt.qt import QApplication
+        try:
+            area = self._rotation_full_area
+            if area is None:
+                return
+            # The cloud scrolls past its cap, so grow by what it can actually
+            # occupy, not by the full height of every chip.
+            extra = min(area.sizeHint().height(), area.maximumHeight())
+            if extra <= 0:
+                return
+            screen = self.screen() or QApplication.primaryScreen()
+            if screen is None:
+                return
+            avail = screen.availableGeometry()
+            before = (self.y(), self.height())
+            target = min(self.height() + extra, avail.height())
+            if target <= self.height():
+                return
+            self.resize(self.width(), int(target))
+            # Record the undo as soon as anything has changed: if the move
+            # below fails we still have to be able to give the height back,
+            # or the window keeps it and the next expand grows again.
+            self._rotation_grow_undo = (before, (self.y(), self.height()))
+            # Pull the window back up if it now runs off the bottom
+            if self.y() + target > avail.bottom():
+                self.move(self.x(), max(avail.top(), int(avail.bottom() - target)))
+                self._rotation_grow_undo = (before, (self.y(), self.height()))
+        except Exception:
+            pass   # cosmetic — never let a resize failure break the toggle
+
+    def _undo_rotation_growth(self):
+        """Give back exactly the height the matching expand took.
+
+        Skipped when the window no longer matches what that expand left behind
+        — the user has moved or resized it since, and their size wins.
+        """
+        undo, self._rotation_grow_undo = self._rotation_grow_undo, None
+        if not undo:
+            return
+        (prev_y, prev_h), (grown_y, grown_h) = undo
+        try:
+            if (self.y(), self.height()) != (grown_y, grown_h):
+                return
+            self.resize(self.width(), int(prev_h))
+            if self.y() != prev_y:
+                self.move(self.x(), int(prev_y))
+        except Exception:
+            pass   # cosmetic — never let a resize failure break the toggle
 
     def _on_rotation_chip_clicked(self, tag: str, checked: bool):
         """Record a manual chip toggle.  A toggle back to what auto-selection
