@@ -663,6 +663,8 @@ from ..extra_sync import (
 from .synced_extra_dialog import SyncedExtraSelectionDialog
 from ..suggest_tags import suggest_subject_tags, invalidate_index
 from .tag_selection_dialog import TagSelectionDialog
+from .bulk_choices import BulkChoices, ReplaceTagChoices
+from .yield_dialog import prompt_for_yield_selection
 try:
     from .styles import apply_malleus_style, make_header, COLORS
 except Exception:
@@ -3218,10 +3220,16 @@ class NotionPageSelector(QDialog):
 
     # ── Extra (Synced) helpers ────────────────────────────────────────────────
 
-    def _apply_extra_synced_dialog(self, anki_note, notion_cache, parent_widget=None, note_context=None):
+    def _apply_extra_synced_dialog(self, anki_note, notion_cache, parent_widget=None,
+                                   note_context=None, choices=None, remaining=0):
         """
         Show the SE selection dialog for Extra (Synced) and update the note in place.
         Does NOT flush the note.
+
+        In a bulk run the caller passes a BulkChoices and the number of cards
+        left, which turns on the dialog's "remember these choices" row.  Once
+        every entry a note matches has a recorded decision, the dialog is
+        skipped and the saved selection is applied straight away.
         """
         from aqt.qt import QDialog
         if parent_widget is None:
@@ -3251,13 +3259,22 @@ class NotionPageSelector(QDialog):
         if all_already_present:
             return
 
-        dialog = SyncedExtraSelectionDialog(
-            parent_widget, entries, existing_se_ids, note_context=note_context
-        )
-        if dialog.exec() != QDialog.DialogCode.Accepted:
-            return
+        if choices is not None and choices.se_covers(entries):
+            # Every entry this note matches already has a recorded decision —
+            # reuse them and skip the dialog entirely.
+            selected = choices.se_selection(entries)
+            choices.se_applied += 1
+        else:
+            dialog = SyncedExtraSelectionDialog(
+                parent_widget, entries, existing_se_ids, note_context=note_context,
+                remaining=remaining,
+            )
+            if dialog.exec() != QDialog.DialogCode.Accepted:
+                return
+            selected = dialog.get_selected_entries()
+            if choices is not None and dialog.apply_to_all():
+                choices.se_decisions.update(dialog.get_entry_decisions())
 
-        selected = dialog.get_selected_entries()
         anki_note[EXTRA_FIELD] = build_field_from_selected_entries(selected)
         base_tags = [t for t in anki_note.tags if not t.startswith(SE_EXTRA_TAG_PREFIX)]
         for entry in selected:
@@ -3265,10 +3282,15 @@ class NotionPageSelector(QDialog):
                 base_tags.append(entry["tag"])
         anki_note.tags = list(set(base_tags))
 
-    def _schedule_extra_synced(self, anki_note, notion_cache, subjects_db=True):
+    def _schedule_extra_synced(self, anki_note, notion_cache, subjects_db=True,
+                               choices=None, remaining=0):
         """
         Update both synced fields on a note.
         Does NOT flush the note.
+
+        choices / remaining are passed straight through to the SE dialog so a
+        bulk caller can offer "remember these choices"; a single-note caller
+        leaves them alone and the row stays hidden.
         """
         set_additional_resources_on_note(anki_note, notion_cache)
         if subjects_db:
@@ -3281,6 +3303,8 @@ class NotionPageSelector(QDialog):
                 anki_note, notion_cache,
                 parent_widget=self,
                 note_context=note_context,
+                choices=choices,
+                remaining=remaining,
             )
 
     def _async_update_extra_synced(self, tags):
@@ -3630,8 +3654,11 @@ class NotionPageSelector(QDialog):
                     return tag.startswith("#Malleus_CM::")
                 subjects_db_flag = True
 
+        # Every "apply to all" decision for this run lives here and dies with it.
+        choices = BulkChoices()
+
         # ── Apply removal to each note ────────────────────────────────────────
-        for note in notes:
+        for note_index, note in enumerate(notes):
             current_tags = list(note.tags)
             tags_to_remove = [t for t in current_tags if should_remove(t)]
 
@@ -3641,6 +3668,7 @@ class NotionPageSelector(QDialog):
                 self._schedule_extra_synced(
                     note, self.notion_cache,
                     subjects_db=subjects_db_flag,
+                    choices=choices, remaining=total_notes - note_index - 1,
                 )
 
                 if not is_add_cards:
@@ -3671,6 +3699,9 @@ class NotionPageSelector(QDialog):
             else:
                 summary += "Tags removed (showing first 20):\n" + "\n".join(unique_tags[:20])
                 summary += f"\n... and {len(unique_tags) - 20} more"
+            applied = choices.summary_lines()
+            if applied:
+                summary += "\n\n" + "\n".join(applied)
             showInfo(summary)
 
     # ── Add tags ──────────────────────────────────────────────────────────────
@@ -3734,7 +3765,11 @@ class NotionPageSelector(QDialog):
         parent   = self.parent()
         is_add_cards = isinstance(parent, AddCards)
 
-        for note in notes:
+        # Every "apply to all" decision for this run lives here and dies with it.
+        choices = BulkChoices()
+
+        for note_index, note in enumerate(notes):
+            remaining = total_notes - note_index - 1
             existing_yields = self.get_existing_yield_tags(note.tags)
             sel_yields      = self.get_selected_yield_tags()
 
@@ -3762,6 +3797,7 @@ class NotionPageSelector(QDialog):
             self._schedule_extra_synced(
                 note, self.notion_cache,
                 subjects_db=bool(selected_db_names & {"Subjects", "eTG"}),
+                choices=choices, remaining=remaining,
             )
 
             if not is_add_cards:
@@ -3785,6 +3821,9 @@ class NotionPageSelector(QDialog):
             summary += f"Skipped (multiple yields selected): {notes_with_yield_issues} note(s)\n"
         if notes_needing_yield > 0:
             summary += f"Skipped (no yield selected): {notes_needing_yield} note(s)\n"
+        applied = choices.summary_lines()
+        if applied:
+            summary += "\n" + "\n".join(applied) + "\n"
         showInfo(summary)
 
     def _update_yield_only(self, notes, selected_yields, selected_features=()):
@@ -3912,7 +3951,11 @@ class NotionPageSelector(QDialog):
         parent   = self.parent()
         is_add_cards = isinstance(parent, AddCards)
 
-        for note in notes:
+        # Every "apply to all" decision for this run lives here and dies with it.
+        choices = ReplaceTagChoices()
+
+        for note_index, note in enumerate(notes):
+            remaining = total_notes - note_index - 1
             existing_yields = self.get_existing_yield_tags(note.tags)
             sel_yields      = self.get_selected_yield_tags()
 
@@ -3922,13 +3965,19 @@ class NotionPageSelector(QDialog):
 
             final_yield_tags = []
             if not existing_yields and not sel_yields:
-                note_context = None
-                if 'Text' in note:
-                    note_context = note['Text']
-                prompted_yield = self._prompt_for_yield_selection(note_context)
+                prompted_yield = choices.take_yield()
                 if prompted_yield is None:
-                    notes_skipped += 1
-                    continue
+                    note_context = None
+                    if 'Text' in note:
+                        note_context = note['Text']
+                    prompted_yield, apply_all = prompt_for_yield_selection(
+                        self, note_context, remaining=remaining
+                    )
+                    if prompted_yield is None:
+                        notes_skipped += 1
+                        continue
+                    if apply_all:
+                        choices.yield_tag = prompted_yield
                 final_yield_tags = [prompted_yield]
             elif existing_yields and not sel_yields:
                 final_yield_tags = existing_yields
@@ -3950,12 +3999,27 @@ class NotionPageSelector(QDialog):
             tags_to_replace = []
             if len(simplified_tags) == 1:
                 tags_to_replace = simplified_tags[0]['original_tags']
+            elif choices.groups_cover(simplified_tags):
+                # Every group this note offers already has a recorded decision —
+                # reuse them and skip the dialog entirely.
+                for tag_info in choices.group_selection(simplified_tags):
+                    tags_to_replace.extend(tag_info['original_tags'])
+                choices.groups_applied += 1
+                if not tags_to_replace:
+                    # The saved choices keep every tag on this note.  The dialog
+                    # refuses an empty selection, so treat it as a skip rather
+                    # than falling through to a no-op replacement.
+                    notes_skipped += 1
+                    continue
             else:
                 note_context = note['Text'] if 'Text' in note else None
-                dialog = TagSelectionDialog(self, simplified_tags, note_context)
+                dialog = TagSelectionDialog(self, simplified_tags, note_context,
+                                            remaining=remaining)
                 if dialog.exec() == QDialog.DialogCode.Accepted:
                     for tag_info in dialog.get_selected_tags():
                         tags_to_replace.extend(tag_info['original_tags'])
+                    if dialog.apply_to_all():
+                        choices.group_decisions.update(dialog.get_group_decisions())
                 else:
                     notes_skipped += 1
                     continue
@@ -3967,6 +4031,7 @@ class NotionPageSelector(QDialog):
                 note, tags_to_replace, selected_pages,
                 database_name, possible_subtags, user_selected_subtag,
                 all_general, final_yield_tags, is_add_cards,
+                choices=choices, remaining=remaining,
             )
             if result:
                 notes_modified += 1
@@ -3988,11 +4053,16 @@ class NotionPageSelector(QDialog):
                 summary += f"Skipped (multiple yields selected): {notes_with_yield_issues} note(s)\n"
             if notes_skipped > 0:
                 summary += f"Skipped (user cancelled): {notes_skipped} note(s)\n"
+            # This run has no progress dialog to annotate, so the summary is
+            # the one place that can show what "apply to all" resolved.
+            applied = choices.summary_lines()
+            if applied:
+                summary += "\n" + "\n".join(applied) + "\n"
             showInfo(summary)
 
     def _perform_tag_replacement(self, note, tags_to_replace, selected_pages, database_name,
                                  possible_subtags, user_selected_subtag, all_general,
-                                 final_yield_tags, is_add_cards):
+                                 final_yield_tags, is_add_cards, choices=None, remaining=0):
         """
         Perform the actual tag replacement on a note.
 
@@ -4085,6 +4155,7 @@ class NotionPageSelector(QDialog):
         self._schedule_extra_synced(
             note, self.notion_cache,
             subjects_db=bool(selected_db_names & {"Subjects", "eTG"}),
+            choices=choices, remaining=remaining,
         )
 
         if not is_add_cards:
@@ -4097,77 +4168,3 @@ class NotionPageSelector(QDialog):
     def _normalize_for_comparison(self, text):
         """Normalize text for comparison — handle spaces, slashes, underscores."""
         return text.replace(' ', '_').replace('/', '_').replace('&', '_').lower()
-
-    def _prompt_for_yield_selection(self, note_context=None):
-        """
-        Show a dialog to prompt user for yield selection.
-
-        Returns the selected yield tag string, or None if cancelled.
-        """
-        from aqt.qt import QDialog, QVBoxLayout, QLabel, QRadioButton, QButtonGroup, QDialogButtonBox, QFrame
-
-        dialog = QDialog(self)
-        dialog.setWindowTitle("Select Yield Level")
-        dialog.setMinimumWidth(400)
-        apply_malleus_style(dialog)
-
-        layout = QVBoxLayout()
-
-        info_label = QLabel("This card has no yield level. Please select one:")
-        info_label.setWordWrap(True)
-        info_label.setStyleSheet("font-weight: bold; margin-bottom: 10px;")
-        layout.addWidget(info_label)
-
-        if note_context:
-            context_frame = QFrame()
-            context_frame.setFrameShape(QFrame.Shape.StyledPanel)
-            context_frame.setStyleSheet(
-                "background-color: palette(alternateBase); padding: 10px; "
-                "border-radius: 7px; border: 1px solid rgba(74,130,204,0.30);"
-            )
-            context_layout = QVBoxLayout()
-
-            context_title = QLabel("Card Context:")
-            context_title.setStyleSheet("font-weight: bold; font-size: 11px;")
-            context_layout.addWidget(context_title)
-
-            context_text = QLabel(note_context[:200] + ("..." if len(note_context) > 200 else ""))
-            context_text.setWordWrap(True)
-            context_text.setStyleSheet("font-size: 10px;")
-            context_layout.addWidget(context_text)
-
-            context_frame.setLayout(context_layout)
-            layout.addWidget(context_frame)
-
-        button_group  = QButtonGroup(dialog)
-        radio_buttons = {}
-
-        yield_options = {
-            "High Yield":                   "#Malleus_CM::#Yield::High",
-            "Medium Yield":                 "#Malleus_CM::#Yield::Medium",
-            "Low Yield":                    "#Malleus_CM::#Yield::Low",
-            "Beyond Medical Student Level": "#Malleus_CM::#Yield::Beyond_medical_student_level",
-        }
-
-        for display_text, tag_value in yield_options.items():
-            radio = QRadioButton(display_text)
-            radio_buttons[display_text] = (radio, tag_value)
-            button_group.addButton(radio)
-            layout.addWidget(radio)
-
-        radio_buttons["High Yield"][0].setChecked(True)
-
-        buttons = QDialogButtonBox()
-        buttons.addButton(QDialogButtonBox.StandardButton.Ok)
-        buttons.addButton(QDialogButtonBox.StandardButton.Cancel)
-        buttons.accepted.connect(dialog.accept)
-        buttons.rejected.connect(dialog.reject)
-        layout.addWidget(buttons)
-
-        dialog.setLayout(layout)
-
-        if dialog.exec() == QDialog.DialogCode.Accepted:
-            for display_text, (radio, tag_value) in radio_buttons.items():
-                if radio.isChecked():
-                    return tag_value
-        return None

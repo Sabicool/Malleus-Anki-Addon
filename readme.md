@@ -92,6 +92,8 @@ The line under the yield buttons summarises what will be searched, e.g. *"Finds 
 
 Enter runs **Add Tags** when cards are selected, otherwise **Create Cards**. If you're unsure of a subtag, leave it on *Main Tag*.
 
+Across several cards, every prompt that interrupts a run — the yield level, the Synced Extra picker, and the tag-choice list when replacing — carries an **apply to all** tickbox, so you can answer once and let the rest of the batch run through. The choices are forgotten when the run ends, and the summary at the end says how many cards were resolved from them.
+
 ### Synced fields
 
 When you tag or create a Subjects or eTG card, the add-on fills two note fields from the Malleus databases:
@@ -104,7 +106,7 @@ When you tag or create a Subjects or eTG card, the add-on fills two note fields 
 Right-click selected cards in the Browser for:
 
 -   **Set Yield Level:** change the yield of every selected card in one go.
--   **Update Malleus Subject Tags:** refresh the cards' Subjects tags to the current database. If a page has been renamed or removed, you're asked which page to use instead. Shift+click to skip the yield and Extra (Synced) prompts, and Undo from the summary if needed.
+-   **Update Malleus Subject Tags:** refresh the cards' Subjects tags to the current database. If a page has been renamed or removed, you're asked which page to use instead. Every prompt in a multi-card run has an **apply to all** tickbox, so you can answer once and let the rest of the batch run through unattended — the choices are forgotten when the run ends. Shift+click to skip the yield and Extra (Synced) prompts entirely, and Undo from the summary if needed.
 
 The Browser's **Malleus** menu also has **Update Malleus Database Cache**.
 

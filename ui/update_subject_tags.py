@@ -19,11 +19,13 @@ from ..extra_sync import (
     SYNCED_EXTRA_DATABASE_ID, EXTRA_FIELD
 )
 from .synced_extra_dialog import SyncedExtraSelectionDialog
-from ..tag_utils import parse_tag, normalize_subtag_for_matching
+from .bulk_choices import SubjectTagChoices
+from .yield_dialog import prompt_for_yield_selection
+from ..tag_utils import parse_tag, normalize_subtag_for_matching, clean_page_name
 from ..suggest_tags import suggest_subject_tags
 from .page_selector import _SubtagChip
 try:
-    from ..ui.styles import apply_malleus_style, make_header, COLORS
+    from ..ui.styles import apply_malleus_style, make_header, make_apply_all_row, COLORS
 except Exception:
     def apply_malleus_style(w): pass
     def make_header(title="Malleus Clinical Medicine", subtitle=None, logo_path=None):
@@ -32,6 +34,13 @@ except Exception:
         lay = QHBoxLayout(h); lay.setContentsMargins(12, 0, 12, 0)
         lbl = QLabel(title); lbl.setStyleSheet("font-weight: bold; font-size: 14px;")
         lay.addWidget(lbl); lay.addStretch(); return h
+    def make_apply_all_row(label="Apply to all remaining cards", remaining=0,
+                           checked=False, tooltip=None):
+        from aqt.qt import QWidget, QHBoxLayout, QCheckBox
+        row = QWidget(); lay = QHBoxLayout(row)
+        cb = QCheckBox(label); cb.setChecked(checked)
+        lay.addWidget(cb); lay.addStretch()
+        return row, cb
     COLORS = {}
 import unicodedata
 
@@ -43,14 +52,17 @@ class MissingPageDialog(QDialog):
     the suggestion's subtag).  Multiple pages can be selected — every checked
     page contributes its tags as the replacement."""
 
-    def __init__(self, parent, missing_tag: str, note_context: str, notion_cache, config):
+    def __init__(self, parent, missing_tag: str, note_context: str, notion_cache, config,
+                 remaining: int = 0):
         super().__init__(parent)
         self.missing_tag = missing_tag
         self.note_context = note_context
         self.notion_cache = notion_cache
         self.config = config
+        self.remaining = remaining   # cards left in the run; 0 hides the apply-all row
         self.selections = []   # [(page, subtag_property_name), ...] on 'replace'
         self.action = None     # 'ignore' or 'replace'
+        self._apply_all_cb = None
 
         self.parsed_tag = parse_tag(missing_tag)
         self._result_rows = []  # [{page, checkbox, chip}, ...]
@@ -91,11 +103,29 @@ class MissingPageDialog(QDialog):
         tag_label.setStyleSheet(f"font-weight: 700; font-size: 11px; color: {COLORS.get('accent','#4a82cc')}; background: transparent; letter-spacing: 0.3px;")
         content_layout.addWidget(tag_label)
 
+        # Shown as a dim hierarchy line above the page name rather than one
+        # long tag string: a Malleus tag has no spaces, so Qt cannot wrap it
+        # and it either clips or forces the dialog wide enough to swallow the
+        # search area below.  The full tag is on the frame's tooltip.
+        path_text, name_text = self._split_missing_tag()
+
         tag_frame = QFrame()
         tag_frame.setStyleSheet("background-color: palette(base); border: 1.5px solid rgba(192,80,80,0.45); border-radius: 6px; padding: 6px;")
+        tag_frame.setToolTip(self.missing_tag)
         tag_frame_layout = QVBoxLayout(tag_frame)
         tag_frame_layout.setContentsMargins(10, 6, 10, 6)
-        tag_value = QLabel(self.missing_tag)
+        tag_frame_layout.setSpacing(2)
+
+        if path_text:
+            path_value = QLabel(path_text)
+            path_value.setStyleSheet(
+                "color: palette(placeholderText); font-size: 10px; "
+                "background: transparent;"
+            )
+            path_value.setWordWrap(True)
+            tag_frame_layout.addWidget(path_value)
+
+        tag_value = QLabel(name_text)
         tag_value.setStyleSheet("color: #c05050; font-size: 12px; font-family: monospace; background: transparent;")
         tag_value.setWordWrap(True)
         tag_frame_layout.addWidget(tag_value)
@@ -219,6 +249,25 @@ class MissingPageDialog(QDialog):
         replace_btn.clicked.connect(self.replace_tag)
         btn_layout.addWidget(replace_btn)
 
+        # ── "Apply to all" (bulk runs only) ──────────────────────────────
+        # Pre-checked, because reusing the choice for every card carrying the
+        # same broken tag is what a bulk run almost always wants.  Only the
+        # page choice is reused — each card's own subtag is kept — so untick
+        # this when the right replacement genuinely depends on the card.
+        if self.remaining > 0:
+            apply_all_row, self._apply_all_cb = make_apply_all_row(
+                label="Apply this to every remaining card with this tag",
+                remaining=self.remaining,
+                checked=True,
+                tooltip=(
+                    "Reuse this decision for every remaining card whose tag\n"
+                    "points at the same missing page.  Each card keeps its own\n"
+                    "subtag (e.g. Management, Clinical Features).\n\n"
+                    "Untick to be asked again for each card."
+                ),
+            )
+            content_layout.addWidget(apply_all_row)
+
         content_layout.addLayout(btn_layout)
         layout.addWidget(content_widget)
         self.setLayout(layout)
@@ -229,6 +278,41 @@ class MissingPageDialog(QDialog):
         self.search_input.setText(prefill_clean)
         if prefill_clean:
             self.search_timer.start(100)
+
+    def _split_missing_tag(self) -> Tuple[str, str]:
+        """Split the missing tag into a dim hierarchy line and the page name.
+
+        '#Malleus_CM::#Subjects::Surgery::01_General_Surgery::03_Small_Bowel_Disease::Crohn's_Di'
+        becomes ('Surgery › General Surgery › Small Bowel Disease', "Crohn's Di").
+
+        The hierarchy is what makes these tags long, and it is the part the
+        user least needs: the page name is what they are matching against the
+        search results.  The separators carry spaces, so the line wraps.
+
+        Returns ('', <full tag>) for anything that doesn't parse, so an
+        unexpected tag shape is still shown in full rather than swallowed.
+        """
+        parsed = self.parsed_tag
+        if not parsed or not parsed.get('page_name'):
+            return ('', self.missing_tag)
+
+        parts = list(parsed.get('path_parts') or [])
+        page_name = parsed['page_name']
+        subtag = parsed.get('subtag')
+
+        # path_parts is everything after '#Malleus_CM::', starting with the
+        # database ('#Subjects').  Drop that, plus the page name and subtag
+        # at the end, and what remains is the hierarchy.
+        trailing = 2 if subtag else 1
+        hierarchy = parts[1:-trailing] if len(parts) > trailing else []
+
+        path_text = ' › '.join(clean_page_name(p) for p in hierarchy if p)
+
+        name_text = clean_page_name(page_name)
+        if subtag:
+            name_text = f"{name_text}  ·  {clean_page_name(subtag)}"
+
+        return (path_text, name_text)
 
     # ── Search helpers ───────────────────────────────────────────────
 
@@ -430,6 +514,12 @@ class MissingPageDialog(QDialog):
         (page_data, subtag_property_name) — one entry per checked row."""
         return (self.action, self.selections)
 
+    def apply_to_all(self) -> bool:
+        """True when this decision should be reused for the rest of the run.
+        Defaults to True in a bulk run (matches the long-standing behaviour of
+        caching per page name); always False for a single-note invocation."""
+        return bool(self._apply_all_cb and self._apply_all_cb.isChecked())
+
 
 # ── Standalone helpers ───────────────────────────────────────────────────────
 
@@ -553,77 +643,6 @@ def get_tags_for_page(page: Dict, raw_subtag: str) -> List[str]:
 
     return []
 
-def prompt_for_yield_selection(parent, note_context: str = None) -> Optional[str]:
-    """
-    Prompt the user to select a yield level for a note that has none.
-    Returns the yield tag string, or None if cancelled.
-    """
-    from aqt.qt import QDialog, QVBoxLayout, QLabel, QRadioButton, QButtonGroup, QDialogButtonBox, QFrame
-
-    dialog = QDialog(parent)
-    dialog.setWindowTitle("Select Yield Level")
-    dialog.setMinimumWidth(400)
-    apply_malleus_style(dialog)
-
-    layout = QVBoxLayout()
-
-    info_label = QLabel("This card has no yield level. Please select one:")
-    info_label.setWordWrap(True)
-    info_label.setStyleSheet("font-weight: bold; margin-bottom: 10px;")
-    layout.addWidget(info_label)
-
-    if note_context:
-        ctx_frame = QFrame()
-        ctx_frame.setFrameShape(QFrame.Shape.StyledPanel)
-        ctx_frame.setStyleSheet("background-color: palette(alternateBase); padding: 8px; border-radius: 6px; border: 1px solid rgba(74,130,204,0.30);")
-        ctx_layout = QVBoxLayout()
-
-        ctx_title = QLabel("Card context:")
-        ctx_title.setStyleSheet("font-weight: bold; font-size: 11px;")
-        ctx_layout.addWidget(ctx_title)
-
-        ctx_text = QLabel(note_context[:200] + ("..." if len(note_context) > 200 else ""))
-        ctx_text.setWordWrap(True)
-        ctx_text.setStyleSheet("font-size: 10px;")
-        ctx_layout.addWidget(ctx_text)
-
-        ctx_frame.setLayout(ctx_layout)
-        layout.addWidget(ctx_frame)
-
-    button_group = QButtonGroup(dialog)
-    radio_buttons = {}
-
-    yield_options = {
-        "High Yield":                    "#Malleus_CM::#Yield::High",
-        "Medium Yield":                  "#Malleus_CM::#Yield::Medium",
-        "Low Yield":                     "#Malleus_CM::#Yield::Low",
-        "Beyond Medical Student Level":  "#Malleus_CM::#Yield::Beyond_medical_student_level"
-    }
-
-    for display_text, tag_value in yield_options.items():
-        radio = QRadioButton(display_text)
-        radio_buttons[display_text] = (radio, tag_value)
-        button_group.addButton(radio)
-        layout.addWidget(radio)
-
-    radio_buttons["High Yield"][0].setChecked(True)
-
-    buttons = QDialogButtonBox()
-    buttons.addButton(QDialogButtonBox.StandardButton.Cancel)
-    buttons.addButton(QDialogButtonBox.StandardButton.Ok)
-    buttons.rejected.connect(dialog.reject)
-    buttons.accepted.connect(dialog.accept)
-    layout.addWidget(buttons)
-
-    dialog.setLayout(layout)
-
-    if dialog.exec() == QDialog.DialogCode.Accepted:
-        for display_text, (radio, tag_value) in radio_buttons.items():
-            if radio.isChecked():
-                return tag_value
-
-    return None
-
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
 def _show_update_summary(browser, summary_text, notes, tag_snapshot):
@@ -694,6 +713,10 @@ def update_subject_tags_for_browser(browser, notion_cache, config):
          - Missing → show MissingPageDialog; user picks replacement(s) or ignores.
       5. Write final tags back to the note.
 
+    Each of the three per-note dialogs carries an "apply to all" checkbox, so
+    a long batch can be answered once (see SubjectTagChoices in
+    bulk_choices.py).  Decisions last for this run only.
+
     Shift+invoke = silent mode: the yield prompt and the Extra (Synced)
     selection dialog are skipped (notes missing a yield are left without one;
     Extra (Synced) content is left untouched).  The Tag-Not-Found dialog still
@@ -735,7 +758,9 @@ def update_subject_tags_for_browser(browser, notion_cache, config):
     # Snapshot tags before any changes for undo support
     tag_snapshot = {note.id: list(note.tags) for note in notes}
 
-    replacement_cache = {}  # page_name → (action, selections)
+    # Every "apply to all" decision for this run lives here, including the
+    # missing-page cache that used to be a bare local dict.
+    choices = SubjectTagChoices()
 
     from aqt.qt import QProgressDialog
     _progress = QProgressDialog(
@@ -753,8 +778,11 @@ def update_subject_tags_for_browser(browser, notion_cache, config):
 
     def _progress_update(note_index):
         _progress.setValue(note_index + 1)
+        # Flag the saved choices so a run that has gone quiet doesn't look
+        # like it simply stopped asking of its own accord.
+        suffix = "  —  using saved choices" if choices.has_saved() else ""
         _progress.setLabelText(
-            f"Updating subject tags ({note_index + 1}/{total_notes})..."
+            f"Updating subject tags ({note_index + 1}/{total_notes})...{suffix}"
         )
         QApplication.processEvents()
 
@@ -818,10 +846,11 @@ def update_subject_tags_for_browser(browser, notion_cache, config):
                 # Improper tags (non-general page with no numbered subtag) must always
                 # go through the dialog — never silently reuse a cached subtag that was
                 # chosen for a different occurrence of the same page name.
-                use_cache = (page_name in replacement_cache) and not is_improper
+                use_cache = (page_name in choices.page_cache) and not is_improper
 
                 if use_cache:
-                    action, selections = replacement_cache[page_name]
+                    action, selections = choices.page_cache[page_name]
+                    choices.page_applied += 1
                     if action == 'replace' and selections:
                         # Use raw_subtag from the current tag (e.g. '06_Clinical_Features')
                         # so each legitimate occurrence gets the right property.
@@ -838,7 +867,8 @@ def update_subject_tags_for_browser(browser, notion_cache, config):
                 else:
                     _progress.hide()
                     dialog = MissingPageDialog(
-                        browser, original_tag, note_context, notion_cache, config
+                        browser, original_tag, note_context, notion_cache, config,
+                        remaining=total_notes - note_index - 1,
                     )
                     if dialog.exec():
                         action, selections = dialog.get_result()
@@ -856,9 +886,10 @@ def update_subject_tags_for_browser(browser, notion_cache, config):
                         # if improper, drop it — it was a bad tag and the user closed the dialog
 
                     # Only cache the result for non-improper tags so the same
-                    # user choice can be reused for other legitimate missing pages.
-                    if not is_improper:
-                        replacement_cache[page_name] = (action, selections)
+                    # user choice can be reused for other legitimate missing
+                    # pages — and only when the user left "apply to all" ticked.
+                    if not is_improper and dialog.apply_to_all():
+                        choices.page_cache[page_name] = (action, selections)
                     _progress.show()
 
         final_tags = list(set(remaining_tags + new_tags))
@@ -867,11 +898,20 @@ def update_subject_tags_for_browser(browser, notion_cache, config):
         # the note is left without a yield tag rather than interrupting).
         has_yield = any(t.startswith("#Malleus_CM::#Yield::") for t in final_tags)
         if not has_yield and not silent:
-            _progress.hide()
-            yield_tag = prompt_for_yield_selection(browser, note_context)
-            if yield_tag:
-                final_tags.append(yield_tag)
-            _progress.show()
+            saved_yield = choices.take_yield()
+            if saved_yield:
+                final_tags.append(saved_yield)
+            else:
+                _progress.hide()
+                yield_tag, apply_all = prompt_for_yield_selection(
+                    browser, note_context,
+                    remaining=total_notes - note_index - 1,
+                )
+                if yield_tag:
+                    final_tags.append(yield_tag)
+                    if apply_all:
+                        choices.yield_tag = yield_tag
+                _progress.show()
 
         # ── Additional Resources (Synced) — auto-populate ───────────────────
         _additional = build_additional_resources_content(list(final_tags), notion_cache)
@@ -891,27 +931,46 @@ def update_subject_tags_for_browser(browser, notion_cache, config):
                 current_extra = ''
             existing_se_ids = get_existing_se_ids_from_field(current_extra)
 
-            _progress.hide()
-            se_dlg = SyncedExtraSelectionDialog(
-                browser, entries, existing_se_ids, note_context=note_context
-            )
-            from aqt.qt import QDialog
-            _se_result = se_dlg.exec()
-            _progress.show()
-            if _se_result == QDialog.DialogCode.Accepted:
-                selected = se_dlg.get_selected_entries()
+            def _apply_se_selection(selected) -> bool:
+                """Write the chosen entries into the field and sync SE tags.
+                Returns True only if the field content actually changed — with
+                saved choices this runs on every note, so reporting a blanket
+                change would overstate "Notes modified" in the summary."""
+                nonlocal final_tags
+                _changed = False
                 try:
-                    note[EXTRA_FIELD] = build_field_from_selected_entries(selected)
+                    new_content = build_field_from_selected_entries(selected)
+                    if new_content != current_extra:
+                        note[EXTRA_FIELD] = new_content
+                        _changed = True
                 except Exception:
                     pass
-                # Sync SE Anki tags
                 final_tags = [t for t in final_tags if not t.startswith(SE_EXTRA_TAG_PREFIX)]
                 for entry in selected:
                     if entry.get('tag'):
                         final_tags.append(entry['tag'])
                 final_tags = list(set(final_tags))
-                _se_changed = True
-            # If cancelled, leave existing Extra (Synced) content untouched
+                return _changed
+
+            if choices.se_covers(entries):
+                # Every matched entry already has a recorded decision — reuse
+                # them and skip the dialog entirely.
+                _se_changed = _apply_se_selection(choices.se_selection(entries))
+                choices.se_applied += 1
+            else:
+                _progress.hide()
+                se_dlg = SyncedExtraSelectionDialog(
+                    browser, entries, existing_se_ids, note_context=note_context,
+                    remaining=total_notes - note_index - 1,
+                )
+                from aqt.qt import QDialog
+                _se_result = se_dlg.exec()
+                _progress.show()
+                if _se_result == QDialog.DialogCode.Accepted:
+                    _se_changed = _apply_se_selection(se_dlg.get_selected_entries())
+                    if se_dlg.apply_to_all():
+                        choices.se_decisions.update(se_dlg.get_entry_decisions())
+                # If cancelled, leave existing Extra (Synced) content untouched
         elif not silent:
             # No matches — clear field and strip SE tags
             try:
@@ -947,5 +1006,9 @@ def update_subject_tags_for_browser(browser, notion_cache, config):
         f"Tags successfully updated: {total_tags_updated}\n"
         f"Tags removed: {total_tags_removed}\n"
     )
+
+    _applied = choices.summary_lines()
+    if _applied:
+        summary += "\n" + "\n".join(_applied) + "\n"
     malleus_tooltip(f"Updated {notes_modified} notes")
     _show_update_summary(browser, summary, notes, tag_snapshot)

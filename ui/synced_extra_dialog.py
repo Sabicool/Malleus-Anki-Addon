@@ -11,12 +11,19 @@ from aqt.utils import showInfo
 from typing import List, Dict, Set
 
 try:
-    from .styles import apply_malleus_style, make_header, COLORS
+    from .styles import apply_malleus_style, make_header, make_apply_all_row, COLORS
 except Exception:
     def apply_malleus_style(w): pass
     def make_header(*a, **kw):
         from aqt.qt import QWidget
         return QWidget()
+    def make_apply_all_row(label="Apply to all remaining cards", remaining=0,
+                           checked=False, tooltip=None):
+        from aqt.qt import QWidget, QHBoxLayout, QCheckBox
+        row = QWidget(); lay = QHBoxLayout(row)
+        cb = QCheckBox(label); cb.setChecked(checked)
+        lay.addWidget(cb); lay.addStretch()
+        return row, cb
     COLORS = {"accent": "#4a82cc", "border": "rgba(74,130,204,0.28)"}
 
 
@@ -35,6 +42,9 @@ class SyncedExtraSelectionDialog(QDialog):
         entries:         List of {title, content, se_id, tag} dicts
         existing_se_ids: Set of se_id strings already present in the field
         note_context:    Optional snippet from the note's Text field
+        remaining:       Cards left in a bulk run after this one.  When > 0 the
+                         "remember these choices" row is shown; leave at 0 for
+                         single-note callers and the row is hidden entirely.
     """
 
     def __init__(
@@ -43,14 +53,17 @@ class SyncedExtraSelectionDialog(QDialog):
         entries: List[Dict],
         existing_se_ids: Set[str],
         note_context: str = None,
+        remaining: int = 0,
     ):
         super().__init__(parent)
         self.entries         = entries
         self.existing_se_ids = existing_se_ids
         self.note_context    = note_context
+        self.remaining       = remaining
         self._selected       = []
         self._cancelled      = False
         self._checkboxes     = []
+        self._apply_all_cb   = None
         self._setup_ui()
         apply_malleus_style(self)
 
@@ -183,6 +196,22 @@ class SyncedExtraSelectionDialog(QDialog):
         btn_row.addWidget(cancel_btn)
         btn_row.addWidget(ok_btn)
 
+        # ── "Remember these choices" (bulk runs only) ─────────────────────────
+        # Decisions are recorded per entry, so a later card only reopens this
+        # dialog when it matches an entry that has no recorded decision yet.
+        if self.remaining > 0:
+            apply_all_row, self._apply_all_cb = make_apply_all_row(
+                label="Remember these choices for the remaining cards",
+                remaining=self.remaining,
+                checked=False,
+                tooltip=(
+                    "Each entry's include/exclude choice is reused for every\n"
+                    "remaining card in this run.  The dialog only reappears\n"
+                    "for a card that matches an entry you haven't chosen yet."
+                ),
+            )
+            layout.addWidget(apply_all_row)
+
         layout.addLayout(btn_row)
 
         self.setLayout(layout)
@@ -208,3 +237,18 @@ class SyncedExtraSelectionDialog(QDialog):
 
     def was_cancelled(self) -> bool:
         return self._cancelled
+
+    def apply_to_all(self) -> bool:
+        """True when the user asked for these per-entry choices to be reused
+        for the rest of a bulk run."""
+        return bool(self._apply_all_cb and self._apply_all_cb.isChecked())
+
+    def get_entry_decisions(self) -> Dict[str, bool]:
+        """se_id → included?  One entry per row shown, so an unchecked row
+        records an explicit 'exclude' rather than just an absence."""
+        decisions = {}
+        for cb, entry in self._checkboxes:
+            se_id = entry.get("se_id")
+            if se_id:
+                decisions[se_id] = cb.isChecked()
+        return decisions

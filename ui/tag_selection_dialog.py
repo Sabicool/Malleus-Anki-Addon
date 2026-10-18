@@ -7,8 +7,9 @@ from aqt.qt import (QDialog, QVBoxLayout, QHBoxLayout, QCheckBox,
                     QDialogButtonBox, QFrame)
 from aqt.utils import showInfo
 from typing import List, Tuple, Dict
+from .bulk_choices import ReplaceTagChoices
 try:
-    from .styles import apply_malleus_style, make_header, COLORS
+    from .styles import apply_malleus_style, make_header, make_apply_all_row, COLORS
 except Exception:
     def apply_malleus_style(w): pass
     def make_header(title="Malleus Clinical Medicine", subtitle=None, logo_path=None):
@@ -17,23 +18,36 @@ except Exception:
         lay = QHBoxLayout(h); lay.setContentsMargins(12, 0, 12, 0)
         lbl = QLabel(title); lbl.setStyleSheet("font-weight: bold; font-size: 14px;")
         lay.addWidget(lbl); lay.addStretch(); return h
+    def make_apply_all_row(label="Apply to all remaining cards", remaining=0,
+                           checked=False, tooltip=None):
+        from aqt.qt import QWidget, QHBoxLayout, QCheckBox
+        row = QWidget(); lay = QHBoxLayout(row)
+        cb = QCheckBox(label); cb.setChecked(checked)
+        lay.addWidget(cb); lay.addStretch()
+        return row, cb
     COLORS = {}
 
 
 class TagSelectionDialog(QDialog):
     """Dialog for selecting which tags to replace"""
     
-    def __init__(self, parent, simplified_tags: List[Dict], note_context: str = None):
+    def __init__(self, parent, simplified_tags: List[Dict], note_context: str = None,
+                 remaining: int = 0):
         """
         Args:
             parent: Parent window
             simplified_tags: List of dicts with 'display_name', 'original_tags', 'page_name', 'subtag'
             note_context: Optional context from note's Text field to help user identify the card
+            remaining: Cards left in a bulk run after this one.  When > 0 the
+                "remember these choices" row is shown; leave at 0 for
+                single-note callers and the row is hidden entirely.
         """
         super().__init__(parent)
         self.simplified_tags = simplified_tags
         self.note_context = note_context
+        self.remaining = remaining
         self.selected_tags = []
+        self._apply_all_cb = None
         self.setup_ui()
         apply_malleus_style(self)
     
@@ -117,6 +131,22 @@ class TagSelectionDialog(QDialog):
         select_buttons_layout.addStretch()
         content_layout.addLayout(select_buttons_layout)
 
+        # ── "Remember these choices" (bulk runs only) ─────────────────────────
+        # Decisions are recorded per tag group, so a later card only reopens
+        # this dialog when it offers a group you haven't chosen yet.
+        if self.remaining > 0:
+            apply_all_row, self._apply_all_cb = make_apply_all_row(
+                label="Remember these choices for the remaining cards",
+                remaining=self.remaining,
+                checked=False,
+                tooltip=(
+                    "Each tag's replace/keep choice is reused for every\n"
+                    "remaining card in this run.  The dialog only reappears\n"
+                    "for a card carrying a tag you haven't chosen yet."
+                ),
+            )
+            content_layout.addWidget(apply_all_row)
+
         # OK and Cancel buttons
         buttons = QDialogButtonBox()
         buttons.addButton(QDialogButtonBox.StandardButton.Ok)
@@ -154,3 +184,16 @@ class TagSelectionDialog(QDialog):
     def get_selected_tags(self) -> List[Dict]:
         """Return the selected tag information"""
         return self.selected_tags
+
+    def apply_to_all(self) -> bool:
+        """True when the user asked for these per-group choices to be reused
+        for the rest of a bulk run."""
+        return bool(self._apply_all_cb and self._apply_all_cb.isChecked())
+
+    def get_group_decisions(self) -> Dict[Tuple[str, str], bool]:
+        """(page_name, subtag) → replace?  One entry per row shown, so an
+        unchecked row records an explicit 'keep' rather than just an absence."""
+        return {
+            ReplaceTagChoices.group_key(cb.tag_info): cb.isChecked()
+            for cb in self.checkboxes
+        }

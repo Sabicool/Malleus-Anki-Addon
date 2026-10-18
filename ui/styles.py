@@ -685,3 +685,72 @@ def make_header(title: str = "Malleus Clinical Medicine",
     outer_layout.addWidget(separator)
 
     return header
+
+
+def make_apply_all_row(label: str = "Apply to all remaining cards",
+                       remaining: int = 0,
+                       checked: bool = False,
+                       tooltip: str = None) -> "tuple":
+    """
+    The "do this for all" row used by the per-note dialogs in a bulk run.
+
+    A hairline separator above a single checkbox, so the control reads as a
+    modifier on the buttons below it rather than as another list item.  The
+    checkbox picks up the accent indicator from MALLEUS_STYLE, so it matches
+    the result rows in the Page Selector without any extra styling.
+
+    Args:
+        label:     Checkbox text.
+        remaining: Cards left in the run after this one.  Shown as a dim
+                   "(N left)" suffix when > 0.
+        checked:   Initial state.
+        tooltip:   Hover text explaining what gets reused.
+
+    Returns:
+        (row_widget, checkbox) — add the widget to the layout, read the
+        checkbox with .isChecked() once the dialog closes.
+    """
+    from aqt.qt import QWidget, QVBoxLayout, QHBoxLayout, QCheckBox, QFrame, QLabel
+
+    row = QWidget()
+    row.setObjectName("malleus_apply_all")
+    row.setStyleSheet(
+        "#malleus_apply_all, #malleus_apply_all QWidget { background: transparent; }"
+    )
+
+    outer = QVBoxLayout(row)
+    outer.setContentsMargins(0, 6, 0, 0)
+    outer.setSpacing(6)
+
+    hairline = QFrame()
+    hairline.setFrameShape(QFrame.Shape.HLine)
+    hairline.setFixedHeight(1)
+    hairline.setStyleSheet(
+        f"background-color: {COLORS['border']}; border: none;"
+    )
+    outer.addWidget(hairline)
+
+    inner = QHBoxLayout()
+    inner.setContentsMargins(4, 0, 4, 0)
+    inner.setSpacing(6)
+
+    checkbox = QCheckBox(label)
+    checkbox.setChecked(checked)
+    if tooltip:
+        checkbox.setToolTip(tooltip)
+    inner.addWidget(checkbox)
+
+    if remaining > 0:
+        count = QLabel(f"({remaining} left)")
+        count.setStyleSheet(
+            "font-size: 11px; color: palette(placeholderText); "
+            "background: transparent; border: none;"
+        )
+        if tooltip:
+            count.setToolTip(tooltip)
+        inner.addWidget(count)
+
+    inner.addStretch()
+    outer.addLayout(inner)
+
+    return row, checkbox
