@@ -666,9 +666,12 @@ from .tag_selection_dialog import TagSelectionDialog
 from .bulk_choices import BulkChoices, ReplaceTagChoices
 from .yield_dialog import prompt_for_yield_selection
 try:
-    from .styles import apply_malleus_style, make_header, COLORS
+    from .styles import apply_malleus_style, make_header, set_scoped_style, COLORS
 except Exception:
     def apply_malleus_style(w): pass
+    def set_scoped_style(widget, object_name, declarations):
+        widget.setObjectName(object_name)
+        widget.setStyleSheet(f"#{object_name} {{ {declarations} }}")
     def make_header(title="Malleus Clinical Medicine", subtitle=None, logo_path=None, **kwargs):
         from aqt.qt import QWidget, QHBoxLayout, QLabel
         h = QWidget(); h.setFixedHeight(48 if not subtitle else 62)
@@ -1171,7 +1174,8 @@ class NotionPageSelector(QDialog):
                        fixed_width: bool = True) -> QLabel:
         """Bold row label for the card details panel (fixed width aligns rows)."""
         lbl = QLabel(text)
-        lbl.setStyleSheet("font-size: 12px; font-weight: 700; background: transparent;")
+        set_scoped_style(lbl, "malleus_details_label",
+                         "font-size: 12px; font-weight: 700; background: transparent;")
         if fixed_width:
             lbl.setFixedWidth(self._DETAILS_LABEL_W)
         if tooltip:
@@ -1510,7 +1514,7 @@ class NotionPageSelector(QDialog):
             badge = QLabel()
             badge.setFixedWidth(28)
             badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            badge.setStyleSheet("background: transparent;")
+            set_scoped_style(badge, "malleus_db_badge", "background: transparent;")
             badge.setToolTip(db_name)
 
             if db_name in ("Subjects", "Pharmacology"):
@@ -1519,9 +1523,8 @@ class NotionPageSelector(QDialog):
                           .get('Search Prefix', {})
                           .get('formula', {}).get('string', ''))
                 badge.setText(prefix or "")
-                badge.setStyleSheet(
-                    "background: transparent; font-size: 15px;"
-                )
+                set_scoped_style(badge, "malleus_db_badge",
+                                 "background: transparent; font-size: 15px;")
             elif db_name == "eTG":
                 # Lazy-load the eTG logo pixmap once per dialog instance
                 if not hasattr(self, '_etg_pixmap'):
@@ -1541,9 +1544,8 @@ class NotionPageSelector(QDialog):
             else:
                 emoji = _DB_EMOJI.get(db_name, "")
                 badge.setText(emoji)
-                badge.setStyleSheet(
-                    "background: transparent; font-size: 15px;"
-                )
+                set_scoped_style(badge, "malleus_db_badge",
+                                 "background: transparent; font-size: 15px;")
 
             row_layout.addWidget(badge, stretch=0)
 
@@ -1644,7 +1646,8 @@ class NotionPageSelector(QDialog):
             dots = self._score_to_dots(score)
             dots_label = QLabel(dots)
             dots_label.setToolTip(f"Suggestion confidence (raw score: {score:.2f})")
-            dots_label.setStyleSheet(
+            set_scoped_style(
+                dots_label, "malleus_score_dots",
                 "font-size: 11px; letter-spacing: 2px; color: #f0a500; padding: 1px 4px;"
             )
             row_layout.addWidget(dots_label, stretch=0)
@@ -1862,7 +1865,8 @@ class NotionPageSelector(QDialog):
             if matched_terms:
                 hint_text = "matched: " + "  ·  ".join(matched_terms)
                 hint_lbl = QLabel(hint_text)
-                hint_lbl.setStyleSheet(
+                set_scoped_style(
+                    hint_lbl, "malleus_match_hint",
                     "color: rgba(128,128,128,0.75); font-size: 10px;"
                     " font-style: italic; background: transparent;"
                     " padding-left: 38px; padding-bottom: 2px;"
@@ -2566,6 +2570,11 @@ class NotionPageSelector(QDialog):
                 if ts <= 0:   # no cache file yet (e.g. right after an add-on update)
                     missing_name = db_name
                     break
+                # An update that finds no edits records a verification instead of
+                # rewriting the cache file, so the file's own timestamp stays
+                # old.  Age off the same "fresh" notion the expiry checks use,
+                # or the label keeps reporting days after a successful update.
+                ts = max(ts, self.notion_cache.github_verified_at(db_id))
                 age = _time.time() - ts
                 if age > oldest_age:
                     oldest_age, oldest_name = age, db_name

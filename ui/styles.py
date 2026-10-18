@@ -742,7 +742,8 @@ def make_apply_all_row(label: str = "Apply to all remaining cards",
 
     if remaining > 0:
         count = QLabel(f"({remaining} left)")
-        count.setStyleSheet(
+        set_scoped_style(
+            count, "malleus_apply_all_count",
             "font-size: 11px; color: palette(placeholderText); "
             "background: transparent; border: none;"
         )
@@ -754,3 +755,25 @@ def make_apply_all_row(label: str = "Apply to all remaining cards",
     outer.addLayout(inner)
 
     return row, checkbox
+
+
+def set_scoped_style(widget, object_name: str, declarations: str):
+    """Style a widget without also restyling its tooltip.
+
+    A stylesheet of bare declarations ("color: red; background: transparent;")
+    applies to the widget AND to the QToolTip raised for it, so a transparent
+    background makes that widget's tooltip unreadable.  Wrapping the same
+    declarations in an object-name selector confines them to the widget and
+    leaves the tooltip to the dialog-level QToolTip rule from
+    apply_malleus_style().
+
+    Only for leaf widgets: a scoped rule no longer cascades to children, so a
+    container that relied on that needs an explicit "#name QWidget" rule.
+
+    Args:
+        widget:       The widget to style.
+        object_name:  Selector name; shared across widgets of the same kind.
+        declarations: CSS declarations, with no surrounding braces.
+    """
+    widget.setObjectName(object_name)
+    widget.setStyleSheet(f"#{object_name} {{ {declarations} }}")

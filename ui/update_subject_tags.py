@@ -25,9 +25,13 @@ from ..tag_utils import parse_tag, normalize_subtag_for_matching, clean_page_nam
 from ..suggest_tags import suggest_subject_tags
 from .page_selector import _SubtagChip
 try:
-    from ..ui.styles import apply_malleus_style, make_header, make_apply_all_row, COLORS
+    from ..ui.styles import (apply_malleus_style, make_header, make_apply_all_row,
+                             set_scoped_style, COLORS)
 except Exception:
     def apply_malleus_style(w): pass
+    def set_scoped_style(widget, object_name, declarations):
+        widget.setObjectName(object_name)
+        widget.setStyleSheet(f"#{object_name} {{ {declarations} }}")
     def make_header(title="Malleus Clinical Medicine", subtitle=None, logo_path=None):
         from aqt.qt import QWidget, QHBoxLayout, QLabel
         h = QWidget(); h.setFixedHeight(48 if not subtitle else 62)
@@ -110,7 +114,11 @@ class MissingPageDialog(QDialog):
         path_text, name_text = self._split_missing_tag()
 
         tag_frame = QFrame()
-        tag_frame.setStyleSheet("background-color: palette(base); border: 1.5px solid rgba(192,80,80,0.45); border-radius: 6px; padding: 6px;")
+        set_scoped_style(
+            tag_frame, "malleus_missing_tag_frame",
+            "background-color: palette(base); border: 1.5px solid rgba(192,80,80,0.45); "
+            "border-radius: 6px; padding: 6px;"
+        )
         tag_frame.setToolTip(self.missing_tag)
         tag_frame_layout = QVBoxLayout(tag_frame)
         tag_frame_layout.setContentsMargins(10, 6, 10, 6)
@@ -140,8 +148,10 @@ class MissingPageDialog(QDialog):
         if self.note_context:
             ctx_frame = QFrame()
             ctx_frame.setFrameShape(QFrame.Shape.StyledPanel)
-            ctx_frame.setStyleSheet(
-                f"background-color: palette(alternateBase); padding: 8px; border-radius: 7px; border: 1px solid rgba(74,130,204,0.35);"
+            set_scoped_style(
+                ctx_frame, "malleus_card_context_frame",
+                "background-color: palette(alternateBase); padding: 8px; "
+                "border-radius: 7px; border: 1px solid rgba(74,130,204,0.35);"
             )
             ctx_layout = QVBoxLayout()
 
