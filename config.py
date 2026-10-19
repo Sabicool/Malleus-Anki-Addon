@@ -153,6 +153,10 @@ def load_config():
         config['deck_name'] = 'Default'
         mw.addonManager.writeConfig(__name__.split('.')[0], config)
     
+    if 'note_type' not in config:
+        config['note_type'] = 'MalleusCM - Cloze (Malleus Clinical Medicine [AU/NZ] / Stapedius)'
+        mw.addonManager.writeConfig(__name__.split('.')[0], config)
+
     if 'request_timeout' not in config:
         config['request_timeout'] = 30  # seconds - increased from 10
         mw.addonManager.writeConfig(__name__.split('.')[0], config)

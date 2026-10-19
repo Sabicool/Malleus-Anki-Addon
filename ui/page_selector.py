@@ -56,6 +56,12 @@ _DB_EMOJI = {
 # and replaced by the panel's checked chips at apply time.
 ROTATION_TAG_PREFIX = "#Malleus_CM::#Resources_by_Rotation"
 
+# Note type for new cards when config's note_type isn't in the collection: any
+# single note type starting with NOTE_TYPE_PREFIX is used instead, so a renamed
+# deck release (e.g. an AnkiCollab suffix) still works without a config change.
+DEFAULT_NOTE_TYPE = "MalleusCM - Cloze (Malleus Clinical Medicine [AU/NZ] / Stapedius)"
+NOTE_TYPE_PREFIX = "MalleusCM - Cloze"
+
 
 # ── Flow layout (wrapping chip rows) ─────────────────────────────────────────
 
@@ -3273,7 +3279,7 @@ class NotionPageSelector(QDialog):
 
         note = {
             'deckName':  self.config['deck_name'],
-            'modelName': 'MalleusCM - Cloze (Malleus Clinical Medicine [AU/NZ] / Stapedius)',
+            'modelName': self.config.get('note_type', DEFAULT_NOTE_TYPE),
             'fields':    {},
             'tags':      all_tags,
         }
@@ -3450,12 +3456,47 @@ class NotionPageSelector(QDialog):
 
     # ── guiAddCards ───────────────────────────────────────────────────────────
 
+    def _resolve_note_type(self, name):
+        """
+        Find the note type named in config, else the only one whose name starts
+        with NOTE_TYPE_PREFIX. Warns and returns None when there's none, or
+        when several match and the user needs to pick one in config.
+        """
+        models = mw.col.models
+        model = models.by_name(name)
+        if model is not None:
+            return model
+
+        prefix = NOTE_TYPE_PREFIX.casefold()
+        matches = sorted(m.name for m in models.all_names_and_ids()
+                         if m.name.strip().casefold().startswith(prefix))
+        if len(matches) == 1:
+            return models.by_name(matches[0])
+
+        if matches:
+            listed = "\n".join(f"  • {m}" for m in matches)
+            showWarning(
+                f"The note type \"{name}\" isn't in your collection, and more "
+                f"than one Malleus note type is:\n\n{listed}\n\n"
+                "Set note_type in the add-on config to the one you want new "
+                "cards to use, then try again."
+            )
+        else:
+            showWarning(
+                f"The note type \"{name}\" isn't in your collection, so the "
+                "card can't be created.\n\n"
+                "Download or update the Malleus deck to get it, or set "
+                "note_type in the add-on config, then try again."
+            )
+        return None
+
     def _resolve_target_deck(self, deck_name):
         """
         Find the deck named in config. If there's no exact match, accept a
         single deck whose last '::' segment matches (the Malleus deck is often
-        nested under a parent), else fall back to the current deck so the user
-        still gets their card rather than a traceback.
+        nested under a parent), then a single one whose last segment starts
+        with it (e.g. "... (AU/NZ)"), else fall back to the current deck so
+        the user still gets their card rather than a traceback.
         """
         decks = mw.col.decks
         deck = decks.by_name(deck_name)
@@ -3463,10 +3504,16 @@ class NotionPageSelector(QDialog):
             return deck
 
         wanted = (deck_name or '').split('::')[-1].strip().casefold()
-        matches = [d for d in decks.all_names_and_ids()
-                   if d.name.split('::')[-1].strip().casefold() == wanted]
-        if len(matches) == 1:
-            return decks.get(matches[0].id)
+        leaves = [(d, d.name.split('::')[-1].strip().casefold())
+                  for d in decks.all_names_and_ids()]
+        if wanted:
+            for same in (lambda leaf: leaf == wanted,
+                         lambda leaf: leaf.startswith(wanted)):
+                matches = [d for d, leaf in leaves if same(leaf)]
+                if len(matches) == 1:
+                    return decks.get(matches[0].id)
+                if matches:
+                    break
 
         deck = decks.current()
         tooltip(
@@ -3506,13 +3553,8 @@ class NotionPageSelector(QDialog):
                     addCards.editor.loadNote(current_note)
             return
 
-        model = collection.models.by_name(note['modelName'])
+        model = self._resolve_note_type(note['modelName'])
         if model is None:
-            showWarning(
-                f"The note type \"{note['modelName']}\" isn't in your collection, "
-                "so the card can't be created.\n\n"
-                "Download or update the Malleus deck to get it, then try again."
-            )
             return
 
         deck = self._resolve_target_deck(note['deckName'])

@@ -15,6 +15,19 @@ The name of the deck where new cards are created. Use `::` to specify a subdeck.
 
 ---
 
+## `note_type`
+**Default:** `"MalleusCM - Cloze (Malleus Clinical Medicine [AU/NZ] / Stapedius)"`
+
+The note type used for new cards. If it isn't in your collection, the add-on uses the
+only note type whose name starts with `MalleusCM - Cloze`. If you have more than one,
+it asks you to set this to the one you want.
+
+```
+"note_type": "MalleusCM - Cloze (Malleus Clinical Medicine [AU/NZ] / Stapedius)"
+```
+
+---
+
 ## `shortcut`
 **Default:** `"Ctrl+Alt+M"`
 

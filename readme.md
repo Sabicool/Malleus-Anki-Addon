@@ -184,6 +184,7 @@ Then restart Anki. [AnkiWeb page](https://ankiweb.net/shared/info/620451841)
 Settings are under **Tools → Add-ons → Malleus Clinical Medicine → Config**. The ones you're most likely to change:
 
 -   `deck_name`: the deck new cards go into. Set it if you've renamed or moved the Malleus deck (use `::` for subdecks).
+-   `note_type`: the note type new cards use. Only needed if you have more than one `MalleusCM - Cloze` note type.
 -   `shortcut`: the keyboard shortcut for the Page Selector (default `Ctrl+Alt+M`).
 -   `find_yields` / `exclude_region_features`: the Find cards yield and country defaults. The Page Selector updates these for you.
 -   `show_card_counts`: show how many of your notes are already tagged with each result.
