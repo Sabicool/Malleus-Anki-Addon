@@ -12,7 +12,8 @@ from typing import List, Dict, Tuple
 from datetime import datetime
 from aqt import mw
 from .utils import malleus_tooltip
-from .config import NOTION_TOKEN, get_database_name, GENERATED_DATABASES, FOR_SEARCH_DATABASES
+from .config import (NOTION_TOKEN, get_database_name, GENERATED_DATABASES, FOR_SEARCH_DATABASES,
+                     SYNCED_EXTRA_DATABASE_ID, SYNCED_ADDITIONAL_RESOURCES_DATABASE_ID)
 
 class NotionCache:
     """Handles caching of Notion database content"""
@@ -289,7 +290,10 @@ class NotionCache:
                 if full:
                     last_sync_timestamp = 0
                 pages = self.fetch_updated_pages(database_id, last_sync_timestamp)
-                
+                if pages and database_id in (SYNCED_EXTRA_DATABASE_ID,
+                                             SYNCED_ADDITIONAL_RESOURCES_DATABASE_ID):
+                    self._embed_block_html(database_name, pages)
+
                 if pages:
                     self.save_to_cache(database_id, pages)
                     mw.taskman.run_on_main(lambda: malleus_tooltip(f"{database_name} database updated"))
@@ -313,6 +317,20 @@ class NotionCache:
 
         self._sync_thread = threading.Thread(target=sync_thread, daemon=True)
         self._sync_thread.start()
+
+    def _embed_block_html(self, database_name: str, pages: List[Dict]):
+        """Fetch the page body of each incrementally-synced Synced Extra /
+        Additional Resources page and embed it as `_block_html` (as the CI build
+        does), so new or edited entries show their content straight away.  On a
+        per-page failure the key is left unset and save_to_cache keeps the
+        previous body."""
+        from .notion_blocks import fetch_page_html
+        for page in pages:
+            try:
+                page['_block_html'] = fetch_page_html(
+                    page['id'], self.headers, self.REQUEST_TIMEOUT)
+            except Exception as e:
+                print(f"{database_name}: could not fetch body of {page.get('id')}: {e}")
 
     # ── Locally-generated databases ──────────────────────────────────────────
     #
@@ -366,6 +384,14 @@ class NotionCache:
         with self.cache_lock:
             self._atomic_write_json(self._raw_graph_path(database_id),
                                     {'timestamp': time.time(), 'pages': raw_pages})
+
+    def _cached_generator_version(self, database_id: str):
+        """generator_version stamped on the local leaves cache (None if unreadable)."""
+        try:
+            with self.get_cache_path(database_id).open('r', encoding='utf-8') as f:
+                return json.load(f).get('generator_version')
+        except Exception:
+            return None
 
     def _load_raw_graph(self, database_id: str):
         """(raw_pages, timestamp) for a generated DB's local graph, or ([], 0)."""
@@ -542,7 +568,13 @@ class NotionCache:
                     database_id, NOTION_TOKEN, self._iso(ts))
                 qb_pages, rotation_pages, xref_changed = self._crossref_pages_for(cfg)
 
-                if not edited_main and not xref_changed:
+                # Leaves built by older generator logic (an add-on update, or a
+                # GitHub seed CI built before that update) must be regenerated
+                # even when nothing was edited — the inputs are already local.
+                outdated = (self._cached_generator_version(database_id)
+                            != cache_generation.GENERATOR_VERSION)
+
+                if not edited_main and not xref_changed and not outdated:
                     print(f"{database_name}: no edits since cache — up to date")
                     # Record the successful freshness check so the cache stops
                     # counting as expired (otherwise the user keeps seeing the
@@ -552,7 +584,8 @@ class NotionCache:
 
                 graph = self._merge_by_id(raw_pages, edited_main)
                 print(f"{database_name}: {len(edited_main)} edited page(s)"
-                      f"{' + cross-ref changes' if xref_changed else ''} — regenerating in memory")
+                      f"{' + cross-ref changes' if xref_changed else ''}"
+                      f"{' + generator update' if outdated else ''} — regenerating in memory")
                 pages = cache_generation.generate_from_pages(
                     cfg['kind'], graph, qb_pages, rotation_pages)
                 if pages:

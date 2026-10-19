@@ -133,10 +133,23 @@ def _general_in_ancestors(page, index):
 
 
 # ── eMedici (gated by Question Bank Pharm Subtag) ────────────────────────────
-def _emedici_links(page, index, qb_lookup):
-    qb_ids = set(_relation_ids(page, "eMedici"))
+def _qb_by_target(qb_pages, key):
+    """Normalised target page id -> ids of the Question Bank pages whose `key`
+    relation points at it.  The QB side of the two-way eMedici relation is the
+    one to trust: linking a new QB page bumps only the QB page's
+    last_edited_time, so an incremental refresh never re-fetches the drug page
+    and its own `eMedici` relation stays stale."""
+    out = {}
+    for q in qb_pages:
+        for tid in _relation_ids(q, key):
+            out.setdefault(_norm_id(tid), []).append(q["id"])
+    return out
+
+
+def _emedici_links(page, index, qb_lookup, qb_by_drug):
+    qb_ids = set(qb_by_drug.get(_norm_id(page["id"]), []))
     for anc in _ancestors(page, index):
-        qb_ids |= set(_relation_ids(anc, "eMedici"))
+        qb_ids |= set(qb_by_drug.get(_norm_id(anc["id"]), []))
     out = []
     for qid in qb_ids:
         q = qb_lookup.get(qid) or qb_lookup.get(_norm_id(qid))
@@ -206,12 +219,13 @@ def generate_and_inject(all_pages: List[dict], qb_pages: List[dict]) -> List[dic
     """
     index = build_index(all_pages)
     qb_lookup = _index_by_id(qb_pages)
+    qb_by_drug = _qb_by_target(qb_pages, "Pharmacology")
 
     searchable = [p for p in all_pages if is_for_search(p, index)]
 
     for page in searchable:
         base = base_tags(page, index)
-        links = _emedici_links(page, index, qb_lookup)
+        links = _emedici_links(page, index, qb_lookup, qb_by_drug)
         general = _hierarchy_has_general(page, index)
         leaf = not sub_items(page)
         child_bases = [] if leaf else [bt for c in _children(page, index)

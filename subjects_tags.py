@@ -156,11 +156,25 @@ def rotation_tags(page: dict, index, rotation_lookup: Dict[str, dict]) -> List[s
     return tags
 
 
-def _emedici_links(page: dict, index, qb_lookup: Dict[str, dict]):
+def _qb_by_target(qb_pages: List[dict], key: str) -> Dict[str, List[str]]:
+    """Normalised target page id -> ids of the Question Bank pages whose `key`
+    relation points at it.  The QB side of the two-way eMedici relation is the
+    one to trust: linking a new QB page bumps only the QB page's
+    last_edited_time, so an incremental refresh never re-fetches the target
+    page and its own `eMedici` relation stays stale."""
+    out: Dict[str, List[str]] = {}
+    for q in qb_pages:
+        for tid in _relation_ids(q, key):
+            out.setdefault(_norm_id(tid), []).append(q["id"])
+    return out
+
+
+def _emedici_links(page: dict, index, qb_lookup: Dict[str, dict],
+                   qb_by_subject: Dict[str, List[str]]):
     """(qb_tag, [disease_subtag names]) for the page + all ancestors (Parent eMedici)."""
-    qb_ids = set(_relation_ids(page, "eMedici"))
+    qb_ids = set(qb_by_subject.get(_norm_id(page["id"]), []))
     for anc in _ancestors(page, index):
-        qb_ids |= set(_relation_ids(anc, "eMedici"))
+        qb_ids |= set(qb_by_subject.get(_norm_id(anc["id"]), []))
     out = []
     for qid in qb_ids:
         q = qb_lookup.get(qid) or qb_lookup.get(_norm_id(qid))
@@ -272,6 +286,7 @@ def generate_and_inject(all_pages: List[dict],
     """
     index = build_index(all_pages)
     qb_lookup = _index_by_id(qb_pages)
+    qb_by_subject = _qb_by_target(qb_pages, "Subject")
     rotation_lookup = _index_by_id(rotation_pages)
     alias_memo: Dict[str, str] = {}
 
@@ -280,7 +295,7 @@ def generate_and_inject(all_pages: List[dict],
     for page in leaves:
         base = base_tags(page, index)
         rot = rotation_tags(page, index, rotation_lookup)
-        links = _emedici_links(page, index, qb_lookup)
+        links = _emedici_links(page, index, qb_lookup, qb_by_subject)
         disease = gets_subtags(page, base)
 
         props = page.setdefault("properties", {})

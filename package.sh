@@ -35,6 +35,7 @@ fi
 PY_MODULES=(
   __init__.py
   config.py
+  notion_blocks.py
   notion_cache.py
   cache_generation.py
   cache_updater.py

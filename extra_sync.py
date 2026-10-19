@@ -122,6 +122,49 @@ def _relation_ids_from_subject(subject_page: Dict, relation_prop: str) -> List[s
     return [r.get('id', '').replace('-', '') for r in relation if r.get('id')]
 
 
+def _se_subject_ids(se_page: Dict) -> Set[str]:
+    """Normalised Subjects page IDs an SE/AR page's own Subject relation points at."""
+    return {
+        r.get('id', '').replace('-', '')
+        for r in se_page.get('properties', {}).get('Subject', {}).get('relation', [])
+        if r.get('id')
+    }
+
+
+def _linked_se_ids(
+    subject_page: Dict,
+    relation_prop: str,
+    se_id_index: Dict[str, Dict],
+    all_se_pages: List[Dict],
+) -> List[str]:
+    """
+    SE/AR page IDs linked to a Subjects page.
+
+    The two sides of the relation mirror each other in Notion, but linking from
+    the SE side bumps only the SE page's last_edited_time — the incremental sync
+    never re-fetches the Subjects page, so its own relation goes stale.  The SE
+    side is therefore authoritative: Subjects-side IDs keep their (author-set)
+    order but are dropped if the SE page no longer points back, and SE pages
+    that point at the subject but are missing from its relation are appended.
+    """
+    page_id = subject_page.get('id', '').replace('-', '')
+    back = [
+        p.get('id', '').replace('-', '')
+        for p in all_se_pages
+        if page_id in _se_subject_ids(p)
+    ]
+    back_set = set(back)
+    ids = [
+        rid for rid in _relation_ids_from_subject(subject_page, relation_prop)
+        # IDs missing from the SE cache can't be contradicted — keep them so the
+        # "not found in SE cache" warning below still fires.
+        if rid in back_set or rid not in se_id_index
+    ]
+    seen = set(ids)
+    ids.extend(rid for rid in back if rid not in seen)
+    return ids
+
+
 # ── Tag/subtag matching (fallback path) ──────────────────────────────────────
 
 def _parse_compound_subtag(compound: str) -> List[str]:
@@ -236,7 +279,7 @@ def _entries_for_subject_page(
     entries = []
 
     # ── Primary: relation IDs ─────────────────────────────────────────────────
-    relation_ids = _relation_ids_from_subject(subject_page, relation_prop)
+    relation_ids = _linked_se_ids(subject_page, relation_prop, se_id_index, all_se_pages)
     if relation_ids:
         for rid in relation_ids:
             se_page = se_id_index.get(rid)

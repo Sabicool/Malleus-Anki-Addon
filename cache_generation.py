@@ -33,7 +33,7 @@ except ImportError:
     from .pharmacology_tags import generate_and_inject as _gen_pharmacology
     from .guidelines_tags import generate_and_inject as _gen_guidelines
 
-GENERATOR_VERSION = 1
+GENERATOR_VERSION = 2   # 2: eMedici links read from the Question Bank side
 
 _API_VERSION = "2025-09-03"
 _PAGE_SIZE = 100
