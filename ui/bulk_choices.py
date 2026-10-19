@@ -18,6 +18,23 @@ page_selector.py, so anything shared between them has to live outside that pair.
 """
 from typing import Dict, List, Optional, Tuple
 
+# ── Shared wording for the escape hatches ────────────────────────────────────
+# Every prompt that can interrupt a bulk run offers the same two ways out, in
+# the same place and with the same words, so they do not drift apart again:
+#
+#   Stop       ends the whole run.  Cards already done keep their changes;
+#              Update Subject Tags additionally offers Undo in its summary.
+#   Skip card  declines this one card and moves on - what each dialog's
+#              Cancel already did, just said plainly.
+#
+# Outside a bulk run there is nothing to skip or stop, so the dialogs show an
+# ordinary Cancel instead and neither label is used.
+STOP_LABEL = "Stop"
+STOP_TOOLTIP = ("End the run here.\n"
+                "Cards already updated keep their changes.")
+SKIP_LABEL = "Skip card"
+SKIP_TOOLTIP = "Leave this card alone and move on to the next one."
+
 
 class BulkChoices:
     """The decisions every bulk flow can make: the yield level, and which

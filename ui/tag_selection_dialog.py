@@ -7,7 +7,8 @@ from aqt.qt import (QDialog, QVBoxLayout, QHBoxLayout, QCheckBox,
                     QDialogButtonBox, QFrame)
 from aqt.utils import showInfo
 from typing import List, Tuple, Dict
-from .bulk_choices import ReplaceTagChoices
+from .bulk_choices import (ReplaceTagChoices, STOP_LABEL, STOP_TOOLTIP,
+                           SKIP_LABEL, SKIP_TOOLTIP)
 try:
     from .styles import apply_malleus_style, make_header, make_apply_all_row, COLORS
 except Exception:
@@ -32,22 +33,27 @@ class TagSelectionDialog(QDialog):
     """Dialog for selecting which tags to replace"""
     
     def __init__(self, parent, simplified_tags: List[Dict], note_context: str = None,
-                 remaining: int = 0):
+                 remaining: int = 0, allow_stop: bool = False):
         """
         Args:
             parent: Parent window
             simplified_tags: List of dicts with 'display_name', 'original_tags', 'page_name', 'subtag'
             note_context: Optional context from note's Text field to help user identify the card
             remaining: Cards left in a bulk run after this one.  When > 0 the
-                "remember these choices" row is shown; leave at 0 for
-                single-note callers and the row is hidden entirely.
+                "remember these choices" row is shown and Cancel is relabelled
+                Skip card; leave at 0 for single-note callers and both revert
+                to the plain form.
+            allow_stop: Offer a Stop button that ends the whole run.  Only
+                pass this from a loop that actually honours it.
         """
         super().__init__(parent)
         self.simplified_tags = simplified_tags
         self.note_context = note_context
         self.remaining = remaining
+        self.allow_stop = allow_stop
         self.selected_tags = []
         self._apply_all_cb = None
+        self._stopped = False
         self.setup_ui()
         apply_malleus_style(self)
     
@@ -147,10 +153,20 @@ class TagSelectionDialog(QDialog):
             )
             content_layout.addWidget(apply_all_row)
 
-        # OK and Cancel buttons
+        # OK / Skip card / Stop.  In a bulk run Cancel already meant "leave
+        # this card's tags alone and carry on", so it says that instead.
         buttons = QDialogButtonBox()
         buttons.addButton(QDialogButtonBox.StandardButton.Ok)
-        buttons.addButton(QDialogButtonBox.StandardButton.Cancel)
+        skip_btn = buttons.addButton(QDialogButtonBox.StandardButton.Cancel)
+        if self.remaining > 0:
+            skip_btn.setText(SKIP_LABEL)
+            skip_btn.setToolTip(SKIP_TOOLTIP)
+        if self.allow_stop:
+            stop_btn = QPushButton(STOP_LABEL)
+            stop_btn.setObjectName("danger")
+            stop_btn.setToolTip(STOP_TOOLTIP)
+            stop_btn.clicked.connect(self._on_stop)
+            buttons.addButton(stop_btn, QDialogButtonBox.ButtonRole.DestructiveRole)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         content_layout.addWidget(buttons)
@@ -158,6 +174,15 @@ class TagSelectionDialog(QDialog):
         layout.addWidget(content_widget)
         self.setLayout(layout)
     
+    def _on_stop(self):
+        self._stopped = True
+        self.reject()
+
+    def was_stopped(self) -> bool:
+        """True when the user asked to end the whole run, not just skip this
+        card."""
+        return self._stopped
+
     def select_all(self):
         """Select all checkboxes"""
         for checkbox in self.checkboxes:

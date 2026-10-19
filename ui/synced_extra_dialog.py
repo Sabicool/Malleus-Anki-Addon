@@ -10,6 +10,8 @@ from aqt.qt import (
 from aqt.utils import showInfo
 from typing import List, Dict, Set
 
+from .bulk_choices import STOP_LABEL, STOP_TOOLTIP, SKIP_LABEL, SKIP_TOOLTIP
+
 try:
     from .styles import apply_malleus_style, make_header, make_apply_all_row, COLORS
 except Exception:
@@ -43,8 +45,11 @@ class SyncedExtraSelectionDialog(QDialog):
         existing_se_ids: Set of se_id strings already present in the field
         note_context:    Optional snippet from the note's Text field
         remaining:       Cards left in a bulk run after this one.  When > 0 the
-                         "remember these choices" row is shown; leave at 0 for
-                         single-note callers and the row is hidden entirely.
+                         "remember these choices" row is shown and Cancel is
+                         relabelled Skip card; leave at 0 for single-note
+                         callers and both revert to the plain form.
+        allow_stop:      Offer a Stop button that ends the whole run.  Only
+                         pass this from a loop that actually honours it.
     """
 
     def __init__(
@@ -54,14 +59,17 @@ class SyncedExtraSelectionDialog(QDialog):
         existing_se_ids: Set[str],
         note_context: str = None,
         remaining: int = 0,
+        allow_stop: bool = False,
     ):
         super().__init__(parent)
         self.entries         = entries
         self.existing_se_ids = existing_se_ids
         self.note_context    = note_context
         self.remaining       = remaining
+        self.allow_stop      = allow_stop
         self._selected       = []
         self._cancelled      = False
+        self._stopped        = False
         self._checkboxes     = []
         self._apply_all_cb   = None
         self._setup_ui()
@@ -182,7 +190,12 @@ class SyncedExtraSelectionDialog(QDialog):
 
         select_all_btn   = _make_btn("Select All",   "secondary")
         deselect_all_btn = _make_btn("Deselect All", "secondary")
-        cancel_btn       = _make_btn("Cancel",       "secondary")
+        # In a bulk run Cancel already meant "leave this card's Extra alone
+        # and carry on", so it is relabelled to say that.
+        cancel_btn       = _make_btn(SKIP_LABEL if self.remaining > 0 else "Cancel",
+                                     "secondary")
+        if self.remaining > 0:
+            cancel_btn.setToolTip(SKIP_TOOLTIP)
         ok_btn           = _make_btn("OK",            default=True)
 
         select_all_btn.clicked.connect(self._select_all)
@@ -193,6 +206,11 @@ class SyncedExtraSelectionDialog(QDialog):
         btn_row.addWidget(select_all_btn)
         btn_row.addWidget(deselect_all_btn)
         btn_row.addStretch()
+        if self.allow_stop:
+            stop_btn = _make_btn(STOP_LABEL, "danger")
+            stop_btn.setToolTip(STOP_TOOLTIP)
+            stop_btn.clicked.connect(self._on_stop)
+            btn_row.addWidget(stop_btn)
         btn_row.addWidget(cancel_btn)
         btn_row.addWidget(ok_btn)
 
@@ -228,6 +246,11 @@ class SyncedExtraSelectionDialog(QDialog):
         self._cancelled = True
         self.reject()
 
+    def _on_stop(self):
+        self._stopped = True
+        self._cancelled = True
+        self.reject()
+
     def accept(self):
         self._selected = [entry for cb, entry in self._checkboxes if cb.isChecked()]
         super().accept()
@@ -237,6 +260,11 @@ class SyncedExtraSelectionDialog(QDialog):
 
     def was_cancelled(self) -> bool:
         return self._cancelled
+
+    def was_stopped(self) -> bool:
+        """True when the user asked to end the whole run, not just skip this
+        card.  Implies was_cancelled()."""
+        return self._stopped
 
     def apply_to_all(self) -> bool:
         """True when the user asked for these per-entry choices to be reused

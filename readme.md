@@ -94,6 +94,8 @@ Enter runs **Add Tags** when cards are selected, otherwise **Create Cards**. If 
 
 Across several cards, every prompt that interrupts a run — the yield level, the Synced Extra picker, and the tag-choice list when replacing — carries an **apply to all** tickbox, so you can answer once and let the rest of the batch run through. The choices are forgotten when the run ends, and the summary at the end says how many cards were resolved from them.
 
+Those prompts also offer the same two ways out: **Skip card** leaves that one card alone and moves on, and **Stop** ends the run there. Stopping keeps the cards already done and tells you how far it got — in **Update Malleus Subject Tags**, **Undo** in the summary then puts everything back, tags and synced fields alike.
+
 ### Synced fields
 
 When you tag or create a Subjects or eTG card, the add-on fills two note fields from the Malleus databases:

@@ -12,6 +12,8 @@ BulkChoices object (see bulk_choices.py) and stops calling here.
 """
 from typing import Optional, Tuple
 
+from .bulk_choices import STOP_LABEL, STOP_TOOLTIP, SKIP_LABEL, SKIP_TOOLTIP
+
 try:
     from .styles import apply_malleus_style, make_apply_all_row
 except Exception:
@@ -35,7 +37,9 @@ DEFAULT_YIELD = "High Yield"
 
 
 def prompt_for_yield_selection(parent, note_context: str = None,
-                               remaining: int = 0) -> Tuple[Optional[str], bool]:
+                               remaining: int = 0,
+                               allow_stop: bool = False
+                               ) -> Tuple[Optional[str], bool, bool]:
     """
     Prompt the user to select a yield level for a note that has none.
 
@@ -46,12 +50,15 @@ def prompt_for_yield_selection(parent, note_context: str = None,
         remaining:    Cards left in a bulk run after this one.  When > 0 the
                       "apply to all" row is shown; 0 hides it, which is what a
                       single-note caller wants.
+        allow_stop:   Offer a Stop button that ends the whole run.  Only pass
+                      this from a loop that actually honours it.
 
     Returns:
-        (yield_tag, apply_to_all) — yield_tag is None if cancelled.
+        (yield_tag, apply_to_all, stop).  yield_tag is None when the card was
+        skipped; stop is True when the user asked to end the run.
     """
     from aqt.qt import (QDialog, QVBoxLayout, QLabel, QRadioButton,
-                        QButtonGroup, QDialogButtonBox, QFrame)
+                        QButtonGroup, QDialogButtonBox, QFrame, QPushButton)
 
     dialog = QDialog(parent)
     dialog.setWindowTitle("Select Yield Level")
@@ -114,9 +121,27 @@ def prompt_for_yield_selection(parent, note_context: str = None,
         )
         layout.addWidget(apply_all_row)
 
+    # In a bulk run Cancel already meant "leave this card without a yield and
+    # carry on", so it is relabelled to say that, and Stop is the way out of
+    # the whole run.
+    stopped = {"v": False}
     buttons = QDialogButtonBox()
     buttons.addButton(QDialogButtonBox.StandardButton.Ok)
-    buttons.addButton(QDialogButtonBox.StandardButton.Cancel)
+    skip_btn = buttons.addButton(QDialogButtonBox.StandardButton.Cancel)
+    if remaining > 0:
+        skip_btn.setText(SKIP_LABEL)
+        skip_btn.setToolTip(SKIP_TOOLTIP)
+    if allow_stop:
+        stop_btn = QPushButton(STOP_LABEL)
+        stop_btn.setObjectName("danger")
+        stop_btn.setToolTip(STOP_TOOLTIP)
+
+        def _on_stop():
+            stopped["v"] = True
+            dialog.reject()
+
+        stop_btn.clicked.connect(_on_stop)
+        buttons.addButton(stop_btn, QDialogButtonBox.ButtonRole.DestructiveRole)
     buttons.accepted.connect(dialog.accept)
     buttons.rejected.connect(dialog.reject)
     layout.addWidget(buttons)
@@ -127,6 +152,6 @@ def prompt_for_yield_selection(parent, note_context: str = None,
         apply_all = bool(apply_all_cb and apply_all_cb.isChecked())
         for display_text, (radio, tag_value) in radio_buttons.items():
             if radio.isChecked():
-                return (tag_value, apply_all)
+                return (tag_value, apply_all, False)
 
-    return (None, False)
+    return (None, False, stopped["v"])

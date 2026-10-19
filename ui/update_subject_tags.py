@@ -13,13 +13,15 @@ import re
 from ..config import DATABASE_PROPERTIES, get_database_id
 from ..cache_updater import perform_cache_update
 from ..extra_sync import (
+    ADDITIONAL_RESOURCES_FIELD,
     build_additional_resources_content,
     get_matching_se_entries, get_existing_se_ids_from_field,
     build_field_from_selected_entries, SE_EXTRA_TAG_PREFIX,
     SYNCED_EXTRA_DATABASE_ID, EXTRA_FIELD
 )
 from .synced_extra_dialog import SyncedExtraSelectionDialog
-from .bulk_choices import SubjectTagChoices
+from .bulk_choices import (SubjectTagChoices, STOP_LABEL, STOP_TOOLTIP,
+                           SKIP_LABEL, SKIP_TOOLTIP)
 from .yield_dialog import prompt_for_yield_selection
 from ..tag_utils import parse_tag, normalize_subtag_for_matching, clean_page_name
 from ..suggest_tags import suggest_subject_tags
@@ -48,6 +50,10 @@ except Exception:
     COLORS = {}
 import unicodedata
 
+# Everything a bulk run can change on a note, and so everything Undo has
+# to put back.  Tags are handled separately (note.tags, not a field).
+_UNDO_FIELDS = (EXTRA_FIELD, ADDITIONAL_RESOURCES_FIELD)
+
 class MissingPageDialog(QDialog):
     """Dialog shown when a subject tag's page cannot be found in the cache.
 
@@ -57,15 +63,16 @@ class MissingPageDialog(QDialog):
     page contributes its tags as the replacement."""
 
     def __init__(self, parent, missing_tag: str, note_context: str, notion_cache, config,
-                 remaining: int = 0):
+                 remaining: int = 0, allow_stop: bool = False):
         super().__init__(parent)
         self.missing_tag = missing_tag
         self.note_context = note_context
         self.notion_cache = notion_cache
         self.config = config
         self.remaining = remaining   # cards left in the run; 0 hides the apply-all row
+        self.allow_stop = allow_stop
         self.selections = []   # [(page, subtag_property_name), ...] on 'replace'
-        self.action = None     # 'ignore' or 'replace'
+        self.action = None     # 'ignore', 'replace', 'skip' or 'stop'
         self._apply_all_cb = None
 
         self.parsed_tag = parse_tag(missing_tag)
@@ -248,6 +255,22 @@ class MissingPageDialog(QDialog):
         btn_layout.addWidget(update_db_btn)
 
         btn_layout.addStretch()
+
+        if self.allow_stop:
+            stop_btn = QPushButton(STOP_LABEL)
+            stop_btn.setObjectName("danger")
+            stop_btn.setToolTip(STOP_TOOLTIP)
+            stop_btn.clicked.connect(self.stop_run)
+            btn_layout.addWidget(stop_btn)
+
+        if self.remaining > 0:
+            # Leaving the tag as it is was only reachable by closing the
+            # window, which gave no hint that it was a choice at all.
+            skip_btn = QPushButton(SKIP_LABEL)
+            skip_btn.setObjectName("secondary")
+            skip_btn.setToolTip(SKIP_TOOLTIP + "\nThe tag is left as it is.")
+            skip_btn.clicked.connect(self.skip_card)
+            btn_layout.addWidget(skip_btn)
 
         ignore_btn = QPushButton("Ignore and Remove Tag")
         ignore_btn.setObjectName("danger")
@@ -487,6 +510,16 @@ class MissingPageDialog(QDialog):
         self.action = 'ignore'
         self.accept()
 
+    def skip_card(self):
+        """Leave the tag untouched and move to the next card — what closing
+        the window has always done, now said out loud."""
+        self.action = 'skip'
+        self.reject()
+
+    def stop_run(self):
+        self.action = 'stop'
+        self.reject()
+
     def replace_tag(self):
         checked = [r for r in self._result_rows if r['checkbox'].isChecked()]
         if not checked:
@@ -655,10 +688,12 @@ def get_tags_for_page(page: Dict, raw_subtag: str) -> List[str]:
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
-def _show_update_summary(browser, summary_text, notes, tag_snapshot):
+def _show_update_summary(browser, summary_text, notes, snapshot):
     """
     Show a summary dialog after a bulk subject tag update.
-    Includes an Undo button that restores all affected notes to their pre-update tags.
+
+    Includes an Undo button that puts every affected note back as it was —
+    tags and the two synced fields, since the run rewrites both.
     """
     from aqt.qt import (QDialog, QVBoxLayout, QLabel, QDialogButtonBox,
                         QPushButton, QHBoxLayout)
@@ -694,13 +729,17 @@ def _show_update_summary(browser, summary_text, notes, tag_snapshot):
 
     def do_undo():
         for note in notes:
-            original_tags = tag_snapshot.get(note.id)
-            if original_tags is not None:
-                note.tags = original_tags
-                note.flush()
+            original = snapshot.get(note.id)
+            if original is None:
+                continue
+            note.tags = original['tags']
+            for field, value in original['fields'].items():
+                if field in note:
+                    note[field] = value
+            note.flush()
         browser.model.reset()
         dialog.accept()
-        malleus_tooltip("Undo complete — tags restored")
+        malleus_tooltip("Undo complete — tags and synced fields restored")
 
     undo_btn.clicked.connect(do_undo)
     ok_btn.clicked.connect(dialog.accept)
@@ -765,8 +804,16 @@ def update_subject_tags_for_browser(browser, notion_cache, config):
     total_tags_updated = 0
     total_tags_removed = 0
 
-    # Snapshot tags before any changes for undo support
-    tag_snapshot = {note.id: list(note.tags) for note in notes}
+    # Snapshot everything the run can change, for undo support.  Tags alone
+    # are not enough: the run also rewrites the two synced fields, and an
+    # Undo that left those in place would not actually undo the run.
+    snapshot = {
+        note.id: {
+            'tags': list(note.tags),
+            'fields': {f: note[f] for f in _UNDO_FIELDS if f in note},
+        }
+        for note in notes
+    }
 
     # Every "apply to all" decision for this run lives here, including the
     # missing-page cache that used to be a bare local dict.
@@ -800,6 +847,7 @@ def update_subject_tags_for_browser(browser, notion_cache, config):
         _progress.close()
 
     cancelled = False
+    stopped = False      # user ended the run from a prompt
     notes_processed = 0
 
     for note_index, note in enumerate(notes):
@@ -879,6 +927,7 @@ def update_subject_tags_for_browser(browser, notion_cache, config):
                     dialog = MissingPageDialog(
                         browser, original_tag, note_context, notion_cache, config,
                         remaining=total_notes - note_index - 1,
+                        allow_stop=True,
                     )
                     if dialog.exec():
                         action, selections = dialog.get_result()
@@ -888,12 +937,16 @@ def update_subject_tags_for_browser(browser, notion_cache, config):
                             total_tags_updated += 1
                         else:  # ignore
                             total_tags_removed += 1
+                    elif dialog.action == 'stop':
+                        stopped = True
+                        _progress.show()
+                        break        # abandon this note untouched
                     else:
-                        # Dialog cancelled via X
+                        # Skip card, or the window closed — same thing
                         action, selections = ('cancel', [])
                         if not is_improper:
                             remaining_tags.append(original_tag)
-                        # if improper, drop it — it was a bad tag and the user closed the dialog
+                        # if improper, drop it — it was a bad tag and the user skipped
 
                     # Only cache the result for non-improper tags so the same
                     # user choice can be reused for other legitimate missing
@@ -901,6 +954,10 @@ def update_subject_tags_for_browser(browser, notion_cache, config):
                     if not is_improper and dialog.apply_to_all():
                         choices.page_cache[page_name] = (action, selections)
                     _progress.show()
+
+        if stopped:
+            # Leave this card exactly as it was — nothing is flushed below.
+            break
 
         final_tags = list(set(remaining_tags + new_tags))
 
@@ -913,20 +970,24 @@ def update_subject_tags_for_browser(browser, notion_cache, config):
                 final_tags.append(saved_yield)
             else:
                 _progress.hide()
-                yield_tag, apply_all = prompt_for_yield_selection(
+                yield_tag, apply_all, stop = prompt_for_yield_selection(
                     browser, note_context,
                     remaining=total_notes - note_index - 1,
+                    allow_stop=True,
                 )
+                _progress.show()
+                if stop:
+                    stopped = True
+                    break    # leave this card untouched
                 if yield_tag:
                     final_tags.append(yield_tag)
                     if apply_all:
                         choices.yield_tag = yield_tag
-                _progress.show()
 
         # ── Additional Resources (Synced) — auto-populate ───────────────────
         _additional = build_additional_resources_content(list(final_tags), notion_cache)
-        if _additional and 'Additional Resources (Synced)' in note:
-            note['Additional Resources (Synced)'] = _additional
+        if _additional and ADDITIONAL_RESOURCES_FIELD in note:
+            note[ADDITIONAL_RESOURCES_FIELD] = _additional
 
         # ── Extra (Synced) — selection dialog ────────────────────────────────
         # Silent mode leaves Extra (Synced) content and SE tags entirely
@@ -972,10 +1033,14 @@ def update_subject_tags_for_browser(browser, notion_cache, config):
                 se_dlg = SyncedExtraSelectionDialog(
                     browser, entries, existing_se_ids, note_context=note_context,
                     remaining=total_notes - note_index - 1,
+                    allow_stop=True,
                 )
                 from aqt.qt import QDialog
                 _se_result = se_dlg.exec()
                 _progress.show()
+                if se_dlg.was_stopped():
+                    stopped = True
+                    break    # leave this card untouched
                 if _se_result == QDialog.DialogCode.Accepted:
                     _se_changed = _apply_se_selection(se_dlg.get_selected_entries())
                     if se_dlg.apply_to_all():
@@ -999,9 +1064,15 @@ def update_subject_tags_for_browser(browser, notion_cache, config):
     _progress_finish()
     browser.model.reset()
 
-    if cancelled:
+    # Stopping from a prompt abandons the card that was on screen, so it was
+    # not processed; cancelling from the progress bar happens between cards.
+    if stopped:
+        notes_processed = max(0, notes_processed - 1)
+    halted = cancelled or stopped
+
+    if halted:
         headline = (
-            f"Update Malleus Subject Tags Cancelled\n"
+            f"Update Malleus Subject Tags Stopped\n"
             f"(stopped after {notes_processed} of {total_notes} notes — "
             f"changes already made are kept; use Undo to revert them)\n\n"
         )
@@ -1010,7 +1081,7 @@ def update_subject_tags_for_browser(browser, notion_cache, config):
 
     summary = (
         headline +
-        f"Total notes processed: {notes_processed if cancelled else total_notes}\n"
+        f"Total notes processed: {notes_processed if halted else total_notes}\n"
         f"Notes modified: {notes_modified}\n"
         f"Notes with no subject tags: {notes_with_no_subject_tags}\n"
         f"Tags successfully updated: {total_tags_updated}\n"
@@ -1021,4 +1092,4 @@ def update_subject_tags_for_browser(browser, notion_cache, config):
     if _applied:
         summary += "\n" + "\n".join(_applied) + "\n"
     malleus_tooltip(f"Updated {notes_modified} notes")
-    _show_update_summary(browser, summary, notes, tag_snapshot)
+    _show_update_summary(browser, summary, notes, snapshot)

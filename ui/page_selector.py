@@ -3300,7 +3300,8 @@ class NotionPageSelector(QDialog):
     # ── Extra (Synced) helpers ────────────────────────────────────────────────
 
     def _apply_extra_synced_dialog(self, anki_note, notion_cache, parent_widget=None,
-                                   note_context=None, choices=None, remaining=0):
+                                   note_context=None, choices=None, remaining=0,
+                                   allow_stop=False) -> bool:
         """
         Show the SE selection dialog for Extra (Synced) and update the note in place.
         Does NOT flush the note.
@@ -3309,6 +3310,8 @@ class NotionPageSelector(QDialog):
         left, which turns on the dialog's "remember these choices" row.  Once
         every entry a note matches has a recorded decision, the dialog is
         skipped and the saved selection is applied straight away.
+
+        Returns True when the user asked to stop the whole run.
         """
         from aqt.qt import QDialog
         if parent_widget is None:
@@ -3317,7 +3320,7 @@ class NotionPageSelector(QDialog):
         try:
             current_field = anki_note[EXTRA_FIELD]
         except Exception:
-            return
+            return False
 
         entries = get_matching_se_entries(list(anki_note.tags), notion_cache, SYNCED_EXTRA_DATABASE_ID)
 
@@ -3327,7 +3330,7 @@ class NotionPageSelector(QDialog):
                 anki_note[EXTRA_FIELD] = ""
                 anki_note.tags = [t for t in anki_note.tags
                                   if not t.startswith(SE_EXTRA_TAG_PREFIX)]
-            return
+            return False
 
         existing_se_ids = get_existing_se_ids_from_field(current_field)
 
@@ -3336,7 +3339,7 @@ class NotionPageSelector(QDialog):
             for e in entries
         )
         if all_already_present:
-            return
+            return False
 
         if choices is not None and choices.se_covers(entries):
             # Every entry this note matches already has a recorded decision —
@@ -3346,10 +3349,13 @@ class NotionPageSelector(QDialog):
         else:
             dialog = SyncedExtraSelectionDialog(
                 parent_widget, entries, existing_se_ids, note_context=note_context,
-                remaining=remaining,
+                remaining=remaining, allow_stop=allow_stop,
             )
-            if dialog.exec() != QDialog.DialogCode.Accepted:
-                return
+            accepted = (dialog.exec() == QDialog.DialogCode.Accepted)
+            if dialog.was_stopped():
+                return True
+            if not accepted:
+                return False
             selected = dialog.get_selected_entries()
             if choices is not None and dialog.apply_to_all():
                 choices.se_decisions.update(dialog.get_entry_decisions())
@@ -3360,9 +3366,10 @@ class NotionPageSelector(QDialog):
             if entry.get("tag"):
                 base_tags.append(entry["tag"])
         anki_note.tags = list(set(base_tags))
+        return False
 
     def _schedule_extra_synced(self, anki_note, notion_cache, subjects_db=True,
-                               choices=None, remaining=0):
+                               choices=None, remaining=0, allow_stop=False) -> bool:
         """
         Update both synced fields on a note.
         Does NOT flush the note.
@@ -3370,6 +3377,8 @@ class NotionPageSelector(QDialog):
         choices / remaining are passed straight through to the SE dialog so a
         bulk caller can offer "remember these choices"; a single-note caller
         leaves them alone and the row stays hidden.
+
+        Returns True when the user asked to stop the whole run.
         """
         set_additional_resources_on_note(anki_note, notion_cache)
         if subjects_db:
@@ -3378,13 +3387,15 @@ class NotionPageSelector(QDialog):
                 note_context = anki_note['Text'] or None
             except Exception:
                 pass
-            self._apply_extra_synced_dialog(
+            return self._apply_extra_synced_dialog(
                 anki_note, notion_cache,
                 parent_widget=self,
                 note_context=note_context,
                 choices=choices,
                 remaining=remaining,
+                allow_stop=allow_stop,
             )
+        return False
 
     def _async_update_extra_synced(self, tags):
         """
@@ -3735,6 +3746,7 @@ class NotionPageSelector(QDialog):
 
         # Every "apply to all" decision for this run lives here and dies with it.
         choices = BulkChoices()
+        stopped = False
 
         # ── Apply removal to each note ────────────────────────────────────────
         for note_index, note in enumerate(notes):
@@ -3744,11 +3756,15 @@ class NotionPageSelector(QDialog):
             if tags_to_remove:
                 note.tags = [t for t in current_tags if t not in tags_to_remove]
 
-                self._schedule_extra_synced(
+                stop = self._schedule_extra_synced(
                     note, self.notion_cache,
                     subjects_db=subjects_db_flag,
                     choices=choices, remaining=total_notes - note_index - 1,
+                    allow_stop=True,
                 )
+                if stop:
+                    stopped = True
+                    break        # leave this card untouched
 
                 if not is_add_cards:
                     note.flush()
@@ -3767,7 +3783,8 @@ class NotionPageSelector(QDialog):
 
         # ── Summary ───────────────────────────────────────────────────────────
         if notes_modified == 0:
-            showInfo("No matching tags found on the selected notes.")
+            showInfo("Stopped — no cards were changed." if stopped else
+                     "No matching tags found on the selected notes.")
         else:
             summary = f"Successfully processed {total_notes} note(s)\n"
             summary += f"Modified: {notes_modified} note(s)\n"
@@ -3781,6 +3798,9 @@ class NotionPageSelector(QDialog):
             applied = choices.summary_lines()
             if applied:
                 summary += "\n\n" + "\n".join(applied)
+            if stopped:
+                summary += ("\n\nStopped early — the remaining cards were left "
+                            "untouched.")
             showInfo(summary)
 
     # ── Add tags ──────────────────────────────────────────────────────────────
@@ -3846,6 +3866,7 @@ class NotionPageSelector(QDialog):
 
         # Every "apply to all" decision for this run lives here and dies with it.
         choices = BulkChoices()
+        stopped = False
 
         for note_index, note in enumerate(notes):
             remaining = total_notes - note_index - 1
@@ -3873,11 +3894,14 @@ class NotionPageSelector(QDialog):
                                                    selected_features)
 
             selected_db_names = {r['page'].get('_database_name', '') for r in selected_rows}
-            self._schedule_extra_synced(
+            stop = self._schedule_extra_synced(
                 note, self.notion_cache,
                 subjects_db=bool(selected_db_names & {"Subjects", "eTG"}),
-                choices=choices, remaining=remaining,
+                choices=choices, remaining=remaining, allow_stop=True,
             )
+            if stop:
+                stopped = True
+                break            # leave this card untouched
 
             if not is_add_cards:
                 note.flush()
@@ -3900,6 +3924,8 @@ class NotionPageSelector(QDialog):
             summary += f"Skipped (multiple yields selected): {notes_with_yield_issues} note(s)\n"
         if notes_needing_yield > 0:
             summary += f"Skipped (no yield selected): {notes_needing_yield} note(s)\n"
+        if stopped:
+            summary += "Stopped early — the remaining cards were left untouched.\n"
         applied = choices.summary_lines()
         if applied:
             summary += "\n" + "\n".join(applied) + "\n"
@@ -4032,6 +4058,7 @@ class NotionPageSelector(QDialog):
 
         # Every "apply to all" decision for this run lives here and dies with it.
         choices = ReplaceTagChoices()
+        stopped = False
 
         for note_index, note in enumerate(notes):
             remaining = total_notes - note_index - 1
@@ -4049,9 +4076,12 @@ class NotionPageSelector(QDialog):
                     note_context = None
                     if 'Text' in note:
                         note_context = note['Text']
-                    prompted_yield, apply_all = prompt_for_yield_selection(
-                        self, note_context, remaining=remaining
+                    prompted_yield, apply_all, stop = prompt_for_yield_selection(
+                        self, note_context, remaining=remaining, allow_stop=True
                     )
+                    if stop:
+                        stopped = True
+                        break    # leave this card untouched
                     if prompted_yield is None:
                         notes_skipped += 1
                         continue
@@ -4093,8 +4123,12 @@ class NotionPageSelector(QDialog):
             else:
                 note_context = note['Text'] if 'Text' in note else None
                 dialog = TagSelectionDialog(self, simplified_tags, note_context,
-                                            remaining=remaining)
-                if dialog.exec() == QDialog.DialogCode.Accepted:
+                                            remaining=remaining, allow_stop=True)
+                accepted = (dialog.exec() == QDialog.DialogCode.Accepted)
+                if dialog.was_stopped():
+                    stopped = True
+                    break        # leave this card untouched
+                if accepted:
                     for tag_info in dialog.get_selected_tags():
                         tags_to_replace.extend(tag_info['original_tags'])
                     if dialog.apply_to_all():
@@ -4110,8 +4144,11 @@ class NotionPageSelector(QDialog):
                 note, tags_to_replace, selected_pages,
                 database_name, possible_subtags, user_selected_subtag,
                 all_general, final_yield_tags, is_add_cards,
-                choices=choices, remaining=remaining,
+                choices=choices, remaining=remaining, allow_stop=True,
             )
+            if result == 'stop':
+                stopped = True
+                break
             if result:
                 notes_modified += 1
 
@@ -4132,6 +4169,8 @@ class NotionPageSelector(QDialog):
                 summary += f"Skipped (multiple yields selected): {notes_with_yield_issues} note(s)\n"
             if notes_skipped > 0:
                 summary += f"Skipped (user cancelled): {notes_skipped} note(s)\n"
+            if stopped:
+                summary += "Stopped early — the remaining cards were left untouched.\n"
             # This run has no progress dialog to annotate, so the summary is
             # the one place that can show what "apply to all" resolved.
             applied = choices.summary_lines()
@@ -4141,7 +4180,8 @@ class NotionPageSelector(QDialog):
 
     def _perform_tag_replacement(self, note, tags_to_replace, selected_pages, database_name,
                                  possible_subtags, user_selected_subtag, all_general,
-                                 final_yield_tags, is_add_cards, choices=None, remaining=0):
+                                 final_yield_tags, is_add_cards, choices=None, remaining=0,
+                                 allow_stop=False):
         """
         Perform the actual tag replacement on a note.
 
@@ -4149,7 +4189,9 @@ class NotionPageSelector(QDialog):
         existing tags), extracts new tags via _get_tags_for_page directly (no
         temporary property selector manipulation), then rebuilds the note's tags.
 
-        Returns True on success, False if the user needs to take further action.
+        Returns True on success, False if the user needs to take further
+        action, or the string 'stop' if they ended the run from the Synced
+        Extra prompt.
         """
         from ..tag_utils import (get_subtag_from_tag, get_all_subtags_from_tags,
                                  normalize_subtag_for_matching, get_subtags_with_normalization)
@@ -4231,11 +4273,12 @@ class NotionPageSelector(QDialog):
         note.tags = final_tags
 
         selected_db_names = {p.get('_database_name', '') for p in selected_pages}
-        self._schedule_extra_synced(
+        if self._schedule_extra_synced(
             note, self.notion_cache,
             subjects_db=bool(selected_db_names & {"Subjects", "eTG"}),
-            choices=choices, remaining=remaining,
-        )
+            choices=choices, remaining=remaining, allow_stop=allow_stop,
+        ):
+            return 'stop'
 
         if not is_add_cards:
             note.flush()
