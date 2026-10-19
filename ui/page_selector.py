@@ -12,7 +12,7 @@ from aqt.qt import (QDialog, QVBoxLayout, QHBoxLayout, QComboBox,
 from aqt.browser import Browser
 from aqt.addcards import AddCards
 from aqt.editcurrent import EditCurrent
-from aqt.utils import showInfo
+from aqt.utils import showInfo, showWarning, tooltip
 from ..utils import malleus_tooltip
 from PyQt6.QtGui import QDesktopServices
 import os
@@ -3450,6 +3450,32 @@ class NotionPageSelector(QDialog):
 
     # ── guiAddCards ───────────────────────────────────────────────────────────
 
+    def _resolve_target_deck(self, deck_name):
+        """
+        Find the deck named in config. If there's no exact match, accept a
+        single deck whose last '::' segment matches (the Malleus deck is often
+        nested under a parent), else fall back to the current deck so the user
+        still gets their card rather than a traceback.
+        """
+        decks = mw.col.decks
+        deck = decks.by_name(deck_name)
+        if deck is not None:
+            return deck
+
+        wanted = (deck_name or '').split('::')[-1].strip().casefold()
+        matches = [d for d in decks.all_names_and_ids()
+                   if d.name.split('::')[-1].strip().casefold() == wanted]
+        if len(matches) == 1:
+            return decks.get(matches[0].id)
+
+        deck = decks.current()
+        tooltip(
+            f"Deck \"{deck_name}\" not found, so using \"{deck['name']}\". "
+            "Set deck_name in the add-on config to change this.",
+            period=6000,
+        )
+        return deck
+
     def guiAddCards(self, note):
         collection = mw.col
         print(self.parent())
@@ -3480,16 +3506,18 @@ class NotionPageSelector(QDialog):
                     addCards.editor.loadNote(current_note)
             return
 
-        deck = collection.decks.by_name(note['deckName'])
-        if deck is None:
-            raise Exception('deck was not found: {}'.format(note['deckName']))
-
-        collection.decks.select(deck['id'])
-        savedMid = deck.pop('mid', None)
-
         model = collection.models.by_name(note['modelName'])
         if model is None:
-            raise Exception('model was not found: {}'.format(note['modelName']))
+            showWarning(
+                f"The note type \"{note['modelName']}\" isn't in your collection, "
+                "so the card can't be created.\n\n"
+                "Download or update the Malleus deck to get it, then try again."
+            )
+            return
+
+        deck = self._resolve_target_deck(note['deckName'])
+        collection.decks.select(deck['id'])
+        savedMid = deck.pop('mid', None)
 
         collection.models.set_current(model)
         collection.models.update(model)
