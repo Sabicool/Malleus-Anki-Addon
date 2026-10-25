@@ -59,8 +59,19 @@ ROTATION_TAG_PREFIX = "#Malleus_CM::#Resources_by_Rotation"
 # Note type for new cards when config's note_type isn't in the collection: any
 # single note type starting with NOTE_TYPE_PREFIX is used instead, so a renamed
 # deck release (e.g. an AnkiCollab suffix) still works without a config change.
+# While note_type / deck_name are still these defaults, new cards go to the
+# Malleus note type and deck the user actually has (see _resolve_note_type and
+# _resolve_target_deck): AnkiCollab can only suggest cards in its own deck.
 DEFAULT_NOTE_TYPE = "MalleusCM - Cloze (Malleus Clinical Medicine [AU/NZ] / Stapedius)"
 NOTE_TYPE_PREFIX = "MalleusCM - Cloze"
+DEFAULT_DECK_NAME = "Default"
+
+
+def _malleus_note_type_ids():
+    """{note type id: name} for note types starting with NOTE_TYPE_PREFIX."""
+    prefix = NOTE_TYPE_PREFIX.casefold()
+    return {m.id: m.name for m in mw.col.models.all_names_and_ids()
+            if m.name.strip().casefold().startswith(prefix)}
 
 
 # ── Flow layout (wrapping chip rows) ─────────────────────────────────────────
@@ -659,6 +670,7 @@ from ..config import (DATABASE_PROPERTIES, get_database_id, get_database_name,
                        SUBJECT_DATABASE_ID, PHARMACOLOGY_DATABASE_ID,
                        ROTATION_DATABASE_ID, SUBJECT_DATABASE_ID_ORIGINAL)
 from ..utils import open_browser_with_search
+from .. import deck_setup as ds
 from ..cache_updater import perform_cache_update
 from ..extra_sync import (
     build_additional_resources_content, set_additional_resources_on_note,
@@ -3463,6 +3475,18 @@ class NotionPageSelector(QDialog):
         when several match and the user needs to pick one in config.
         """
         models = mw.col.models
+        if name == DEFAULT_NOTE_TYPE:
+            # Not chosen by the user: use whichever Malleus note type holds the
+            # deck.  After moving to AnkiCollab that's AnkiCollab's, not the
+            # (now empty) AnkiHub one this default names.
+            names = _malleus_note_type_ids()
+            if names:
+                ids = ",".join(str(int(i)) for i in names)
+                counts = dict(mw.col.db.all(
+                    f"select mid, count() from notes where mid in ({ids}) group by mid"))
+                if counts:
+                    return models.get(max(counts, key=counts.get))
+
         model = models.by_name(name)
         if model is not None:
             return model
@@ -3499,6 +3523,11 @@ class NotionPageSelector(QDialog):
         the user still gets their card rather than a traceback.
         """
         decks = mw.col.decks
+        if (deck_name or DEFAULT_DECK_NAME) == DEFAULT_DECK_NAME:
+            deck = self._malleus_home_deck()
+            if deck is not None:
+                return deck
+
         deck = decks.by_name(deck_name)
         if deck is not None:
             return deck
@@ -3522,6 +3551,37 @@ class NotionPageSelector(QDialog):
             period=6000,
         )
         return deck
+
+    @staticmethod
+    def _malleus_home_deck():
+        """The user's Malleus deck, for when deck_name is still the default:
+        AnkiCollab's (it only suggests cards inside its own deck), else the
+        top-level deck holding the most Malleus cards.  None if neither."""
+        decks = mw.col.decks
+        try:
+            did = ds.collab_installed_deck_id(ds.load_settings().get('deck_key', ''))
+        except Exception:
+            did = 0
+        if did:
+            return decks.get(did)
+
+        names = _malleus_note_type_ids()
+        if not names:
+            return None
+        ids = ",".join(str(int(i)) for i in names)
+        per_deck = mw.col.db.all(
+            "select case when c.odid then c.odid else c.did end, count() "
+            f"from cards c join notes n on n.id = c.nid where n.mid in ({ids}) "
+            "group by 1")
+        totals = {}
+        for deck_id, count in per_deck:
+            name = decks.name_if_exists(deck_id)
+            if name:
+                top = name.split('::')[0]
+                totals[top] = totals.get(top, 0) + count
+        if not totals:
+            return None
+        return decks.by_name(max(totals, key=totals.get))
 
     def guiAddCards(self, note):
         collection = mw.col

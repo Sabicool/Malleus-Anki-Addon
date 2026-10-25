@@ -7,7 +7,10 @@ All settings are edited via **Tools → Add-ons → Malleus Clinical Medicine �
 ## `deck_name`
 **Default:** `"Default"`
 
-The name of the deck where new cards are created. Use `::` to specify a subdeck.
+The deck where new cards are created. Left at `"Default"`, new cards go into your
+Malleus deck: the one AnkiCollab keeps (AnkiCollab can only suggest cards inside it),
+or otherwise the deck holding the most Malleus cards. Set a name to choose a different
+deck; use `::` for a subdeck.
 
 ```
 "deck_name": "Pre-Made Decks::Malleus Medicine"
@@ -18,9 +21,11 @@ The name of the deck where new cards are created. Use `::` to specify a subdeck.
 ## `note_type`
 **Default:** `"MalleusCM - Cloze (Malleus Clinical Medicine [AU/NZ] / Stapedius)"`
 
-The note type used for new cards. If it isn't in your collection, the add-on uses the
-only note type whose name starts with `MalleusCM - Cloze`. If you have more than one,
-it asks you to set this to the one you want.
+The note type used for new cards. Left at this default, new cards use whichever Malleus
+note type (name starting `MalleusCM - Cloze`) holds your Malleus notes, so after moving
+from AnkiHub to AnkiCollab they use AnkiCollab's. Set another name to choose. If the
+name you set isn't in your collection, the add-on uses the only note type whose name
+starts with `MalleusCM - Cloze`; if you have more than one, it asks you to pick.
 
 ```
 "note_type": "MalleusCM - Cloze (Malleus Clinical Medicine [AU/NZ] / Stapedius)"
