@@ -1,0 +1,16 @@
+{
+  "enabled": false,
+  "deck_key": "malleus-au-nz",
+  "previous_deck_keys": [
+    "vermont-spaghetti-georgia-black-football-autumn"
+  ],
+  "deck_name": "Malleus Clinical Medicine",
+  "ankihub_deck_ids": [
+    "5a1160ef-6f41-4d8c-948b-f72275ef0ff7"
+  ],
+  "old_deck_names": [
+    "Malleus Clinical Medicine (AU/NZ)",
+    "Malleus Clinical Medicine"
+  ],
+  "prompt_new_users": true
+}

@@ -300,6 +300,14 @@ malleus_add_card_action = QAction("Malleus Find/Add Cards", mw)
 malleus_add_card_action.triggered.connect(show_page_selector)
 mw.form.menuTools.addAction(malleus_add_card_action)
 
+# Getting the Malleus deck through AnkiCollab (and off AnkiHub)
+from .ui.deck_setup_wizard import open_wizard, on_profile_open as deck_setup_on_profile_open
+deck_setup_action = QAction("Malleus Deck Setup (AnkiCollab)...", mw)
+deck_setup_action.triggered.connect(lambda: open_wizard())
+mw.form.menuTools.addAction(deck_setup_action)
+from aqt.gui_hooks import profile_did_open
+profile_did_open.append(deck_setup_on_profile_open)
+
 # Register all hooks
 browser_menus_did_init.append(setup_browser_menu)
 browser_will_show.append(on_browser_setup)
