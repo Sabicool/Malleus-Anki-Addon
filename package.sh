@@ -13,10 +13,20 @@
 #   NOTION_TOKEN=...   the read token to embed (else read from .env)
 #   INCLUDE_CACHE=1    also ship the cache/ seeds (off by default; the add-on
 #                      downloads fresh caches from GitHub on first run anyway)
+#   TESTER=1           build the maintainers' test build instead: the deck
+#                      setup wizard is switched on in code, and the result is
+#                      an .ankiaddon (double-click to install) that installs
+#                      over the AnkiWeb copy and is replaced by the next
+#                      AnkiWeb update
 set -euo pipefail
 
 ADDON_DIR="$(cd "$(dirname "$0")" && pwd)"
-OUTPUT="$ADDON_DIR/malleus-anki-addon.zip"
+ANKIWEB_ID=620451841
+if [ "${TESTER:-0}" = "1" ]; then
+  OUTPUT="$ADDON_DIR/malleus-anki-addon-tester.ankiaddon"
+else
+  OUTPUT="$ADDON_DIR/malleus-anki-addon.zip"
+fi
 STAGING="$(mktemp -d)"
 trap 'rm -rf "$STAGING"' EXIT
 
@@ -35,6 +45,7 @@ fi
 PY_MODULES=(
   __init__.py
   config.py
+  deck_setup.py
   notion_blocks.py
   notion_cache.py
   cache_generation.py
@@ -93,6 +104,24 @@ if not inserted:                       # fallback: prepend if anchor not found
 open(path, "w", encoding="utf-8").write("".join(out))
 print("Injected NOTION_TOKEN into packaged config.py")
 PY
+
+# ── Test build: wizard on, plus a manifest for installing from file ──────────
+if [ "${TESTER:-0}" = "1" ]; then
+  python3 - "$STAGING/deck_setup.py" <<'PY'
+import sys
+path = sys.argv[1]
+src = open(path, encoding="utf-8").read()
+if "TESTER_BUILD = False" not in src:
+    sys.exit("ERROR: TESTER_BUILD = False not found in deck_setup.py")
+open(path, "w", encoding="utf-8").write(src.replace("TESTER_BUILD = False", "TESTER_BUILD = True", 1))
+print("Switched the deck setup wizard on (TESTER_BUILD = True)")
+PY
+  # "package" makes it install into the AnkiWeb add-on's folder; "mod" is the
+  # build time, so the later AnkiWeb release counts as a newer version.
+  cat > "$STAGING/manifest.json" <<JSON
+{"package": "$ANKIWEB_ID", "name": "Malleus Anki Helper (test build)", "mod": $(date +%s)}
+JSON
+fi
 
 # ── Zip (files at the archive root, as AnkiWeb expects) ───────────────────────
 rm -f "$OUTPUT"
