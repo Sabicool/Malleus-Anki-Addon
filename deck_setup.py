@@ -415,6 +415,39 @@ def has_malleus_notes() -> bool:
     return bool(mw.col.db.scalar(f"select 1 from notes where mid in ({ids}) limit 1"))
 
 
+# Shared content that would otherwise clutter the editor and flood searches.
+# AnkiHub's note type shipped these collapsed and excluded from unqualified
+# searches; AnkiCollab's doesn't, and replaces local field settings whenever
+# the maintainers change the field list, so this is reapplied at startup.
+SYNCED_FIELDS = ("Extra (Synced)", "Additional Resources (Synced)")
+
+
+def fix_synced_field_options() -> int:
+    """Collapse the synced fields and exclude them from unqualified searches
+    on every Malleus note type.  Returns how many note types changed.
+
+    Field options aren't a schema change, so this syncs normally (no full
+    upload)."""
+    wanted = {name.lower() for name in SYNCED_FIELDS}
+    changed = 0
+    for entry in mw.col.models.all_names_and_ids():
+        if not entry.name.lower().startswith("malleuscm"):
+            continue
+        nt = mw.col.models.get(entry.id)
+        dirty = False
+        for fld in nt["flds"]:
+            if fld["name"].lower() not in wanted:
+                continue
+            for key in ("collapsed", "excludeFromSearch"):
+                if not fld.get(key):
+                    fld[key] = True
+                    dirty = True
+        if dirty:
+            mw.col.models.update_dict(nt)
+            changed += 1
+    return changed
+
+
 def old_malleus_decks(settings: dict, ankihub_decks: list) -> list:
     """Top-level deck ids holding a pre-AnkiCollab copy of Malleus."""
     dids = []

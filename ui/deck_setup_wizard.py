@@ -732,6 +732,10 @@ class DeckSetupWizard(QDialog):
                 if line in self.summary:
                     self.summary.remove(line)
             self.aside_dids = [d for d in self.aside_dids if d not in reclaimed]
+        try:
+            ds.fix_synced_field_options()
+        except Exception as e:
+            print(f"Malleus: couldn't set the synced fields' options: {e}")
         name = mw.col.decks.name(did) if did else "Malleus"
         self.summary.append(f"Downloaded Malleus into “{name}”")
         self.next()
@@ -1069,6 +1073,13 @@ def on_profile_open():
         print(f"Malleus: couldn't move the AnkiCollab subscription to the new key: {e}")
 
     def check():
+        # Whether or not the wizard is switched on: AnkiCollab's startup
+        # update may have just reset the synced fields' options.
+        try:
+            if mw.col:
+                ds.fix_synced_field_options()
+        except Exception as e:
+            print(f"Malleus: couldn't set the synced fields' options: {e}")
         try:
             startup_check()
         except Exception as e:
