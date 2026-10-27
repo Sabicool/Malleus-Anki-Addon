@@ -29,6 +29,7 @@ changed) without shipping an add-on update.
 import importlib
 import json
 import os
+import re
 import threading
 import time
 from typing import Optional
@@ -476,6 +477,46 @@ def set_deck_aside(did) -> str:
         n += 1
     mw.col.decks.rename(did, name)
     return name
+
+
+DEFAULT_PRESET_ID = 1
+
+
+def copy_deck_options(old_did, new_did) -> int:
+    """Put the new deck tree on the options presets the old one used, so
+    limits, FSRS and the rest carry over.  A subdeck takes the preset of the
+    old subdeck at the same path, or else the old top-level deck's.  Only
+    decks still on Default change, so a choice the user has made since is
+    kept.  The preset is shared rather than duplicated, and AnkiCollab never
+    sets a deck's preset, so this survives its updates.  Returns how many
+    decks changed."""
+    old_top = mw.col.decks.name(old_did)
+    new_top = mw.col.decks.name(new_did)
+    old_presets = {}
+    for did in mw.col.decks.deck_and_child_ids(old_did):
+        deck = mw.col.decks.get(did)
+        if not deck.get("dyn"):
+            old_presets[deck["name"][len(old_top):]] = deck["conf"]
+    fallback = old_presets.get("", DEFAULT_PRESET_ID)
+
+    changed = 0
+    for did in mw.col.decks.deck_and_child_ids(new_did):
+        deck = mw.col.decks.get(did)
+        if deck.get("dyn") or deck["conf"] != DEFAULT_PRESET_ID:
+            continue
+        preset = old_presets.get(deck["name"][len(new_top):], fallback)
+        if preset != DEFAULT_PRESET_ID and mw.col.decks.get_config(preset):
+            deck["conf"] = preset
+            mw.col.decks.save(deck)
+            changed += 1
+    return changed
+
+
+def old_copy_decks() -> list:
+    """Top-level decks set_deck_aside renamed and the user hasn't deleted."""
+    pattern = re.compile(r" \(old copy(?: \d+)?\)$")
+    return [d.id for d in mw.col.decks.all_names_and_ids()
+            if "::" not in d.name and pattern.search(d.name)]
 
 
 def deck_card_count(did) -> int:

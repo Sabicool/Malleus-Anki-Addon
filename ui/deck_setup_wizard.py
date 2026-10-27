@@ -738,6 +738,14 @@ class DeckSetupWizard(QDialog):
             print(f"Malleus: couldn't set the synced fields' options: {e}")
         name = mw.col.decks.name(did) if did else "Malleus"
         self.summary.append(f"Downloaded Malleus into “{name}”")
+        if did:
+            try:
+                if any(ds.copy_deck_options(d, did) for d in self.aside_dids
+                       if mw.col.decks.get(d, default=False)):
+                    self.summary.append("Gave the new deck your old deck's options")
+                ds.update_state(deck_options_copied=True)
+            except Exception as e:
+                print(f"Malleus: couldn't copy the old deck's options: {e}")
         self.next()
 
     # Save to AnkiWeb --------------------------------------------------------
@@ -1080,6 +1088,17 @@ def on_profile_open():
                 ds.fix_synced_field_options()
         except Exception as e:
             print(f"Malleus: couldn't set the synced fields' options: {e}")
+        # Once, for anyone who set up AnkiCollab before the wizard copied
+        # the old deck's options across.
+        try:
+            if mw.col and not ds.get_state().get("deck_options_copied"):
+                did = ds.collab_installed_deck_id(ds.load_settings().get("deck_key", ""))
+                if did:
+                    for old in ds.old_copy_decks():
+                        ds.copy_deck_options(old, did)
+                    ds.update_state(deck_options_copied=True)
+        except Exception as e:
+            print(f"Malleus: couldn't copy the old deck's options: {e}")
         try:
             startup_check()
         except Exception as e:
