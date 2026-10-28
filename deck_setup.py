@@ -44,9 +44,10 @@ REMOTE_SETTINGS_URL = (
     "https://raw.githubusercontent.com/Sabicool/Malleus-Anki-Addon/main/ankicollab.json"
 )
 
-# Used until the first download of ankicollab.json succeeds.
+# Used until the first download of ankicollab.json succeeds, so someone
+# whose network blocks GitHub still gets the setup.
 DEFAULT_SETTINGS = {
-    "enabled": False,
+    "enabled": True,
     "deck_key": "malleus-au-nz",
     # Keys the deck had before a rename.  A subscription saved under one of
     # these is moved to deck_key (same deck, so AnkiCollab updates in place).
