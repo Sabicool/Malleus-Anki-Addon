@@ -673,7 +673,8 @@ from ..utils import open_browser_with_search
 from .. import deck_setup as ds
 from ..cache_updater import perform_cache_update
 from ..extra_sync import (
-    build_additional_resources_content, set_additional_resources_on_note,
+    ADDITIONAL_RESOURCES_FIELD, sync_additional_resources, replace_ar_tags,
+    set_additional_resources_on_note,
     get_matching_se_entries, get_existing_se_ids_from_field,
     build_field_from_selected_entries, SE_EXTRA_TAG_PREFIX,
     SYNCED_EXTRA_DATABASE_ID, EXTRA_FIELD
@@ -3430,10 +3431,14 @@ class NotionPageSelector(QDialog):
             note = ac.editor.note
             changed = False
 
-            additional = build_additional_resources_content(tags, self.notion_cache)
-            if additional and 'Additional Resources (Synced)' in note:
-                note['Additional Resources (Synced)'] = additional
-                changed = True
+            if ADDITIONAL_RESOURCES_FIELD in note:
+                current_ar = note[ADDITIONAL_RESOURCES_FIELD]
+                new_ar, ar_tags = sync_additional_resources(current_ar, tags, self.notion_cache)
+                new_tags = replace_ar_tags(note.tags, ar_tags)
+                if new_ar != current_ar or set(new_tags) != set(note.tags):
+                    note[ADDITIONAL_RESOURCES_FIELD] = new_ar
+                    note.tags = new_tags
+                    changed = True
 
             entries = get_matching_se_entries(tags, self.notion_cache, SYNCED_EXTRA_DATABASE_ID)
             if entries:

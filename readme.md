@@ -103,6 +103,8 @@ When you tag or create a Subjects or eTG card, the add-on fills two note fields 
 -   **Extra (Synced):** you choose which extra notes to include in a short dialog.
 -   **Additional Resources (Synced):** filled in automatically.
 
+Each synced entry also tags the note, under `#Malleus_CM::#Card_Feature::Synced::Extra::` or `#Malleus_CM::#Card_Feature::Synced::Additional_Resources::`, so you can find every card that carries it.
+
 ### Browser tools
 
 Right-click selected cards in the Browser for:

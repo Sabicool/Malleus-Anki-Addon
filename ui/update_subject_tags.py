@@ -14,7 +14,7 @@ from ..config import DATABASE_PROPERTIES, get_database_id
 from ..cache_updater import perform_cache_update
 from ..extra_sync import (
     ADDITIONAL_RESOURCES_FIELD,
-    build_additional_resources_content,
+    sync_additional_resources, replace_ar_tags,
     get_matching_se_entries, get_existing_se_ids_from_field,
     build_field_from_selected_entries, SE_EXTRA_TAG_PREFIX,
     SYNCED_EXTRA_DATABASE_ID, EXTRA_FIELD
@@ -985,9 +985,17 @@ def update_subject_tags_for_browser(browser, notion_cache, config):
                         choices.yield_tag = yield_tag
 
         # ── Additional Resources (Synced) — auto-populate ───────────────────
-        _additional = build_additional_resources_content(list(final_tags), notion_cache)
-        if _additional and ADDITIONAL_RESOURCES_FIELD in note:
-            note[ADDITIONAL_RESOURCES_FIELD] = _additional
+        # Synced content with no matching entries left is cleared; hand-written
+        # content in the field is never touched.
+        _ar_changed = False
+        if ADDITIONAL_RESOURCES_FIELD in note:
+            _current_ar = note[ADDITIONAL_RESOURCES_FIELD]
+            _new_ar, _ar_tags = sync_additional_resources(
+                _current_ar, list(final_tags), notion_cache)
+            final_tags = replace_ar_tags(final_tags, _ar_tags)
+            if _new_ar != _current_ar:
+                note[ADDITIONAL_RESOURCES_FIELD] = _new_ar
+                _ar_changed = True
 
         # ── Extra (Synced) — selection dialog ────────────────────────────────
         # Silent mode leaves Extra (Synced) content and SE tags entirely
@@ -1056,7 +1064,7 @@ def update_subject_tags_for_browser(browser, notion_cache, config):
                 pass
             final_tags = [t for t in final_tags if not t.startswith(SE_EXTRA_TAG_PREFIX)]
 
-        if set(final_tags) != set(current_tags) or _additional or _se_changed:
+        if set(final_tags) != set(current_tags) or _ar_changed or _se_changed:
             note.tags = final_tags
             note.flush()
             notes_modified += 1

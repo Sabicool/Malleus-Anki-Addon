@@ -11,7 +11,8 @@ Both databases share the same schema:
   - Subtag   (select)    → e.g. "Clinical Features"
   - Content  (rich_text) → fallback HTML/text (block body is preferred)
   - ID       (unique_id) → stable numeric ID for deduplication
-  - Tag      (formula)   → Anki tag to attach when entry is selected (Extra only)
+  - Tag      (formula)   → Anki tag to attach when entry is selected (Extra only;
+                           AR tags are generated from the Name — make_ar_tag)
 
 Lookup strategy (fastest first)
 --------------------------------
@@ -42,6 +43,10 @@ ADDITIONAL_RESOURCES_FIELD = "Additional Resources (Synced)"
 
 # Prefix used by all SE Anki tags — used to strip/add them cleanly
 SE_EXTRA_TAG_PREFIX = "#Malleus_CM::#Card_Feature::Synced::Extra::"
+
+# Prefix used by all AR Anki tags.  The AR database has no Tag formula, so the
+# addon builds these from the entry name itself (see make_ar_tag).
+AR_TAG_PREFIX = "#Malleus_CM::#Card_Feature::Synced::Additional_Resources::"
 
 # Relation property names on the Subjects pages that point to SE/AR entries.
 # Confirmed present via probe_relations.py — update here if Notion renames them.
@@ -236,13 +241,13 @@ def _page_to_entry(page: Dict) -> Optional[Dict]:
         return None
     se_id_raw = props.get('ID', {}).get('unique_id', {})
     se_id_str = str(se_id_raw.get('number', '')) if se_id_raw else ''
-    try:
-        title_list = props.get('Name', {}).get('title', [])
-        title = title_list[0]['text']['content'] if title_list else 'Untitled'
-    except Exception:
-        title = 'Untitled'
+    # Join every title segment — Notion splits a name like
+    # "Table: Meningitis: CSF analysis" into "Table: " + "Meningitis: CSF analysis".
+    name = ''.join(s.get('plain_text', '') for s in props.get('Name', {}).get('title', []))
+    title = name.strip() or 'Untitled'
     tag_val = props.get('Tag', {}).get('formula', {}).get('string', '')
-    return {'title': title, 'content': content, 'se_id': se_id_str, 'tag': tag_val}
+    return {'title': title, 'name': name, 'content': content, 'se_id': se_id_str,
+            'tag': tag_val}
 
 
 # ── Field helpers ─────────────────────────────────────────────────────────────
@@ -365,33 +370,36 @@ def get_matching_se_entries(
 
 # ── Public: auto-build for Additional Resources (Synced) ─────────────────────
 
-def _build_synced_content(
+def _synced_entries(
     tags: List[str],
     notion_cache,
     database_id: str,
     relation_prop: str,
     label: str,
-) -> str:
+) -> Optional[List[Dict]]:
     """
-    Auto-populate builder used for fields that don't show a selection dialog
+    Auto-populate lookup used for fields that don't show a selection dialog
     (currently Additional Resources (Synced)).
 
-    Uses the same primary/fallback strategy as get_matching_se_entries.
+    Uses the same primary/fallback strategy as get_matching_se_entries, and
+    deduplicates by se_id (or by content for entries without one).  Returns
+    None when the cache can't be read, so callers can tell "no entries" apart
+    from "don't know".
     """
     subject_tags = [t for t in tags if t.startswith("#Malleus_CM::#Subjects::")]
     if not subject_tags:
-        return ""
+        return []
 
     se_pages = _load_db_cache(notion_cache, database_id)
     if not se_pages:
         print(f"[ExtraSync] {label} cache is empty — run 'Update Database Cache'")
-        return ""
+        return None
 
     se_id_index     = _build_id_index(se_pages)
     seen_se_ids     = set()
     seen_content    = set()
     seen_page_names = set()
-    parts           = []
+    results         = []
 
     for tag in subject_tags:
         parsed = parse_tag(tag)
@@ -423,31 +431,80 @@ def _build_synced_content(
                     continue
                 seen_content.add(content)
 
-            marker = f'<!-- se:{se_id} -->' if se_id else ''
-            parts.append(marker + content)
+            results.append(entry)
 
-    return "<br>\n".join(parts)
+    return results
 
 
-def build_additional_resources_content(tags: List[str], notion_cache) -> str:
-    """Build content for 'Additional Resources (Synced)' field (auto, no dialog)."""
-    return _build_synced_content(
+def make_ar_tag(name: str) -> str:
+    """
+    Card-feature tag for an AR entry, built the way the SE database's Tag
+    formula builds SE tags (spaces → underscores), minus the stray trailing
+    underscore that formula leaves on names ending in a space.
+    """
+    return AR_TAG_PREFIX + re.sub(r'\s+', '_', name.strip())
+
+
+def replace_ar_tags(tags: List[str], ar_tags: List[str]) -> List[str]:
+    """Return tags with every existing AR tag swapped for ar_tags."""
+    return list(set([t for t in tags if not t.startswith(AR_TAG_PREFIX)] + list(ar_tags)))
+
+
+def is_synced_additional_resources(field_html: str, tags: List[str]) -> bool:
+    """
+    True when an 'Additional Resources (Synced)' field holds synced content
+    rather than something written by hand: the field carries <!-- se:N -->
+    markers, or the note carries an AR tag (fields synced before the markers
+    existed got theirs from the one-off tests/backfill_ar_tags.py pass).
+    """
+    return (bool(get_existing_se_ids_from_field(field_html))
+            or any(t.startswith(AR_TAG_PREFIX) for t in tags))
+
+
+def sync_additional_resources(field_html: str, tags: List[str],
+                              notion_cache) -> Tuple[str, List[str]]:
+    """
+    Work out 'Additional Resources (Synced)' (auto, no dialog) from a note's
+    tags.  Returns the new field content and the note's AR tags, to be swapped
+    in with replace_ar_tags.
+
+    With no matching entries the field is emptied only when it holds synced
+    content; hand-written content is left alone.  If the cache can't be read
+    nothing changes, rather than treating that as "no entries".
+    """
+    unchanged = (field_html, [t for t in tags if t.startswith(AR_TAG_PREFIX)])
+    entries = _synced_entries(
         tags, notion_cache,
         SYNCED_ADDITIONAL_RESOURCES_DATABASE_ID,
         SUBJECTS_AR_RELATION_PROP,
         "Synced Additional Resources",
     )
+    if entries is None:
+        return unchanged
+    if entries:
+        ar_tags = sorted({make_ar_tag(e['name']) for e in entries if e['name'].strip()})
+        return build_field_from_selected_entries(entries), ar_tags
+    if is_synced_additional_resources(field_html, tags):
+        return '', []
+    return unchanged
 
 
 def set_additional_resources_on_note(anki_note, notion_cache) -> bool:
-    """Set anki_note['Additional Resources (Synced)'] from its current .tags."""
+    """Set anki_note['Additional Resources (Synced)'] and its AR tags from its
+    current .tags."""
     try:
         _ = anki_note[ADDITIONAL_RESOURCES_FIELD]
     except Exception:
         print(f"[ExtraSync] Field '{ADDITIONAL_RESOURCES_FIELD}' not found — skipping")
         return False
-    new_content = build_additional_resources_content(list(anki_note.tags), notion_cache)
-    if anki_note[ADDITIONAL_RESOURCES_FIELD] == new_content:
-        return False
-    anki_note[ADDITIONAL_RESOURCES_FIELD] = new_content
-    return True
+    new_content, ar_tags = sync_additional_resources(
+        anki_note[ADDITIONAL_RESOURCES_FIELD], list(anki_note.tags), notion_cache)
+    new_tags = replace_ar_tags(anki_note.tags, ar_tags)
+    changed = False
+    if anki_note[ADDITIONAL_RESOURCES_FIELD] != new_content:
+        anki_note[ADDITIONAL_RESOURCES_FIELD] = new_content
+        changed = True
+    if set(new_tags) != set(anki_note.tags):
+        anki_note.tags = new_tags
+        changed = True
+    return changed
